@@ -1,0 +1,67 @@
+# >>> scaffold-hackathon-repo >>>
+# Product repo: may become public at any time. Nothing secret is ever committed:
+# when in doubt, add the pattern here first. Commit a .env.example with empty values.
+
+# --- Secrets & credentials (never commit, no exceptions) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.asc
+*.gpg
+id_rsa*
+id_ed25519*
+*.keystore
+secrets/
+credentials/
+*credentials*.json
+*secret*
+!*secret*.example
+
+# --- Wallets & mnemonics (chain-specific key material goes in its own block) ---
+*.mnemonic
+*mnemonic*
+*.wallet
+wallets/
+keystore/
+
+# --- Local agent and editor state ---
+.superpowers/
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/*.local.*
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Build, dependency and test output ---
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
+.venv/
+*.log
+coverage/
+test-results/
+.cache/
+# <<< scaffold-hackathon-repo <<<
+
+# >>> solana >>>
+# Solana key material and local state. Anchor writes a program's keypair, which controls its
+# deploy address, to target/deploy/<name>-keypair.json; the CLI's default wallet is id.json.
+target/
+*-keypair.json
+*keypair*.json
+id.json
+test-ledger/
+.anchor/
+.surfpool/
+# <<< solana <<<
