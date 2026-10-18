@@ -4,3 +4,7 @@
 # Git-for-Windows default, core.autocrlf=true -- breaks them under bash.
 * text=auto eol=lf
 # <<< scaffold-hackathon-repo <<<
+
+# Binary brand assets: never normalise line endings in these.
+*.png binary
+*.ico binary
