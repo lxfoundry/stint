@@ -27,8 +27,11 @@ browser.
 
 - **The seller can never receive more than the elapsed time** (with a minimum duration, set in
   the session's terms, which only the seller can waive) at the session's rate.
-- **The buyer's unused remainder always returns to the account it came from.** The payout maths
-  is enforced by the program.
+- **The buyer's unused remainder always returns to the account it came from,** as long as the
+  buyer keeps that account. The payout maths is enforced by the program. Once the paid time has
+  ended, nothing unused is left, only a residual: a rounding remainder, zero for exact deposits,
+  plus any tokens sent to the vault by mistake. If the buyer has closed its refund account by then,
+  that residual goes to the seller (section 4.3).
 - **The buyer can end a session without the seller's gate:** through the facilitator, which
   sponsors the fee, or on-chain with its own SOL. After the session ends, settling it needs
   nobody's cooperation: anyone may do it.
@@ -89,7 +92,7 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
   - A token is identified by its **mint** account, which records supply, decimals, mint authority
     and freeze authority.
   - Balances live in **token accounts**. A holder can have any number of them for one mint; one of
-    them is its associated token account (S7). Each records its mint, its `owner` (the wallet or
+    them may be its associated token account (S7). Each records its mint, its `owner` (the wallet or
     PDA that controls the tokens), its amount, an optional delegate and its state.
   - The token account's owner *program* is SPL Token. Its `owner` *field* is a different thing.
   - Tokens can be received only into an existing token account for the right mint.
@@ -120,8 +123,8 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
     PDAs.
   - It is a deposit, not a fee: it is released when the account is closed, to whichever account
     the closer names (S12), not necessarily to whoever funded it. *Used in 4.1, 4.3, 5.3, 6.3, 6.5, 9.1.*
-- **S12. A token account with a zero balance can be closed by its `owner`** (or its close
-  authority), unless it is frozen (S10).
+- **S12. Closing an account releases its deposit.** A token account with a zero balance can be
+  closed by its `owner` (or its close authority), unless it is frozen (S10).
   - Its whole SOL deposit goes to whichever account the closer names, whoever paid for it.
   - From the next transaction on, the address is empty: no data, no lamports, owned by the System
     program. Passed to an instruction in that state, it arrives as an empty System account.
@@ -132,7 +135,7 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
   - A program closes its own accounts by moving their lamports out. A PDA closed this way can be
     initialized again at the same address.
 
-  *Used in 4.1, 4.3, 5.3, 6.3, 6.4, 11.*
+  *Used in 4.1, 4.3, 5.3, 6.3, 11.*
 
 **Transactions and time**
 
@@ -159,7 +162,7 @@ For readers who know EVM chains, the main differences:
 |---|---|---|
 | Token code | One contract per token | A shared token program: SPL Token, or Token-2022, which this specification does not support (S4) |
 | Token identity | The contract address | The mint address (S4, S5) |
-| A holder's balance | A slot in the token contract's storage | One or more token accounts per holder and mint, one of them the associated token account (S4, S7) |
+| A holder's balance | A slot in the token contract's storage | Any number of token accounts per holder and mint, one of which may be the associated token account (S4, S7) |
 | Receiving | Possible unless the token blocks the address | Needs a token account for that mint (S4, S7) |
 | Storage cost | Gas, paid once; clearing a slot refunds only part of it | A deposit held in the account, released on close to the account the closer names (S11, S12) |
 | Which accounts are used | The contract looks them up (`msg.sender`, mappings) | The caller passes them in; the program must check them (S2) |
@@ -400,7 +403,9 @@ instruction that credits it succeed or fail together.
 - **Checks:** the account checks of section 4.1.
 - **Effects:**
   1. transfers `owed - claimed` to `receiver_token`;
-  2. transfers the vault's remaining balance to `refund_to`;
+  2. transfers the vault's remaining balance (the residual) to `refund_to`. From `paid_until` on,
+     if `refund_to` no longer exists (it arrives as an empty System account: S12), the residual
+     goes to `receiver_token` instead and is reported as `redirected`;
   3. closes the vault and the session, returning their lamports to `rent_payer`.
 - Emits `Closed`.
 
@@ -413,8 +418,16 @@ the whole close (S13).
   The facilitator therefore recreates a closed `receiver_token` only because the seller is
   accountable through its API key, which each recreation counts against. It never recreates a
   `refund_to` (section 5.3).
-- An `AtExpiry` close usually owes `refund_to` nothing, so it settles even when the buyer has closed
-  that account.
+- **After the paid time, a missing refund account never blocks a close.** From `paid_until` on,
+  the residual owed to a `refund_to` that no longer exists goes to `receiver_token` (effect 2).
+  - By then the deposit has been charged in full, so the residual is only the rounding remainder
+    (zero when deposits are exact multiples of the rate, as the facilitator requires) plus tokens
+    sent to the vault by mistake.
+  - Without this rule, a buyer could close its refund account, send one base unit to the vault,
+    and leave the session unclosable. Its rent would stay locked, and the seller's earnings
+    unpaid.
+  - Before `paid_until`, a close that owes tokens to a missing `refund_to` still fails, since the
+    unused time belongs to the buyer.
 - Frozen accounts are covered in section 4.6.
 
 In Anchor, `receiver_token` and `refund_to` are therefore declared as mutable unchecked accounts
@@ -433,7 +446,7 @@ refunded.
 | `Opened` | `session`, `authority`, `rate`, `min_seconds`, `max_seconds`, `deposited`, `started_at`, `paid_until` |
 | `ToppedUp` | `session`, `added`, `deposited`, `paid_until` |
 | `Claimed` | `session`, `amount`, `claimed` |
-| `Closed` | `session`, `kind`, `owed`, `refunded`, `closed_by`, `at` |
+| `Closed` | `session`, `kind`, `owed`, `refunded`, `redirected`, `closed_by`, `at` |
 
 ### 4.5 Errors
 
@@ -658,8 +671,8 @@ Servers MUST derive the payer from the signed transaction, not from the response
 - `paymentRequirements`: the gate's offer for the session's terms, with `amount: "0"` (a close
   deposits nothing), `extra.action: "close"` and `extra.session` set.
 
-The gate takes `paid` and `refunded` from the `Closed` event in the confirmed transaction
-(`owed` and `refunded`).
+The gate takes `paid` and `refunded` from the `Closed` event in the confirmed transaction:
+`paid` is `owed + redirected`, and `refunded` is `refunded`.
 
 **Payment flow.** `elapsed` declares `escrow`: open is the first settlement (the deposit), close is
 the second (the final charge and the refund). Unlike a single-request escrow flow, the second
@@ -734,15 +747,14 @@ whose `paid_until` has passed, and closes them with `close(AtExpiry)`, the rent 
 `closer`:
 - the rent returns to the facilitator;
 - the receiver is paid;
-- the buyer gets any rounding remainder.
+- the buyer gets any residual, or the receiver does if the buyer has closed its refund account
+  (section 4.3).
 
 If the receiver is owed tokens and `receiver_token` has been closed, it recreates that account in
-the same transaction (S7). It never recreates `refund_to` (section 5.3): a session whose closed
-refund account is still owed tokens is skipped and reported. Its rent stays locked until the buyer
-recreates the account, and it keeps counting against the API key the open came through (section
-5.3). That bounds how much rent such sessions can lock, even when seller and buyer are the same
-party. Recreating the account instead would hand its deposit to whoever closes it next (S12). A
-close that fails because an account is frozen (S10) is retried with an increasing back-off.
+the same transaction (S7). It never recreates `refund_to` (section 5.3), and never needs to: after
+`paid_until`, a residual owed to a closed refund account goes to the receiver (section 4.3). Every
+expired session therefore closes, and its rent comes back. A close that fails because an account
+is frozen (S10) is retried with an increasing back-off.
 
 It runs on one elected instance, or on all of them tolerating duplicates: a second close finds the
 account gone and is skipped.
@@ -842,7 +854,7 @@ not a connection is live.
 | A top-up seen on the account | Move the end timer | — |
 | End timer fires | Re-read the session at `confirmed`. If `paid_until` moved, reset the timer. Otherwise stop forwarding and close. On `NotExpired`, re-read: if `paid_until` moved (a top-up landed), resume forwarding and reset the timer; if not (the chain's clock is behind), retry. Once the close is confirmed, drop connections (`4402`) | `AtExpiry` |
 | Account closed by another party | Drop connections (`4410`) | — |
-| A close fails because the buyer's `refund_to` is closed and still owed tokens | Do not retry: the session settles with `AtExpiry`, which usually owes `refund_to` nothing | — |
+| A close before `paid_until` fails because the buyer's `refund_to` is closed and owed tokens | Do not retry. The session settles at expiry with `AtExpiry`, which pays any residual to the receiver (section 4.3) | — |
 | The session ends, whatever the cause | `teardown(reason)`, once; unsubscribe | — |
 
 - **Clocks.** The gate's timers run on an injectable clock: the wall clock in production, the
@@ -1161,7 +1173,7 @@ Facilitator checks:
 | Close | Gate unreachable | Sponsored close through the facilitator | Unused time above the minimum refunded |
 | Close | Gate and facilitator unreachable | Unilateral close if the authority holds SOL; otherwise the session runs to expiry | With SOL: unused time refunded. Without: the deposit is spent in full |
 | Close | The seller closed its `receiver_token` (S12) | The close transaction recreates it (S7), counted against the seller's API key | Unaffected |
-| Close | The buyer closed its `refund_to` | Closes that owe it tokens fail until the buyer recreates it; otherwise the session settles at expiry, when it is usually owed nothing | Unused time is charged unless the buyer recreates the account |
+| Close | The buyer closed its `refund_to` (S12) | Before `paid_until`, closes that owe it tokens fail (`409`) until the buyer recreates it. Otherwise the session settles at expiry, and any residual goes to the receiver | Unused time is charged unless the buyer recreates the account. The residual at expiry (zero for exact deposits) goes to the seller |
 | Close | The mint's freeze authority freezes a payout account that is owed tokens, or the vault itself (S10) | Closes, and for a frozen vault claims too, fail until it is thawed (S13) | Held in the vault |
 | Crash | The agent stops with a session open | On restart, closed via the store or a chain lookup; otherwise at expiry | Bounded by the deposit |
 
@@ -1172,7 +1184,7 @@ maths.
 
 | Layer | Tooling | Coverage |
 |---|---|---|
-| Program | LiteSVM, with clock control | The maths, including property tests: `claimed ≤ owed ≤ deposited` always, `claimed ≤ earned` while the clock never steps back, and every token that entered the vault leaves it exactly once (`owed + refund = deposited + uncredited`). Every signer on every instruction, before and after `paid_until`. Every `close` kind: `AtExpiry` before and after `paid_until`, `WaiveMinimum` by each signer, a waiver after a claim. Account substitution on every instruction (S2, S6: a vault that is not the canonical one, payout accounts other than the derived ones, another rent payer; `receiver` or `refund_owner` equal to the session). Zero transfers skipped with a missing destination. A clock that steps back. Funding by a preceding transfer. Top-up refused after expiry. Rent return. Events |
+| Program | LiteSVM, with clock control | The maths, including property tests: `claimed ≤ owed ≤ deposited` always, `claimed ≤ earned` while the clock never steps back, and every token that entered the vault leaves it exactly once (`owed + refunded + redirected = deposited + uncredited`). Every signer on every instruction, before and after `paid_until`. Every `close` kind: `AtExpiry` before and after `paid_until`, `WaiveMinimum` by each signer, a waiver after a claim. Account substitution on every instruction (S2, S6: a vault that is not the canonical one, payout accounts other than the derived ones, another rent payer; `receiver` or `refund_owner` equal to the session). Zero transfers skipped with a missing destination. A residual redirected to the receiver when `refund_to` is closed, at and after `paid_until` but never before. A clock that steps back. Funding by a preceding transfer. Top-up refused after expiry. Rent return. Events |
 | Scheme | Unit tests | Offer construction, payload parsing, every refusal reason, byte-for-byte echo, number encoding |
 | Facilitator | Surfpool (cloning the devnet USDC mint and the Subscriptions program), with Kora | Every action in both funding modes; fee-payer and rent-payer isolation; the sponsored close, including `GET /close` for a client without node access; recreating a closed `receiver_token`, and never a `refund_to`; limits per API key; rent round trip; the sweeper; `settlement_pending` |
 | Gate | Unit tests, plus a fake upstream and an injected clock | Tokens, close codes, policies, the lifecycle table of section 7.3, assertions, the JWKS, events, timers, restart recovery |
@@ -1213,6 +1225,7 @@ reaction), unless stated otherwise.
 | 18 | *(with `--facilitator`)* Fee payer or rent payer in a forbidden position | Refused (`payer_misuse`) |
 | 19 | *(with `--facilitator`)* `/verify` of a valid open | No change on-chain |
 | 20 | A session opened directly on-chain with the gate's terms but another mint (S5) | `403` on connect; not adopted |
+| 21 | The buyer closes its refund account and sends one base unit to the vault, then the session expires | Closed at expiry; the residual goes to the receiver; the rent returns to the rent payer |
 
 ## 13. Not built
 
