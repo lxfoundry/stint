@@ -322,7 +322,9 @@ refund     = vault.amount - owed                      at close
 receiver. `refund` includes the rounding remainder (`deposited mod rate`) and any tokens that reached the
 vault without being credited.
 
-`claim` never pays the minimum: it pays `earned`. So `claimed ≤ earned ≤ due` at every close,
+`claim` never pays the minimum: it pays `earned - claimed`. Both are running totals since
+`started_at`: `earned` is everything earned so far, `claimed` everything already paid out, so each
+claim pays only what was earned since the last one. So `claimed ≤ earned ≤ due` at every close,
 including one that waives the minimum.
 
 `earned` only grows while the chain's clock does. The runtime keeps that clock from moving
