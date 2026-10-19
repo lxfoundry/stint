@@ -72,21 +72,25 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
 - **S1. Programs hold no state; accounts do.** Every account has an address, a SOL balance in
   lamports, a data field and an owner program. Only the owner program can change the data or take
   lamports out. *Used in 4.1.*
-- **S2. The caller passes in every account an instruction touches.** A program cannot look an
-  account up by itself. It must check each account it receives: its address, its owner program and
-  its contents. An instruction that accepts a different account than intended (account
-  substitution) is the most common flaw in Solana programs. *Used in 4.1, 12.*
+- **S2. The caller passes in every account an instruction touches,** apart from sysvars such as
+  the clock, which a program can read directly. A program cannot look any other account up by
+  itself. It must check each account it receives: its address, its owner program and its contents.
+  An instruction that accepts a different account than intended (account substitution) is a common
+  flaw in Solana programs. *Used in 4.1, 12.*
 - **S3. A program-derived address (PDA)** is computed from seeds and a program ID and has no
   private key. Only that program can sign for it. *Used in 4.1.*
 
 **Tokens**
 
-- **S4. One program, SPL Token, serves every token.**
+- **S4. Tokens are run by a shared token program, not one contract per token.** This
+  specification supports only SPL Token mints (section 3.4). A second program, Token-2022, adds
+  extensions that change several facts below (permanent delegates, transfer fees and hooks,
+  required memos).
   - A token is identified by its **mint** account, which records supply, decimals, mint authority
     and freeze authority.
-  - Balances live in **token accounts**, one per holder and mint. Each records its mint, its
-    `owner` (the wallet or PDA that controls the tokens), its amount, an optional delegate and its
-    state.
+  - Balances live in **token accounts**. A holder can have any number of them for one mint; one of
+    them is its associated token account (S7). Each records its mint, its `owner` (the wallet or
+    PDA that controls the tokens), its amount, an optional delegate and its state.
   - The token account's owner *program* is SPL Token. Its `owner` *field* is a different thing.
   - Tokens can be received only into an existing token account for the right mint.
 
@@ -97,8 +101,8 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
 - **S6. Anyone can create a token account for any owner.** The creator pays and names the owner,
   who does not sign. A token account whose `owner` is a given wallet or PDA therefore proves
   nothing about who created it or why. *Used in 4.1, 12.*
-- **S7. The associated token account (ATA)** of a wallet for a mint lives at an address derived
-  from (wallet, token program, mint). It is unique and predictable. Anyone can create it, and the
+- **S7. The associated token account (ATA)** of a wallet (or of a PDA) for a mint lives at an
+  address derived from (wallet, token program, mint). It is unique and predictable. Anyone can create it, and the
   idempotent create instruction succeeds if it already exists. Creating it requires knowing the
   wallet. *Used in 4.1, 4.3, 5.3, 6.4, 10.1, 11.*
 - **S8. A token account has at most one delegate,** allowed to move tokens up to an approved
@@ -110,20 +114,25 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
 
 **Rent, opening and closing**
 
-- **S11. An account must hold a minimum SOL balance proportional to its size** (rent exemption).
-  The balance is paid by whoever creates the account, who signs for it. It is a deposit, not a fee:
-  it comes back when the account is closed. *Used in 4.1, 4.3, 5.3, 6.3, 6.5, 9.1.*
+- **S11. An account must hold a minimum SOL balance that grows with its size** (rent exemption):
+  `(128 + size) × lamports_per_byte` (section 6.3).
+  - It is funded by whoever creates the account: a key that signs, or a program for one of its
+    PDAs.
+  - It is a deposit, not a fee: it is released when the account is closed, to whichever account
+    the closer names (S12), not necessarily to whoever funded it. *Used in 4.1, 4.3, 5.3, 6.3, 6.5, 9.1.*
 - **S12. A token account with a zero balance can be closed by its `owner`** (or its close
-  authority).
+  authority), unless it is frozen (S10).
   - Its whole SOL deposit goes to whichever account the closer names, whoever paid for it.
-  - Afterwards the address is empty: no data, no lamports, owned by the System program. Passed
-    to an instruction in that state, it arrives as an empty System account. The account can be
-    created again at the same address.
-  - Wallets routinely close empty token accounts to reclaim the deposit, so a payout destination
-    may not exist when a payout happens.
-  - A program closes its own accounts by moving their lamports out.
+  - From the next transaction on, the address is empty: no data, no lamports, owned by the System
+    program. Passed to an instruction in that state, it arrives as an empty System account.
+  - It can be created again at the same address: by anyone for an associated token account (S7);
+    for an account at a keypair's address, only by that key's holder.
+  - Wallets often offer to close empty token accounts to reclaim the deposit, so a payout
+    destination may not exist when a payout happens.
+  - A program closes its own accounts by moving their lamports out. A PDA closed this way can be
+    initialized again at the same address.
 
-  *Used in 4.1, 4.3, 5.3, 6.3, 11.*
+  *Used in 4.1, 4.3, 5.3, 6.3, 6.4, 11.*
 
 **Transactions and time**
 
@@ -148,13 +157,13 @@ For readers who know EVM chains, the main differences:
 
 | | EVM (ERC-20) | Solana (SPL Token) |
 |---|---|---|
-| Token code | One contract per token | One shared program for every token (S4) |
+| Token code | One contract per token | A shared token program: SPL Token, or Token-2022, which this specification does not support (S4) |
 | Token identity | The contract address | The mint address (S4, S5) |
-| A holder's balance | A slot in the token contract's storage | A separate token account per holder and mint (S4) |
-| Receiving | Always possible | Needs a token account for that mint (S4, S7) |
-| Storage cost | Gas, paid once, not refunded | A deposit held in the account, which goes to whoever closes it (S11, S12) |
+| A holder's balance | A slot in the token contract's storage | One or more token accounts per holder and mint, one of them the associated token account (S4, S7) |
+| Receiving | Possible unless the token blocks the address | Needs a token account for that mint (S4, S7) |
+| Storage cost | Gas, paid once; clearing a slot refunds only part of it | A deposit held in the account, released on close to the account the closer names (S11, S12) |
 | Which accounts are used | The contract looks them up (`msg.sender`, mappings) | The caller passes them in; the program must check them (S2) |
-| Freezing | Only if the token implements it (USDC's blacklist) | Built in, through the mint's freeze authority (S10) |
+| Freezing | Only if the token implements it (USDC's blacklist) | Built in, if the mint has a freeze authority (S10) |
 | Paying someone else's fees | A relayer or a paymaster | A different first signer: the fee payer (S14) |
 
 ## 3. Architecture
@@ -395,13 +404,15 @@ instruction that credits it succeed or fail together.
   3. closes the vault and the session, returning their lamports to `rent_payer`.
 - Emits `Closed`.
 
-**A transfer of zero is skipped, and its destination need not exist.** Payout accounts can be
-closed by their owners at any time (S12), and one failed transfer would fail the whole close
-(S13).
+**A transfer of zero is skipped, and its destination need not exist.** Payout accounts belong to
+other parties, who can empty and close them at any time (S12), and one failed transfer would fail
+the whole close (S13).
 - A destination that is owed tokens must exist (S4). If it has been closed, the close fails until
   someone recreates it (S7).
-- The facilitator recreates a closed `receiver_token` (section 5.3), but never a `refund_to`,
-  because whoever closes a recreated account keeps its deposit (S12).
+- Whoever closes a recreated account keeps its deposit (S12), whichever payout account it is.
+  The facilitator therefore recreates a closed `receiver_token` only because the seller is
+  accountable through its API key, which each recreation counts against. It never recreates a
+  `refund_to` (section 5.3).
 - An `AtExpiry` close usually owes `refund_to` nothing, so it settles even when the buyer has closed
   that account.
 - Frozen accounts are covered in section 4.6.
@@ -441,9 +452,13 @@ refunded.
   key is the allowance's delegate. If it is compromised, it can pull up to the period's cap to any
   destination, not only point refunds elsewhere. The cap and the delegation's expiry bound that
   exposure.
-- **Frozen accounts.** USDC's mint has a freeze authority (S10). If it freezes `receiver_token` or
-  `refund_to`, the payout to that account fails, and with it the close (S13). The session cannot
-  close until the account is thawed, and the funds stay in the vault meanwhile.
+- **Frozen accounts.** USDC's mint has a freeze authority (S10).
+  - If it freezes `receiver_token` or `refund_to`, a close that owes that account tokens fails
+    (S13) until the account is thawed. A close that owes it nothing still settles.
+  - If it freezes the vault itself, no `claim` or `close` can move tokens out until the vault is
+    thawed.
+
+  In both cases the funds stay in the vault meanwhile.
 - **Upgrades:** the program is upgradeable on devnet, built verifiably. Before any mainnet
   deployment, its upgrade authority MUST move to a multisig or be revoked.
 
@@ -724,7 +739,9 @@ whose `paid_until` has passed, and closes them with `close(AtExpiry)`, the rent 
 If the receiver is owed tokens and `receiver_token` has been closed, it recreates that account in
 the same transaction (S7). It never recreates `refund_to` (section 5.3): a session whose closed
 refund account is still owed tokens is skipped and reported. Its rent stays locked until the buyer
-recreates the account. The buyer caused that, so it does not count against the seller's limits. A
+recreates the account, and it keeps counting against the API key the open came through (section
+5.3). That bounds how much rent such sessions can lock, even when seller and buyer are the same
+party. Recreating the account instead would hand its deposit to whoever closes it next (S12). A
 close that fails because an account is frozen (S10) is retried with an increasing back-off.
 
 It runs on one elected instance, or on all of them tolerating duplicates: a second close finds the
@@ -832,7 +849,8 @@ not a connection is live.
   test network's clock in tests. The chain's clock decides every amount and can differ from the
   gate's (S15); `AtExpiry` makes an early gate harmless.
 - **Restarts.** On start, the gate lists the open sessions whose `receiver_authorizer` is its key
-  (a program-account query filtered on that field) and restores their timers.
+  (a program-account query filtered on that field), keeps those that pass check 4 of section 7.2
+  (the mint included), and restores their timers.
 - **The gate never writes into the resource's data stream.** Clients learn the remaining time from
   `paidUntil` and the status endpoint.
 - **One live connection per session** by default, configurable. A connection over the limit
@@ -1144,7 +1162,7 @@ Facilitator checks:
 | Close | Gate and facilitator unreachable | Unilateral close if the authority holds SOL; otherwise the session runs to expiry | With SOL: unused time refunded. Without: the deposit is spent in full |
 | Close | The seller closed its `receiver_token` (S12) | The close transaction recreates it (S7), counted against the seller's API key | Unaffected |
 | Close | The buyer closed its `refund_to` | Closes that owe it tokens fail until the buyer recreates it; otherwise the session settles at expiry, when it is usually owed nothing | Unused time is charged unless the buyer recreates the account |
-| Close | A payout account is frozen by the mint's freeze authority (S10) | `close` fails until it is thawed (S13) | Held in the vault |
+| Close | The mint's freeze authority freezes a payout account that is owed tokens, or the vault itself (S10) | Closes, and for a frozen vault claims too, fail until it is thawed (S13) | Held in the vault |
 | Crash | The agent stops with a session open | On restart, closed via the store or a chain lookup; otherwise at expiry | Bounded by the deposit |
 
 Funds are only ever in the buyer's account, in a session's vault, or paid out by the program's
