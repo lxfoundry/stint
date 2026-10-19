@@ -22,7 +22,7 @@ The specs in `docs/specs/` are the reference once written. These facts are settl
     the programs the scheme needs. The agent holds only USDC.
 - **On-chain program:** holds each session's escrow.
   - Release is by the clock, from open until close or expiry, whether or not the buyer is
-    connected. There is no buyer signature after open.
+    connected. Releasing funds needs no buyer signature after open.
   - On close, the remainder is refunded to the account the funds came from, which is recorded at
     open and not assumed to be the signer.
   - It accepts any token transfer into the session vault in the same transaction as the open,
@@ -51,15 +51,14 @@ The specs in `docs/specs/` are the reference once written. These facts are settl
 - `docs/specs/`: specs.
 - `docs/plans/`: implementation plans.
 
-Code layout: TBD, set by the first spec.
+Code layout: section 3.3 of `docs/specs/stint-system.md`.
 
 ## Toolchain
 
-TBD in detail (versions, build, test and run commands), set by the first spec. The defaults, from
-the `solana-dev` skill, apply unless a spec says otherwise:
-- **The program:** Rust, Anchor or Pinocchio.
-- **Clients:** TypeScript with `@solana/kit` plugin clients, generated with Codama.
-- **Local network and tests:** Surfpool, LiteSVM or Mollusk.
+Named in section 3.5 of `docs/specs/stint-system.md`: Anchor, Codama clients for `@solana/kit`,
+TypeScript on Node.js, LiteSVM and Surfpool, version 0 transactions. Exact versions, the package
+manager, the test runner and the build, test and run commands are pinned by the implementation
+plan, and recorded here once set.
 
 ## Rules
 
