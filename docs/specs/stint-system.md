@@ -383,9 +383,11 @@ instruction that credits it succeed or fail together.
   - the account checks of section 4.1;
   - `now < paid_until`: a session that has run out cannot be extended, so a buyer never pays for
     a gap;
-  - the newly arrived amount `vault.amount - (deposited - claimed)` is greater than 0;
-  - the new `deposited ≤ rate × max_seconds`.
-- **Effects:** adds the newly arrived amount to `deposited`.
+  - `vault.amount + claimed > deposited`: tokens have arrived since the last credit;
+  - `vault.amount + claimed ≤ rate × max_seconds`.
+- **Effects:** `deposited = vault.amount + claimed`. Only claims take tokens out of an open
+  session's vault, so this adds exactly the newly arrived amount, `vault.amount - (deposited -
+  claimed)`.
 - Emits `ToppedUp`.
 
 **`claim()`**
