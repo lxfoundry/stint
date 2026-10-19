@@ -137,6 +137,9 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
     destination may not exist when a payout happens.
   - A program closes its own accounts by moving their lamports out. A PDA closed this way can be
     initialized again at the same address.
+  - Until then it cannot: creating an account fails (`AccountAlreadyInUse`) while its address holds
+    data or belongs to a program. Anchor's `init` relies on this; only `init_if_needed` accepts an
+    account that already exists.
 
   *Used in 4.1, 4.3, 5.3, 6.3, 11.*
 
@@ -354,6 +357,10 @@ instruction that credits it succeed or fail together.
   - `refund_owner` (the wallet the funding comes from);
   - token and system programs.
 - **Checks:**
+  - no session exists at the address. `session` is created with `init`, never `init_if_needed`, so
+    an open at the address of a live session fails and leaves it untouched (S12): a seed already
+    in use costs the client a retry with a fresh one, never a reset of that session's `claimed` or
+    `deposited`;
   - `rate > 0`;
   - `0 < min_seconds ≤ max_seconds`;
   - `receiver` and `refund_owner` are not the session itself. Otherwise a payout account would be
