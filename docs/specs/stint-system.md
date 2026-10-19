@@ -26,12 +26,14 @@ browser.
 ### Guarantees
 
 - **The seller can never receive more than the elapsed time** (with a minimum duration, set in
-  the session's terms, which only the seller can waive) at the session's rate.
+  the session's terms, which only the seller can waive) at the session's rate. The one addition is
+  the residual described next, if the buyer has closed its refund account (section 4.3).
 - **The buyer's unused remainder always returns to the account it came from,** as long as the
   buyer keeps that account. The payout maths is enforced by the program. Once the paid time has
-  ended, nothing unused is left, only a residual: a rounding remainder, zero for exact deposits,
-  plus any tokens sent to the vault by mistake. If the buyer has closed its refund account by then,
-  that residual goes to the seller (section 4.3).
+  ended, nothing unused is left, only a residual: a rounding remainder plus any tokens sent to the
+  vault by mistake. Both are zero when only exact payments (multiples of the rate) reached the
+  vault, as with the facilitator. If the buyer has closed its refund account by then, that
+  residual goes to the seller (section 4.3).
 - **The buyer can end a session without the seller's gate:** through the facilitator, which
   sponsors the fee, or on-chain with its own SOL. After the session ends, settling it needs
   nobody's cooperation: anyone may do it.
@@ -126,8 +128,9 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
 - **S12. Closing an account releases its deposit.** A token account with a zero balance can be
   closed by its `owner` (or its close authority), unless it is frozen (S10).
   - Its whole SOL deposit goes to whichever account the closer names, whoever paid for it.
-  - From the next transaction on, the address is empty: no data, no lamports, owned by the System
-    program. Passed to an instruction in that state, it arrives as an empty System account.
+  - From the next transaction on, the address is empty: no data, owned by the System program. It
+    has no lamports either, but anyone can send it some, and it then stays a System-owned account
+    with no data. Passed to an instruction, it arrives as such a System account.
   - It can be created again at the same address: by anyone for an associated token account (S7);
     for an account at a keypair's address, only by that key's holder.
   - Wallets often offer to close empty token accounts to reclaim the deposit, so a payout
@@ -404,8 +407,11 @@ instruction that credits it succeed or fail together.
 - **Effects:**
   1. transfers `owed - claimed` to `receiver_token`;
   2. transfers the vault's remaining balance (the residual) to `refund_to`. From `paid_until` on,
-     if `refund_to` no longer exists (it arrives as an empty System account: S12), the residual
-     goes to `receiver_token` instead and is reported as `redirected`;
+     if `refund_to` no longer exists, the residual goes to `receiver_token` instead and is
+     reported as `redirected`. "No longer exists" means **owned by the System program**, whatever
+     its lamports (S12). A balance check would not do: anyone can send lamports to the address,
+     which would block the redirect and leave the session unclosable. The address can only ever
+     hold an SPL Token account or a System-owned one (S7), so this check is complete;
   3. closes the vault and the session, returning their lamports to `rent_payer`.
 - Emits `Closed`.
 
@@ -421,8 +427,8 @@ the whole close (S13).
 - **After the paid time, a missing refund account never blocks a close.** From `paid_until` on,
   the residual owed to a `refund_to` that no longer exists goes to `receiver_token` (effect 2).
   - By then the deposit has been charged in full, so the residual is only the rounding remainder
-    (zero when deposits are exact multiples of the rate, as the facilitator requires) plus tokens
-    sent to the vault by mistake.
+    plus tokens sent to the vault by mistake. Both are zero when only exact payments (multiples
+    of the rate, as the facilitator requires) reached the vault.
   - Without this rule, a buyer could close its refund account, send one base unit to the vault,
     and leave the session unclosable. Its rent would stay locked, and the seller's earnings
     unpaid.
@@ -432,8 +438,8 @@ the whole close (S13).
 
 In Anchor, `receiver_token` and `refund_to` are therefore declared as mutable unchecked accounts
 with an `address` constraint on the derived associated token account, not as typed token accounts.
-A closed account arrives as an empty System account (S12), which a typed token account would
-reject. SPL Token validates the destination whenever the amount is not zero.
+A closed account arrives as a System-owned account with no data (S12), which a typed token account
+would reject. SPL Token validates the destination whenever the amount is not zero.
 
 ### 4.4 Events
 
@@ -709,7 +715,7 @@ One endpoint for buyers, without an API key:
 | Endpoint | Behaviour |
 |---|---|
 | `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, programId}`, current at the time of the request. With `?session=<address>`, also the session's stored fields |
-| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `{success, transaction, paid, refunded}` |
+| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `{success, transaction, paid, refunded}`, with `paid` = `owed + redirected` from the `Closed` event, as for the gate |
 
 Both are rate-limited per session and per client address. `GET` serves a blockhash cached for a few
 seconds, so unauthenticated requests do not each reach the node.
@@ -1173,7 +1179,7 @@ Facilitator checks:
 | Close | Gate unreachable | Sponsored close through the facilitator | Unused time above the minimum refunded |
 | Close | Gate and facilitator unreachable | Unilateral close if the authority holds SOL; otherwise the session runs to expiry | With SOL: unused time refunded. Without: the deposit is spent in full |
 | Close | The seller closed its `receiver_token` (S12) | The close transaction recreates it (S7), counted against the seller's API key | Unaffected |
-| Close | The buyer closed its `refund_to` (S12) | Before `paid_until`, closes that owe it tokens fail (`409`) until the buyer recreates it. Otherwise the session settles at expiry, and any residual goes to the receiver | Unused time is charged unless the buyer recreates the account. The residual at expiry (zero for exact deposits) goes to the seller |
+| Close | The buyer closed its `refund_to` (S12) | Before `paid_until`, closes that owe it tokens fail (`409`) until the buyer recreates it. Otherwise the session settles at expiry, and any residual goes to the receiver | Unused time is charged unless the buyer recreates the account. The residual at expiry (zero when only exact payments reached the vault) goes to the seller |
 | Close | The mint's freeze authority freezes a payout account that is owed tokens, or the vault itself (S10) | Closes, and for a frozen vault claims too, fail until it is thawed (S13) | Held in the vault |
 | Crash | The agent stops with a session open | On restart, closed via the store or a chain lookup; otherwise at expiry | Bounded by the deposit |
 
@@ -1184,7 +1190,7 @@ maths.
 
 | Layer | Tooling | Coverage |
 |---|---|---|
-| Program | LiteSVM, with clock control | The maths, including property tests: `claimed ≤ owed ≤ deposited` always, `claimed ≤ earned` while the clock never steps back, and every token that entered the vault leaves it exactly once (`owed + refunded + redirected = deposited + uncredited`). Every signer on every instruction, before and after `paid_until`. Every `close` kind: `AtExpiry` before and after `paid_until`, `WaiveMinimum` by each signer, a waiver after a claim. Account substitution on every instruction (S2, S6: a vault that is not the canonical one, payout accounts other than the derived ones, another rent payer; `receiver` or `refund_owner` equal to the session). Zero transfers skipped with a missing destination. A residual redirected to the receiver when `refund_to` is closed, at and after `paid_until` but never before. A clock that steps back. Funding by a preceding transfer. Top-up refused after expiry. Rent return. Events |
+| Program | LiteSVM, with clock control | The maths, including property tests: `claimed ≤ owed ≤ deposited` always, `claimed ≤ earned` while the clock never steps back, and every token that entered the vault leaves it exactly once (`owed + refunded + redirected = deposited + uncredited`). Every signer on every instruction, before and after `paid_until`. Every `close` kind: `AtExpiry` before and after `paid_until`, `WaiveMinimum` by each signer, a waiver after a claim. Account substitution on every instruction (S2, S6: a vault that is not the canonical one, payout accounts other than the derived ones, another rent payer; `receiver` or `refund_owner` equal to the session). Zero transfers skipped with a missing destination. A residual redirected to the receiver when `refund_to` is closed, at and after `paid_until` but never before, including when someone has sent lamports to the closed address. A clock that steps back. Funding by a preceding transfer. Top-up refused after expiry. Rent return. Events |
 | Scheme | Unit tests | Offer construction, payload parsing, every refusal reason, byte-for-byte echo, number encoding |
 | Facilitator | Surfpool (cloning the devnet USDC mint and the Subscriptions program), with Kora | Every action in both funding modes; fee-payer and rent-payer isolation; the sponsored close, including `GET /close` for a client without node access; recreating a closed `receiver_token`, and never a `refund_to`; limits per API key; rent round trip; the sweeper; `settlement_pending` |
 | Gate | Unit tests, plus a fake upstream and an injected clock | Tokens, close codes, policies, the lifecycle table of section 7.3, assertions, the JWKS, events, timers, restart recovery |
