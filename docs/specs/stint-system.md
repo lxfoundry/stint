@@ -46,7 +46,9 @@ browser.
 Everyone shares **one deployed Stint program**, the **`elapsed` scheme specification**, and a
 **conformance suite** that checks any implementation of a gate, facilitator or client.
 
-## 2. Terms
+## 2. Terms and Solana background
+
+### 2.1 Terms
 
 | Term | Meaning |
 |---|---|
@@ -59,6 +61,101 @@ Everyone shares **one deployed Stint program**, the **`elapsed` scheme specifica
 | **Gate** | The seller's component in front of the resource: it serves the 402, authenticates connections and enforces the session's end |
 | **Facilitator** | The x402 service that verifies and settles session transactions, with Kora as fee payer |
 | **Paid until** | The moment the session's deposit runs out at its rate |
+
+### 2.2 Solana facts the design relies on
+
+Many decisions in this specification follow from how Solana stores accounts and tokens. The facts
+are listed here once, and the sections that depend on them cite them as (S1) to (S15).
+
+**Accounts and programs**
+
+- **S1. Programs hold no state; accounts do.** Every account has an address, a SOL balance in
+  lamports, a data field and an owner program. Only the owner program can change the data or take
+  lamports out. *Used in 4.1.*
+- **S2. The caller passes in every account an instruction touches.** A program cannot look an
+  account up by itself. It must check each account it receives: its address, its owner program and
+  its contents. An instruction that accepts a different account than intended (account
+  substitution) is the most common flaw in Solana programs. *Used in 4.1, 12.*
+- **S3. A program-derived address (PDA)** is computed from seeds and a program ID and has no
+  private key. Only that program can sign for it. *Used in 4.1.*
+
+**Tokens**
+
+- **S4. One program, SPL Token, serves every token.**
+  - A token is identified by its **mint** account, which records supply, decimals, mint authority
+    and freeze authority.
+  - Balances live in **token accounts**, one per holder and mint. Each records its mint, its
+    `owner` (the wallet or PDA that controls the tokens), its amount, an optional delegate and its
+    state.
+  - The token account's owner *program* is SPL Token. Its `owner` *field* is a different thing.
+  - Tokens can be received only into an existing token account for the right mint.
+
+  *Used in 4.1, 4.3, 5.1.*
+- **S5. Anyone can create a mint.** A token is identified only by its mint address. Apart from
+  that address, a token minted a minute ago is indistinguishable from USDC. *Used in 4.6, 5.4,
+  7.2, 12.*
+- **S6. Anyone can create a token account for any owner.** The creator pays and names the owner,
+  who does not sign. A token account whose `owner` is a given wallet or PDA therefore proves
+  nothing about who created it or why. *Used in 4.1, 12.*
+- **S7. The associated token account (ATA)** of a wallet for a mint lives at an address derived
+  from (wallet, token program, mint). It is unique and predictable. Anyone can create it, and the
+  idempotent create instruction succeeds if it already exists. Creating it requires knowing the
+  wallet. *Used in 4.1, 4.3, 5.3, 6.4, 10.1, 11.*
+- **S8. A token account has at most one delegate,** allowed to move tokens up to an approved
+  amount. *Used in 10.1.*
+- **S9. A transfer from a token account to itself succeeds and moves nothing.** *Used in 4.3.*
+- **S10. The mint's freeze authority can freeze any token account of that mint.** Nothing can be
+  transferred into or out of a frozen account. USDC's mint has a freeze authority, on devnet as on
+  mainnet. *Used in 4.6, 6.4, 11.*
+
+**Rent, opening and closing**
+
+- **S11. An account must hold a minimum SOL balance proportional to its size** (rent exemption).
+  The balance is paid by whoever creates the account, who signs for it. It is a deposit, not a fee:
+  it comes back when the account is closed. *Used in 4.1, 4.3, 5.3, 6.3, 6.5, 9.1.*
+- **S12. A token account with a zero balance can be closed by its `owner`** (or its close
+  authority).
+  - Its whole SOL deposit goes to whichever account the closer names, whoever paid for it.
+  - Afterwards the address is empty: no data, no lamports, owned by the System program. Passed
+    to an instruction in that state, it arrives as an empty System account. The account can be
+    created again at the same address.
+  - Wallets routinely close empty token accounts to reclaim the deposit, so a payout destination
+    may not exist when a payout happens.
+  - A program closes its own accounts by moving their lamports out.
+
+  *Used in 4.1, 4.3, 5.3, 6.3, 11.*
+
+**Transactions and time**
+
+- **S13. A transaction is atomic.** If any instruction fails, none of the transaction's effects
+  remain. *Used in 4.3, 4.6, 11.*
+- **S14. A signature covers the whole transaction, and any instruction in it may use any of its
+  signers.**
+  - A key that co-signs a transaction someone else built authorizes every instruction in which
+    that key appears as a signer. The co-signer must therefore check every place its key appears.
+  - The fee payer is simply the first signer. It need not own anything the transaction moves,
+    which is how fees are sponsored.
+
+  *Used in 5.3, 5.4, 6.2, 9.1.*
+- **S15. `Clock::unix_timestamp` approximates real time.**
+  - It is derived from validators' timestamps and bounded around the time expected from the slot
+    count, so it can differ from a wall clock.
+  - The runtime keeps it from moving backwards, but test harnesses can set it to any value.
+
+  *Used in 4.2, 7.3.*
+
+For readers who know EVM chains, the main differences:
+
+| | EVM (ERC-20) | Solana (SPL Token) |
+|---|---|---|
+| Token code | One contract per token | One shared program for every token (S4) |
+| Token identity | The contract address | The mint address (S4, S5) |
+| A holder's balance | A slot in the token contract's storage | A separate token account per holder and mint (S4) |
+| Receiving | Always possible | Needs a token account for that mint (S4, S7) |
+| Storage cost | Gas, paid once, not refunded | A deposit held in the account, which goes to whoever closes it (S11, S12) |
+| Which accounts are used | The contract looks them up (`msg.sender`, mappings) | The caller passes them in; the program must check them (S2) |
+| Freezing | Only if the token implements it (USDC's blacklist) | Built in, through the mint's freeze authority (S10) |
+| Paying someone else's fees | A relayer or a paymaster | A different first signer: the fee payer (S14) |
 
 ## 3. Architecture
 
@@ -146,9 +243,10 @@ registry: each session records its own terms.
 ### 4.1 Accounts
 
 **Session**: a PDA at seeds `["session", authority, seed]`, where `seed` is a `u64` (little-endian
-bytes) chosen at random by the client. About 250 bytes. An address is unique only while its account
-exists: after a close, the same `(authority, seed)` could open again, so clients draw a fresh random
-seed for every session.
+bytes) chosen at random by the client. About 250 bytes. Only the Stint program can change its data
+(S1) or sign for it (S3), which is what makes the program, and nobody else, the escrow's keeper. An
+address is unique only while its account exists: after a close, the same `(authority, seed)` could
+open again (S12), so clients draw a fresh random seed for every session.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -168,17 +266,23 @@ seed for every session.
 | `deposited` | `u64` | Total credited deposits |
 | `claimed` | `u64` | Total paid to the receiver so far |
 
-**Vault**: the associated token account of the session address for `mint`. It holds the escrowed
-tokens; anyone can read its balance.
+**Vault**: the associated token account of the session address for `mint` (S7). It holds the
+escrowed tokens; anyone can read its balance. Its `owner` is the session PDA, so only the Stint
+program can move the tokens out (S3, S4).
 
-Both accounts are closed when the session closes, and their lamports return to `rent_payer`.
+Both accounts hold rent deposits fronted by the rent payer (S11). They are closed when the session
+closes, and their lamports return to `rent_payer` (S12).
 
-**Account checks, in every instruction:**
+**Account checks, in every instruction.** The caller supplies every account (S2), so:
 - `vault` MUST be exactly the associated token account of `session` for `mint`. A token account
-  merely owned by the session is rejected, since anyone can create one.
+  merely owned by the session is rejected, since anyone can create one (S6).
 - `receiver_token` and `refund_to` MUST be the associated token accounts, for `mint`, of the
-  stored `receiver` and `refund_owner`. Their addresses and owners are therefore always known, and
-  anyone can recreate one that was closed.
+  stored `receiver` and `refund_owner`.
+  - The session stores the wallets rather than the token-account addresses because a closed
+    account keeps nothing (S12), and recreating an associated token account requires its wallet
+    (S7).
+  - Their addresses and owners are therefore always known, and anyone can recreate one that was
+    closed.
 - `rent_payer` MUST equal the stored value.
 
 A mismatch fails with `AccountMismatch`.
@@ -202,24 +306,28 @@ refund     = vault.amount - (owed - claimed)          at close
 vault without being credited.
 
 `claim` never pays the minimum: it pays `earned`. So `claimed ≤ earned ≤ owed` at every close,
-including one that waives the minimum. `earned` only grows while the chain's clock does; the
-`max(claimed, …)` in `owed`, and a claim that pays nothing when `earned ≤ claimed`, keep the
-maths safe even if the clock ever steps back.
+including one that waives the minimum.
 
-`now` is `Clock::unix_timestamp`. The chain's clock is authoritative for every amount. Off-chain
-components use their own clocks only to decide when to act (section 7.3).
+`earned` only grows while the chain's clock does. The runtime keeps that clock from moving
+backwards, but test harnesses can set it to any value (S15). The `max(claimed, …)` in `owed`, and a
+claim that pays nothing when `earned ≤ claimed`, keep the maths safe either way.
+
+`now` is `Clock::unix_timestamp`. The chain's clock is authoritative for every amount. It can
+differ from a wall clock (S15), so off-chain components use their own clocks only to decide when to
+act (section 7.3).
 
 ### 4.3 Instructions
 
 The program never transfers the buyer's tokens in `open` or `top_up`. The transaction funds the
 vault with an earlier instruction (a token transfer, or an allowance pull: section 10), and the
-program credits what the vault received.
+program credits what the vault received. A transaction is atomic (S13), so the funding and the
+instruction that credits it succeed or fail together.
 
 **`open(seed: u64, rate: u64, min_seconds: u32, max_seconds: u32)`**
 
 - **Signers:** `authority`, `rent_payer`.
 - **Accounts:**
-  - `session` (initialized here, funded by `rent_payer`);
+  - `session` (initialized here, its rent deposit funded by `rent_payer`: S11);
   - `vault` (must exist; the associated token account of `session` for `mint`);
   - `mint`;
   - `receiver` (the seller's wallet);
@@ -229,8 +337,9 @@ program credits what the vault received.
 - **Checks:**
   - `rate > 0`;
   - `0 < min_seconds ≤ max_seconds`;
-  - `receiver` and `refund_owner` are not the session itself (otherwise a payout account would be
-    the vault, which could then never be emptied and closed);
+  - `receiver` and `refund_owner` are not the session itself. Otherwise a payout account would be
+    the vault (S7), a payout to it would move nothing (S9), and the vault could never be emptied
+    and closed (S12);
   - `vault.amount ≥ rate × min_seconds`;
   - `vault.amount ≤ rate × max_seconds`;
   - the account checks of section 4.1.
@@ -286,16 +395,21 @@ program credits what the vault received.
   3. closes the vault and the session, returning their lamports to `rent_payer`.
 - Emits `Closed`.
 
-**A transfer of zero is skipped, and its destination need not exist.** A destination that is owed
-tokens must exist: if it has been closed, the close fails until someone recreates it. The
-facilitator recreates a closed `receiver_token` (section 5.3), but never a `refund_to`. An
-`AtExpiry` close usually owes `refund_to` nothing, so it settles even when the buyer has closed
-that account. Frozen accounts are covered in section 4.6.
+**A transfer of zero is skipped, and its destination need not exist.** Payout accounts can be
+closed by their owners at any time (S12), and one failed transfer would fail the whole close
+(S13).
+- A destination that is owed tokens must exist (S4). If it has been closed, the close fails until
+  someone recreates it (S7).
+- The facilitator recreates a closed `receiver_token` (section 5.3), but never a `refund_to`,
+  because whoever closes a recreated account keeps its deposit (S12).
+- An `AtExpiry` close usually owes `refund_to` nothing, so it settles even when the buyer has closed
+  that account.
+- Frozen accounts are covered in section 4.6.
 
 In Anchor, `receiver_token` and `refund_to` are therefore declared as mutable unchecked accounts
-with an `address` constraint on the derived associated token account, not as typed token accounts,
-since a closed account arrives owned by the System program with no data. SPL Token validates the
-destination whenever the amount is not zero.
+with an `address` constraint on the derived associated token account, not as typed token accounts.
+A closed account arrives as an empty System account (S12), which a typed token account would
+reject. SPL Token validates the destination whenever the amount is not zero.
 
 ### 4.4 Events
 
@@ -318,16 +432,18 @@ refunded.
 ### 4.6 Trust properties and limits
 
 - **The program cannot know the seller's offer.** Terms are proposed by the buyer and stored
-  as signed. The facilitator (before settling) and the gate (before serving) check that a
-  session's terms match the offer. A session with other terms is never served. Its buyer can
-  close it through the facilitator's sponsored close or on-chain (section 5.3).
+  as signed. The program accepts any mint, and anyone can create one (S5), so the mint is one of
+  those terms. The facilitator (before settling) and the gate (before serving) check that a
+  session's terms, mint included, match the offer. A session with other terms is never served.
+  Its buyer can close it through the facilitator's sponsored close or on-chain (section 5.3).
 - **`refund_owner` is supplied by the client.** The session client always sets it to the owner of
   the account the funds came from. When the vault is funded through an allowance (section 10), the authority
   key is the allowance's delegate. If it is compromised, it can pull up to the period's cap to any
   destination, not only point refunds elsewhere. The cap and the delegation's expiry bound that
   exposure.
-- **Frozen accounts.** If the mint's freeze authority freezes `receiver_token` or `refund_to`, the
-  session cannot close until the account is thawed. The funds stay in the vault meanwhile.
+- **Frozen accounts.** USDC's mint has a freeze authority (S10). If it freezes `receiver_token` or
+  `refund_to`, the payout to that account fails, and with it the close (S13). The session cannot
+  close until the account is thawed, and the funds stay in the vault meanwhile.
 - **Upgrades:** the program is upgradeable on devnet, built verifiably. Before any mainnet
   deployment, its upgrade authority MUST move to a multisig or be revoked.
 
@@ -368,7 +484,7 @@ Standard x402 v2 fields, with the scheme's terms in `extra`.
 | Field | Meaning |
 |---|---|
 | `amount` | **The exact deposit** for this entry: `rate × extra.seconds`, in base units |
-| `payTo` | **The final payment recipient.** The deposit goes into the session's escrow first; `payTo`'s associated token account for `asset` receives only what `close` or `claim` pays out. It MUST exist when the session opens: the facilitator checks this, since the program does not |
+| `payTo` | **The final payment recipient.** The deposit goes into the session's escrow first; `payTo`'s associated token account for `asset` receives only what `close` or `claim` pays out. Tokens can be received only into an existing token account (S4), so it MUST exist when the session opens: the facilitator checks this, since the program does not |
 | `extra.paymentFlow` | `"escrow"`: the deposit is committed before the resource runs, and a second settlement records the final charge. In `elapsed`, that second settlement happens at close, on a later request (section 5.5) |
 | `extra.action` | `"open"`, or `"topUp"` with `extra.session` set to the session address. `"close"` appears only in the requirements the gate sends with a close (section 5.5), never in an offer |
 | `extra.rate`, `seconds`, `minSeconds`, `maxSeconds` | The session's terms |
@@ -380,7 +496,8 @@ Standard x402 v2 fields, with the scheme's terms in `extra`.
 **Number encoding.** `u64` values (`amount`, `rate`, `lastValidBlockHeight`) are decimal strings.
 `u32` values (`seconds`, `minSeconds`, `maxSeconds`, `idleCloseSeconds`) are JSON numbers.
 
-**Decimals.** `TransferChecked` needs the mint's decimals. Clients take them from their asset
+**Decimals.** `TransferChecked` needs the mint's decimals, which are stored in the mint account
+(S4). Clients take them from their asset
 allowlist, which records each allowed mint with its decimals, so no node access is needed.
 
 Network identifiers: devnet `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`, mainnet
@@ -426,16 +543,17 @@ Network identifiers: devnet `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`, mainnet
 - `payload.session` is informative: the facilitator derives the address itself.
 
 **Transaction layouts.** Transactions are version 0. The fee payer is the first account and is
-left unsigned by the client.
+left unsigned by the client: the facilitator pays the fees, and the client holds no SOL (S14).
 
 | Type | Instructions, in order |
 |---|---|
-| `open` | [compute budget, optional] → create the vault, idempotent, funded by `rentPayer` → **exactly one** funding instruction: a `TransferChecked` from the authority's associated token account (or one allowance pull, section 10) into the vault for exactly `amount` → `stint.open` |
+| `open` | [compute budget, optional] → create the vault, idempotent (S7), its rent deposit funded by `rentPayer` (S11) → **exactly one** funding instruction: a `TransferChecked` from the authority's associated token account (or one allowance pull, section 10) into the vault for exactly `amount` → `stint.open` |
 | `topUp` | [compute budget, optional] → exactly one funding instruction into the vault for exactly `amount` → `stint.top_up` |
 | `close` | [compute budget, optional] → [recreate a closed `receiver_token` that is owed tokens, idempotent, funded by `rentPayer`; optional] → `stint.close`, whose `closer` is `receiverAuthorizer` (gate), the authority (sponsored close) or the rent payer (sweeper) |
 
-**Where the facilitator's keys may appear.** The facilitator signs whatever it is shown, so its
-keys are confined:
+**Where the facilitator's keys may appear.** The facilitator co-signs transactions that clients
+build, and its signature authorizes every instruction in which its key appears as a signer (S14).
+Its keys are therefore confined:
 - **the fee payer** only as the fee payer: in no instruction's accounts, and as no program;
 - **the rent payer** only as:
   - the funder of an idempotent associated-token-account creation: the vault at open, or a closed
@@ -448,8 +566,10 @@ keys are confined:
   rent payer signs open transactions, close transactions in which it recreates `receiver_token`,
   and the sweeper's closes.
 
-**Recreating an account is a cost, not an advance.** The new account's rent goes to its owner when
-the owner closes it. The facilitator therefore never recreates a buyer's `refund_to`. It recreates
+**Recreating an account is a cost, not an advance.** The creator pays the new account's deposit
+(S11), but its owner gets that deposit when it closes the account (S12). A buyer could close its
+refund account, have the facilitator recreate it, and pocket the deposit, over and over. The
+facilitator therefore never recreates a buyer's `refund_to`. It recreates
 a seller's `receiver_token` only when the seller is owed tokens, and counts each recreation against
 the seller's API key (section 6.5). Sponsored and sweeper closes carry no API key, so when an open
 settles, the facilitator records which API key it came through.
@@ -460,9 +580,10 @@ settles, the facilitator records which API key it came through.
 
 **Every type:**
 
-- **Payload:** `x402Version` is 2; `scheme`, `network` and `asset` match; `accepted` equals the
-  issued entry exactly.
-- **Fee payer:** it is `feePayer`, the first account, unsigned.
+- **Payload:** `x402Version` is 2; `scheme`, `network` and `asset` match (the asset is a mint
+  address, the only thing that identifies a token: S5); `accepted` equals the issued entry
+  exactly.
+- **Fee payer:** it is `feePayer`, the first account, unsigned (S14).
 - **Facilitator keys:** the fee payer and the rent payer appear only where section 5.3 allows.
 - **Allowed programs:** compute budget, associated token account, SPL Token, Stint, and the
   allowance program (section 10).
@@ -575,7 +696,8 @@ Kora runs beside the facilitator and is reachable only by it, with an API key.
 - **Policy:**
   - allowed programs as in section 5.4, plus the System program, which account creation invokes
     (whether Kora checks inner instructions is confirmed in section 14);
-  - the fee payer may not transfer SOL or tokens, create accounts, or act on token accounts;
+  - the fee payer may not transfer SOL or tokens, create accounts, or act on token accounts:
+    its signature would otherwise authorize any of these in a client-built transaction (S14);
   - a cap on lamports per transaction.
 - **Pricing:** `free` (fees sponsored).
 - **Several signers** MAY be configured to spread fee-payer write locks.
@@ -585,7 +707,7 @@ Kora runs beside the facilitator and is reachable only by it, with an API key.
 | Cost | Who pays | Amount | Recovered |
 |---|---|---|---|
 | Transaction fees | The fee payer (Kora) | 5,000 lamports per signature. A typical session costs about 3 transactions | No (sponsored) |
-| Rent for the session and vault accounts | The rent payer | `(128 + size) × lamports_per_byte` per account, read from the chain | Yes, at close |
+| Rent for the session and vault accounts (S11) | The rent payer | `(128 + size) × lamports_per_byte` per account, read from the chain | Yes, at close (S12) |
 
 The rent payer MAY be a pool of keys: each session records its own `rent_payer`. Keys are loaded
 from the environment or a mounted volume.
@@ -600,10 +722,10 @@ whose `paid_until` has passed, and closes them with `close(AtExpiry)`, the rent 
 - the buyer gets any rounding remainder.
 
 If the receiver is owed tokens and `receiver_token` has been closed, it recreates that account in
-the same transaction. It never recreates `refund_to`: a session whose closed refund account is still
-owed tokens is skipped and reported. Its rent stays locked until the buyer recreates the account.
-The buyer caused that, so it does not count against the seller's limits. A close that fails because
-an account is frozen is retried with an increasing back-off.
+the same transaction (S7). It never recreates `refund_to` (section 5.3): a session whose closed
+refund account is still owed tokens is skipped and reported. Its rent stays locked until the buyer
+recreates the account. The buyer caused that, so it does not count against the seller's limits. A
+close that fails because an account is frozen (S10) is retried with an increasing back-off.
 
 It runs on one elected instance, or on all of them tolerating duplicates: a second close finds the
 account gone and is skipped.
@@ -622,8 +744,9 @@ A Docker Compose stack: the facilitator, Kora and a configuration template.
 | Seller allowlist | Optional, for hosted operators |
 | Sponsorship policy | Who pays fees (sponsored by default) |
 
-Fees are sponsored and rent is fronted, so an anonymous resource server could make the facilitator
-lock rent in long sessions it opens with itself. The API key and the limits per key bound that.
+Fees are sponsored and rent is fronted, and a deposit comes back only when its account closes
+(S11). An anonymous resource server could therefore make the facilitator lock rent in long
+sessions it opens with itself. The API key and the limits per key bound that.
 
 ## 7. The gate
 
@@ -677,9 +800,9 @@ A short-lived JWS signed by the session's `authority` with its Ed25519 key.
      on `iat` and `exp`);
   3. `jti` has not been seen before;
   4. the session's terms match one of the gate's offers (program, `mint` equal to the offer's
-     `asset`, `receiver`, `receiver_authorizer`, rate, bounds). The mint matters: the program
-     accepts any mint, so a session opened directly on-chain in a token the buyer minted itself
-     would otherwise match;
+     `asset`, `receiver`, `receiver_authorizer`, rate, bounds). The mint matters: anyone can
+     create a mint (S5) and the program accepts any mint, so a session opened directly on-chain
+     in a token the buyer minted itself would otherwise match;
   5. `paid_until` is more than the margin away (default 2 s).
 
 ### 7.3 Session lifecycle in the gate
@@ -706,8 +829,8 @@ not a connection is live.
 | The session ends, whatever the cause | `teardown(reason)`, once; unsubscribe | — |
 
 - **Clocks.** The gate's timers run on an injectable clock: the wall clock in production, the
-  test network's clock in tests. The chain's clock decides every amount, and `AtExpiry` makes an
-  early gate harmless.
+  test network's clock in tests. The chain's clock decides every amount and can differ from the
+  gate's (S15); `AtExpiry` makes an early gate harmless.
 - **Restarts.** On start, the gate lists the open sessions whose `receiver_authorizer` is its key
   (a program-account query filtered on that field) and restores their timers.
 - **The gate never writes into the resource's data stream.** Clients learn the remaining time from
@@ -836,7 +959,10 @@ The node's endpoint and key are configured in `.env`.
 ### 9.1 Requirements
 
 - **Required:** a signer (the authority's Ed25519 key), and an HTTP and WebSocket client.
-- **Not required:** access to a Solana node. Offers carry a recent blockhash.
+- **Not required:**
+  - access to a Solana node: offers carry a recent blockhash;
+  - SOL: the facilitator's fee payer pays the fees (S14), and its rent payer fronts the rent
+    (S11).
 
 **Optional:**
 
@@ -966,9 +1092,10 @@ The grant does two things, signed by the owner:
 2. it creates a recurring delegation for the agent's key (amount per period, period length in
    seconds, overall expiry).
 
-SPL Token allows one delegate per token account, and refunds return to an associated token account
-(section 4.1). A dedicated owner wallet for agent budgets is therefore RECOMMENDED: its USDC
-associated token account then holds only that budget.
+SPL Token allows one delegate per token account (S8), and refunds return to an associated token
+account, of which a wallet has exactly one per mint (section 4.1, S7). A dedicated owner wallet for
+agent budgets is therefore RECOMMENDED: its USDC associated token account then holds only that
+budget, and its single delegate slot serves only the agent.
 
 ### 10.2 Transactions
 
@@ -1015,9 +1142,9 @@ Facilitator checks:
 | End | A top-up lands just as the gate closes at expiry | The `AtExpiry` close fails; the session continues | The top-up counts |
 | Close | Gate unreachable | Sponsored close through the facilitator | Unused time above the minimum refunded |
 | Close | Gate and facilitator unreachable | Unilateral close if the authority holds SOL; otherwise the session runs to expiry | With SOL: unused time refunded. Without: the deposit is spent in full |
-| Close | The seller closed its `receiver_token` | The close transaction recreates it, counted against the seller's API key | Unaffected |
+| Close | The seller closed its `receiver_token` (S12) | The close transaction recreates it (S7), counted against the seller's API key | Unaffected |
 | Close | The buyer closed its `refund_to` | Closes that owe it tokens fail until the buyer recreates it; otherwise the session settles at expiry, when it is usually owed nothing | Unused time is charged unless the buyer recreates the account |
-| Close | A payout account is frozen by the mint's freeze authority | `close` fails until it is thawed | Held in the vault |
+| Close | A payout account is frozen by the mint's freeze authority (S10) | `close` fails until it is thawed (S13) | Held in the vault |
 | Crash | The agent stops with a session open | On restart, closed via the store or a chain lookup; otherwise at expiry | Bounded by the deposit |
 
 Funds are only ever in the buyer's account, in a session's vault, or paid out by the program's
@@ -1027,7 +1154,7 @@ maths.
 
 | Layer | Tooling | Coverage |
 |---|---|---|
-| Program | LiteSVM, with clock control | The maths, including property tests: `claimed ≤ owed ≤ deposited` always, `claimed ≤ earned` while the clock never steps back, and every token that entered the vault leaves it exactly once (`owed + refund = deposited + uncredited`). Every signer on every instruction, before and after `paid_until`. Every `close` kind: `AtExpiry` before and after `paid_until`, `WaiveMinimum` by each signer, a waiver after a claim. Account substitution on every instruction (a vault that is not the canonical one, payout accounts other than the derived ones, another rent payer; `receiver` or `refund_owner` equal to the session). Zero transfers skipped with a missing destination. A clock that steps back. Funding by a preceding transfer. Top-up refused after expiry. Rent return. Events |
+| Program | LiteSVM, with clock control | The maths, including property tests: `claimed ≤ owed ≤ deposited` always, `claimed ≤ earned` while the clock never steps back, and every token that entered the vault leaves it exactly once (`owed + refund = deposited + uncredited`). Every signer on every instruction, before and after `paid_until`. Every `close` kind: `AtExpiry` before and after `paid_until`, `WaiveMinimum` by each signer, a waiver after a claim. Account substitution on every instruction (S2, S6: a vault that is not the canonical one, payout accounts other than the derived ones, another rent payer; `receiver` or `refund_owner` equal to the session). Zero transfers skipped with a missing destination. A clock that steps back. Funding by a preceding transfer. Top-up refused after expiry. Rent return. Events |
 | Scheme | Unit tests | Offer construction, payload parsing, every refusal reason, byte-for-byte echo, number encoding |
 | Facilitator | Surfpool (cloning the devnet USDC mint and the Subscriptions program), with Kora | Every action in both funding modes; fee-payer and rent-payer isolation; the sponsored close, including `GET /close` for a client without node access; recreating a closed `receiver_token`, and never a `refund_to`; limits per API key; rent round trip; the sweeper; `settlement_pending` |
 | Gate | Unit tests, plus a fake upstream and an injected clock | Tokens, close codes, policies, the lifecycle table of section 7.3, assertions, the JWKS, events, timers, restart recovery |
@@ -1067,7 +1194,7 @@ reaction), unless stated otherwise.
 | 17 | Top-up for an unknown session | `unknown_session` |
 | 18 | *(with `--facilitator`)* Fee payer or rent payer in a forbidden position | Refused (`payer_misuse`) |
 | 19 | *(with `--facilitator`)* `/verify` of a valid open | No change on-chain |
-| 20 | A session opened directly on-chain with the gate's terms but another mint | `403` on connect; not adopted |
+| 20 | A session opened directly on-chain with the gate's terms but another mint (S5) | `403` on connect; not adopted |
 
 ## 13. Not built
 
