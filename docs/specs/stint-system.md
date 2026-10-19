@@ -157,9 +157,9 @@ seed for every session.
 | `authority` | `Pubkey` | The buyer's controlling key |
 | `seed` | `u64` | PDA seed |
 | `mint` | `Pubkey` | The payment token |
-| `receiver_token` | `Pubkey` | The seller's associated token account (of `payTo`) |
+| `receiver` | `Pubkey` | The seller's wallet (`payTo`). Payouts go to its associated token account, `receiver_token` |
 | `receiver_authorizer` | `Pubkey` | The seller's hot key |
-| `refund_to` | `Pubkey` | The associated token account the remainder returns to |
+| `refund_owner` | `Pubkey` | The wallet whose associated token account, `refund_to`, receives the remainder |
 | `rent_payer` | `Pubkey` | The account the rent returns to |
 | `rate` | `u64` | Token base units per second |
 | `min_seconds` | `u32` | Minimum charged duration |
@@ -176,10 +176,10 @@ Both accounts are closed when the session closes, and their lamports return to `
 **Account checks, in every instruction:**
 - `vault` MUST be exactly the associated token account of `session` for `mint`. A token account
   merely owned by the session is rejected, since anyone can create one.
-- `receiver_token`, `refund_to` and `rent_payer` MUST equal the values stored in the session.
-- `receiver_token` and `refund_to` MUST each be the associated token account of their owner for
-  `mint` (checked at open). If one is closed later, anyone can recreate it at the same address, so
-  a closed account never blocks a close.
+- `receiver_token` and `refund_to` MUST be the associated token accounts, for `mint`, of the
+  stored `receiver` and `refund_owner`. Their addresses and owners are therefore always known, and
+  anyone can recreate one that was closed.
+- `rent_payer` MUST equal the stored value.
 
 A mismatch fails with `AccountMismatch`.
 
@@ -194,15 +194,17 @@ end        = min(now, paid_until)
 elapsed    = max(0, end - started_at)
 earned     = min(deposited, rate × elapsed)           what claim may pay out
 charged    = max(min_seconds, elapsed)                at close; elapsed alone if the close waives the minimum
-owed       = min(deposited, rate × charged)           at close
+owed       = max(claimed, min(deposited, rate × charged))    at close
 refund     = vault.amount - (owed - claimed)          at close
 ```
 
 `refund` includes the rounding remainder (`deposited mod rate`) and any tokens that reached the
 vault without being credited.
 
-`claim` never pays the minimum: it pays `earned`, which only grows. So `claimed ≤ earned ≤ owed` at
-every close, including one that waives the minimum.
+`claim` never pays the minimum: it pays `earned`. So `claimed ≤ earned ≤ owed` at every close,
+including one that waives the minimum. `earned` only grows while the chain's clock does; the
+`max(claimed, …)` in `owed`, and a claim that pays nothing when `earned ≤ claimed`, keep the
+maths safe even if the clock ever steps back.
 
 `now` is `Clock::unix_timestamp`. The chain's clock is authoritative for every amount. Off-chain
 components use their own clocks only to decide when to act (section 7.3).
@@ -220,9 +222,9 @@ program credits what the vault received.
   - `session` (initialized here, funded by `rent_payer`);
   - `vault` (must exist; the associated token account of `session` for `mint`);
   - `mint`;
-  - `receiver_token` (an associated token account for `mint`);
+  - `receiver` (the seller's wallet);
   - `receiver_authorizer`;
-  - `refund_to` (an associated token account for `mint`);
+  - `refund_owner` (the wallet the funding comes from);
   - token and system programs.
 - **Checks:**
   - `rate > 0`;
@@ -254,7 +256,7 @@ program credits what the vault received.
 - **Signer:** none required. Anyone may call it.
 - **Accounts:** `session`, `vault`, `receiver_token`, token program.
 - **Checks:** the account checks of section 4.1.
-- **Effects:**
+- **Effects:** when `earned(now) > claimed`:
   - transfers `earned(now) - claimed` to `receiver_token`;
   - `claimed = earned(now)`.
 - Emits `Claimed`.
@@ -282,8 +284,11 @@ program credits what the vault received.
   3. closes the vault and the session, returning their lamports to `rent_payer`.
 - Emits `Closed`.
 
-If `receiver_token` or `refund_to` has been closed, the transaction recreates it first (section
-5.3). Frozen accounts are covered in section 4.6.
+**A transfer of zero is skipped, and its destination need not exist.** A destination that is owed
+tokens must exist: if it has been closed, the close fails until someone recreates it. The
+facilitator recreates a closed `receiver_token` (section 5.3), but never a `refund_to`. An
+`AtExpiry` close usually owes `refund_to` nothing, so it settles even when the buyer has closed
+that account. Frozen accounts are covered in section 4.6.
 
 ### 4.4 Events
 
@@ -309,8 +314,8 @@ refunded.
   as signed. The facilitator (before settling) and the gate (before serving) check that a
   session's terms match the offer. A session with other terms is never served. Its buyer can
   close it through the facilitator's sponsored close or on-chain (section 5.3).
-- **`refund_to` is supplied by the client.** The session client always sets it to the account
-  the funds came from. When the vault is funded through an allowance (section 10), the authority
+- **`refund_owner` is supplied by the client.** The session client always sets it to the owner of
+  the account the funds came from. When the vault is funded through an allowance (section 10), the authority
   key is the allowance's delegate. If it is compromised, it can pull up to the period's cap to any
   destination, not only point refunds elsewhere. The cap and the delegation's expiry bound that
   exposure.
@@ -420,21 +425,26 @@ left unsigned by the client.
 |---|---|
 | `open` | [compute budget, optional] → create the vault, idempotent, funded by `rentPayer` → **exactly one** funding instruction: a `TransferChecked` from the authority's associated token account (or one allowance pull, section 10) into the vault for exactly `amount` → `stint.open` |
 | `topUp` | [compute budget, optional] → exactly one funding instruction into the vault for exactly `amount` → `stint.top_up` |
-| `close` | [compute budget, optional] → [recreate a closed `receiver_token` or `refund_to`, idempotent, funded by `rentPayer`; optional] → `stint.close`, whose `closer` is `receiverAuthorizer` (gate) or the authority (sponsored close) |
+| `close` | [compute budget, optional] → [recreate a closed `receiver_token` that is owed tokens, idempotent, funded by `rentPayer`; optional] → `stint.close`, whose `closer` is `receiverAuthorizer` (gate), the authority (sponsored close) or the rent payer (sweeper) |
 
 **Where the facilitator's keys may appear.** The facilitator signs whatever it is shown, so its
 keys are confined:
 - **the fee payer** only as the fee payer: in no instruction's accounts, and as no program;
 - **the rent payer** only as:
-  - the funder of an idempotent associated-token-account creation (the vault at open; a closed
-    `receiver_token` or `refund_to` at close);
+  - the funder of an idempotent associated-token-account creation: the vault at open, or a closed
+    `receiver_token` at close, never a `refund_to`;
   - `stint.open`'s `rent_payer`;
   - `stint.close`'s `rent_payer`, which receives lamports and does not sign;
   - and, in the sweeper's own transactions, the `closer`.
 
   It is never an authority, a token-account owner, a transfer source or any other account. The
-  rent payer signs open transactions, and close transactions in which it recreates an account.
-  It gets back more from the closed session and vault than a recreation costs.
+  rent payer signs open transactions, close transactions in which it recreates `receiver_token`,
+  and the sweeper's closes.
+
+**Recreating an account is a cost, not an advance.** The new account's rent goes to its owner when
+the owner closes it. The facilitator therefore never recreates a buyer's `refund_to`. It recreates
+a seller's `receiver_token` only when the seller is owed tokens, and counts each recreation against
+the seller's API key (section 6.5).
 
 ### 5.4 Verification (facilitator `/verify`)
 
@@ -451,8 +461,7 @@ keys are confined:
 - **Simulation** (including inner instructions):
   - the transaction succeeds;
   - the fee payer is debited only the fee;
-  - the rent payer funds only the session and vault accounts, or a recreated `receiver_token` or
-    `refund_to`.
+  - the rent payer funds only the session and vault accounts, or a recreated `receiver_token`.
 - **Blockhash:** still valid.
 - **Requirements:** compared with the requirements **issued by the resource server**, never with
   the client's echo of them.
@@ -461,10 +470,10 @@ keys are confined:
 
 | Type | Checks |
 |---|---|
-| `open` | The `stint.open` terms equal `extra` (`rate`, `minSeconds`, `maxSeconds`), and `receiver_authorizer` equals `extra.receiverAuthorizer`. `receiver_token` is the associated token account of `payTo` for `asset`. `refund_to` is the associated token account the funding comes from. `rent_payer` is `rentPayer`. The funding moves **exactly `amount`** of `asset` into the vault. The authority signed |
+| `open` | The `stint.open` terms equal `extra` (`rate`, `minSeconds`, `maxSeconds`), and `receiver_authorizer` equals `extra.receiverAuthorizer`. `receiver` is `payTo`. `refund_owner` owns the associated token account the funding comes from. `rent_payer` is `rentPayer`. The funding moves **exactly `amount`** of `asset` into the vault. The authority signed |
 | `topUp` | The session exists and its terms match the gate's offer. The signer is its `authority`. `paid_until` is at least 10 s away, so the transaction lands before the end. The funding moves exactly `amount`. The total stays within `maxSeconds` |
 | `close` (from the gate, through `/settle`) | The session exists and its terms match the requirements. The `closer` is its `receiver_authorizer` |
-| `close` (sponsored, through `closeUrl`) | The session exists and its `rent_payer` is one of this facilitator's keys. The `closer` is its `authority` |
+| `close` (sponsored, through `closeUrl`) | The session exists and its `rent_payer` is one of this facilitator's keys. The `closer` is its `authority`, and `kind` is `Standard` or `AtExpiry`. The payload, `accepted` and requirements checks do not apply: the request carries only the transaction. The fee-payer, facilitator-key, program, layout, simulation and blockhash checks do |
 
 Refusals return `isValid: false` with one of these reasons. Where x402 defines a standard reason,
 it is used.
@@ -486,7 +495,7 @@ it is used.
 ### 5.5 Settlement (facilitator `/settle`)
 
 1. Re-verify.
-2. The rent payer signs (`open`, and a `close` that recreates an account).
+2. The rent payer signs (`open`, and a `close` that recreates `receiver_token`).
 3. Kora signs as fee payer.
 4. Submit, and wait for `confirmed`.
 
@@ -542,9 +551,11 @@ One endpoint for buyers, without an API key:
 
 | Endpoint | Behaviour |
 |---|---|
-| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified (section 5.4) and settled (section 5.5) like any close. Returns `{success, transaction, paid, refunded}`. Rate-limited per session and per client address |
+| `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, programId}`, current at the time of the request. With `?session=<address>`, also the session's stored fields |
+| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `{success, transaction, paid, refunded}`. Rate-limited per session and per client address |
 
-It lets a buyer that holds no SOL leave a session when the seller's gate is unreachable.
+Together they let a buyer that holds no SOL, and has no node access, leave a session when the
+seller's gate is unreachable.
 
 ### 6.2 Kora
 
@@ -577,8 +588,10 @@ whose `paid_until` has passed, and closes them with `close(AtExpiry)`, the rent 
 - the receiver is paid;
 - the buyer gets any rounding remainder.
 
-It recreates a closed `receiver_token` or `refund_to` in the same transaction. A close that fails
-because an account is frozen is retried with an increasing back-off.
+If the receiver is owed tokens and `receiver_token` has been closed, it recreates that account in
+the same transaction. It never recreates `refund_to`: a session whose closed refund account is still
+owed tokens is skipped and reported. A close that fails because an account is frozen is retried
+with an increasing back-off.
 
 It runs on one elected instance, or on all of them tolerating duplicates: a second close finds the
 account gone and is skipped.
@@ -592,7 +605,7 @@ A Docker Compose stack: the facilitator, Kora and a configuration template.
 | `RPC_URL`, `NETWORK`, `PROGRAM_ID` | Where and what to settle |
 | Key paths | Fee-payer and rent-payer keys |
 | API keys | One per resource server; REQUIRED on `/verify` and `/settle` by default |
-| Limits per API key | Open sessions, rent fronted, and the session horizon: offers with a `maxSeconds` above the cap (default 86,400 s) are refused |
+| Limits per API key | Open sessions, rent fronted, recreated receiver accounts, and the session horizon: offers with a `maxSeconds` above the cap (default 86,400 s) are refused |
 | Rate limits | Per API key and per authority; for `/close`, per session and per client address |
 | Seller allowlist | Optional, for hosted operators |
 | Sponsorship policy | Who pays fees (sponsored by default) |
@@ -616,9 +629,9 @@ lock rent in long sessions it opens with itself. The API key and the limits per 
 - The `201` and `200` responses to open and top-up carry the `PAYMENT-RESPONSE` header.
 - Every check on a WebSocket connect runs before the upgrade and fails with an HTTP status. Close
   codes (section 7.4) apply only to connections already open.
-- **One gate per resource.** A gate instance, or a middleware mount, sells one resource and has its
-  own receiver authorizer. Every session records that key, so a session opened for one resource
-  is never accepted by another.
+- **One gate per resource.** A gate (all of its instances), or a middleware mount, sells one
+  resource and has one receiver authorizer, shared by its instances. Every session records that
+  key, so a session opened for one resource is never accepted by another.
 - TLS (`https`, `wss`) is REQUIRED except on localhost.
 
 ### 7.2 The session token
@@ -651,7 +664,7 @@ A short-lived JWS signed by the session's `authority` with its Ed25519 key.
   2. `aud` and `purpose` match, and `exp` has not passed (with 30 s of tolerance for clock skew
      on `iat` and `exp`);
   3. `jti` has not been seen before;
-  4. the session's terms match one of the gate's offers (program, `receiver_token`,
+  4. the session's terms match one of the gate's offers (program, `receiver`,
      `receiver_authorizer`, rate, bounds);
   5. `paid_until` is more than the margin away (default 2 s).
 
@@ -664,6 +677,8 @@ not a connection is live.
 | Trigger | Gate action | `close` kind |
 |---|---|---|
 | Open settled | `provision()`; subscribe; start the idle timer and the end timer | — |
+| `provision()` fails | Treated as a resource outage: close | `WaiveMinimum` |
+| Connect for a session this gate has not seen (opened directly on-chain, with matching terms and this gate's receiver authorizer) | Adopt it as if its open had just settled, then accept the connection | — |
 | Connection accepted | `attach()`; stop the idle timer | — |
 | Last connection drops | Start the idle timer (`idleCloseSeconds`) | — |
 | Idle timer fires (never connected, or not reconnected) | Close | `Standard` |
@@ -671,8 +686,9 @@ not a connection is live.
 | Resource outage (`closeOnOutage`) | Drop connections (`4503`); close | `WaiveMinimum` |
 | Admin command (section 7.7) | Drop connections (`4410`); close | `WaiveMinimum` |
 | A top-up seen on the account | Move the end timer | — |
-| End timer fires | Re-read the session at `confirmed`. If `paid_until` moved, reset the timer. Otherwise drop connections (`4402`) and close, retrying while the chain's clock is behind (`NotExpired`) | `AtExpiry` |
+| End timer fires | Re-read the session at `confirmed`. If `paid_until` moved, reset the timer. Otherwise stop forwarding and close. On `NotExpired`, re-read: if `paid_until` moved (a top-up landed), resume forwarding and reset the timer; if not (the chain's clock is behind), retry. Once the close is confirmed, drop connections (`4402`) | `AtExpiry` |
 | Account closed by another party | Drop connections (`4410`) | — |
+| A close fails because the buyer's `refund_to` is closed and still owed tokens | Do not retry: the session settles with `AtExpiry`, which usually owes `refund_to` nothing | — |
 | The session ends, whatever the cause | `teardown(reason)`, once; unsubscribe | — |
 
 - **Clocks.** The gate's timers run on an injectable clock: the wall clock in production, the
@@ -828,11 +844,15 @@ The node's endpoint and key are configured in `.env`.
 | `maxRate` | None: REQUIRED | Highest rate accepted, in base units per second |
 | `maxPerSession` | None: REQUIRED | Most one session may lock, open and top-ups together |
 | `budget` | None: REQUIRED | `{amount, periodSeconds}`: most locked across sessions per period |
-| `maxMinSeconds` | 300 | Highest `minSeconds` accepted, so a seller cannot remove the refund by setting the minimum equal to the duration |
+| `maxMinSeconds` | 300 | Highest `minSeconds` accepted. With `maxRate`, it caps the charge a session incurs however early it ends |
 | `autoTopUp` | Off | Top up automatically while connected |
 | `topUpAheadSeconds` | 30 | How long before `paidUntil` an automatic top-up starts. It MUST exceed the facilitator's 10 s margin plus confirmation time |
 | `topUpSeconds` | The session's opening duration | Duration bought by each automatic top-up |
-| `idleCloseSeconds` | 300 | Close a session after this long without tool activity |
+| `inactivityCloseSeconds` | 300 | Close a session after this long without tool activity (distinct from the gate's `idleCloseSeconds`) |
+
+A session bought at its minimum duration has no refundable part: the minimum is charged in any
+case. To keep a refundable part, a client requests a duration above `minSeconds`, or opens at the
+minimum and tops up.
 
 ### 9.3 Guarantees in every configuration
 
@@ -855,12 +875,13 @@ the session appears or the blockhash expires.
   within budget;
 - it reconnects with backoff, signing a fresh token each time.
 
-**It closes** on an explicit close, when the session goes out of scope, after `idleCloseSeconds`,
+**It closes** on an explicit close, when the session goes out of scope, after `inactivityCloseSeconds`,
 on error, and on process exit or signal.
 
 **Close fallback chain:**
 1. the gate's close;
-2. the facilitator's sponsored close (`extra.closeUrl`), signed by the authority;
+2. the facilitator's sponsored close: fetch the fee payer and a blockhash from `extra.closeUrl`,
+   then sign the close as the authority and post it there;
 3. a unilateral on-chain close, if the authority holds SOL;
 4. otherwise, the session runs to expiry and the deposit is spent in full.
 
@@ -942,7 +963,7 @@ The funding instruction in `open` and `topUp` (section 5.3) is one pull from the
 - signed by the authority as delegate;
 - for exactly `amount`.
 
-In `open`, `refund_to` is the owner's associated token account.
+In `open`, `refund_owner` is the owner, so refunds return to the owner's associated token account.
 
 Facilitator checks:
 - the program is the Subscriptions program;
@@ -978,9 +999,10 @@ Facilitator checks:
 | Session | Gate restarts | Timers restored from the chain | The session continues |
 | End | Paid time runs out | `4402`, then settled with `AtExpiry` | Receiver paid for the full time; any rounding remainder refunded |
 | End | A top-up lands just as the gate closes at expiry | The `AtExpiry` close fails; the session continues | The top-up counts |
-| Close | Gate unreachable | Sponsored close through the facilitator | Unused time refunded |
+| Close | Gate unreachable | Sponsored close through the facilitator | Unused time above the minimum refunded |
 | Close | Gate and facilitator unreachable | Unilateral close if the authority holds SOL; otherwise the session runs to expiry | With SOL: unused time refunded. Without: the deposit is spent in full |
-| Close | A payout account was closed | The close transaction recreates it | Unaffected |
+| Close | The seller closed its `receiver_token` | The close transaction recreates it, counted against the seller's API key | Unaffected |
+| Close | The buyer closed its `refund_to` | Closes that owe it tokens fail until the buyer recreates it; otherwise the session settles at expiry, when it is usually owed nothing | Unused time is charged unless the buyer recreates the account |
 | Close | A payout account is frozen by the mint's freeze authority | `close` fails until it is thawed | Held in the vault |
 | Crash | The agent stops with a session open | On restart, closed via the store or a chain lookup; otherwise at expiry | Bounded by the deposit |
 
@@ -991,9 +1013,9 @@ maths.
 
 | Layer | Tooling | Coverage |
 |---|---|---|
-| Program | LiteSVM, with clock control | The maths, including property tests: `claimed ≤ earned ≤ owed ≤ deposited`, and every token that entered the vault leaves it exactly once (`owed + refund = deposited + uncredited`). Every signer on every instruction, before and after `paid_until`. Every `close` kind: `AtExpiry` before and after `paid_until`, `WaiveMinimum` by each signer, a waiver after a claim. Account substitution on every instruction (a vault that is not the canonical one, other payout or rent accounts, non-associated payout accounts). Funding by a preceding transfer. Top-up refused after expiry. Rent return. Events |
+| Program | LiteSVM, with clock control | The maths, including property tests: `claimed ≤ earned ≤ owed ≤ deposited`, and every token that entered the vault leaves it exactly once (`owed + refund = deposited + uncredited`). Every signer on every instruction, before and after `paid_until`. Every `close` kind: `AtExpiry` before and after `paid_until`, `WaiveMinimum` by each signer, a waiver after a claim. Account substitution on every instruction (a vault that is not the canonical one, payout accounts other than the derived ones, another rent payer). Zero transfers skipped with a missing destination. A clock that steps back. Funding by a preceding transfer. Top-up refused after expiry. Rent return. Events |
 | Scheme | Unit tests | Offer construction, payload parsing, every refusal reason, byte-for-byte echo, number encoding |
-| Facilitator | Surfpool (cloning the devnet USDC mint and the Subscriptions program), with Kora | Every action in both funding modes; fee-payer and rent-payer isolation; the sponsored close; recreating closed payout accounts; limits per API key; rent round trip; the sweeper; `settlement_pending` |
+| Facilitator | Surfpool (cloning the devnet USDC mint and the Subscriptions program), with Kora | Every action in both funding modes; fee-payer and rent-payer isolation; the sponsored close, including `GET /close` for a client without node access; recreating a closed `receiver_token`, and never a `refund_to`; limits per API key; rent round trip; the sweeper; `settlement_pending` |
 | Gate | Unit tests, plus a fake upstream and an injected clock | Tokens, close codes, policies, the lifecycle table of section 7.3, assertions, the JWKS, events, timers, restart recovery |
 | Client | Unit tests against a fake gate | Policy refusals, closing paths, reconnects, top-up timing, the optional store and RPC |
 | End to end | The full stack on Surfpool, with the gate's clock driven by the network's; a smoke run on devnet | The example flow and every failure in section 11 |
@@ -1026,7 +1048,7 @@ reaction), unless stated otherwise.
 | 12 | Allowance funding | Pulled from the owner; refunded to the owner; refused over the cap |
 | 13 | Payment whose `accepted` differs from the offer by one byte; `x402Version` 1 | Refused (`invalid_payment_requirements`; `invalid_x402_version`); no session |
 | 14 | The same payment sent twice | The same session reported twice; one session on-chain |
-| 15 | Sponsored close through `closeUrl` | Closed and refunded. A session opened through another facilitator is refused |
+| 15 | Sponsored close through `closeUrl`, built only from what `GET /close` returns | Closed and refunded. A session opened through another facilitator is refused |
 | 16 | Close by an unrelated key after `paid_until` | Succeeds: the receiver is paid, the remainder refunded |
 | 17 | Top-up for an unknown session | `unknown_session` |
 | 18 | *(with `--facilitator`)* Fee payer or rent payer in a forbidden position | Refused (`payer_misuse`) |
