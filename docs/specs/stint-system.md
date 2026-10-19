@@ -313,14 +313,16 @@ end        = min(now, paid_until)
 elapsed    = max(0, end - started_at)
 earned     = min(deposited, rate × elapsed)           what claim may pay out
 charged    = max(min_seconds, elapsed)                at close; elapsed alone if the close waives the minimum
-owed       = max(claimed, min(deposited, rate × charged))    at close
-refund     = vault.amount - (owed - claimed)          at close
+due        = min(deposited, rate × charged)           at close: the session's total charge
+owed       = max(claimed, due) - claimed              at close: what is still to be paid to the receiver
+refund     = vault.amount - owed                      at close
 ```
 
-`refund` includes the rounding remainder (`deposited mod rate`) and any tokens that reached the
+`owed` excludes what earlier claims already paid, so it is exactly what the close transfers to the
+receiver. `refund` includes the rounding remainder (`deposited mod rate`) and any tokens that reached the
 vault without being credited.
 
-`claim` never pays the minimum: it pays `earned`. So `claimed ≤ earned ≤ owed` at every close,
+`claim` never pays the minimum: it pays `earned`. So `claimed ≤ earned ≤ due` at every close,
 including one that waives the minimum.
 
 `earned` only grows while the chain's clock does. The runtime keeps that clock from moving
@@ -405,7 +407,7 @@ instruction that credits it succeed or fail together.
   ahead of the chain's simply retries.
 - **Checks:** the account checks of section 4.1.
 - **Effects:**
-  1. transfers `owed - claimed` to `receiver_token`;
+  1. transfers `owed` to `receiver_token`;
   2. transfers the vault's remaining balance (the residual) to `refund_to`. From `paid_until` on,
      if `refund_to` no longer exists, the residual goes to `receiver_token` instead and is
      reported as `redirected`. "No longer exists" means **owned by the System program**, whatever
@@ -452,7 +454,7 @@ refunded.
 | `Opened` | `session`, `authority`, `rate`, `min_seconds`, `max_seconds`, `deposited`, `started_at`, `paid_until` |
 | `ToppedUp` | `session`, `added`, `deposited`, `paid_until` |
 | `Claimed` | `session`, `amount`, `claimed` |
-| `Closed` | `session`, `kind`, `owed`, `refunded`, `redirected`, `closed_by`, `at` |
+| `Closed` | `session`, `kind`, `claimed` (paid by earlier claims), `owed` (paid by this close), `refunded`, `redirected`, `closed_by`, `at` |
 
 ### 4.5 Errors
 
@@ -678,7 +680,7 @@ Servers MUST derive the payer from the signed transaction, not from the response
   deposits nothing), `extra.action: "close"` and `extra.session` set.
 
 The gate takes `paid` and `refunded` from the `Closed` event in the confirmed transaction:
-`paid` is `owed + redirected`, and `refunded` is `refunded`.
+`paid` is `claimed + owed + redirected`, and `refunded` is `refunded`.
 
 **Payment flow.** `elapsed` declares `escrow`: open is the first settlement (the deposit), close is
 the second (the final charge and the refund). Unlike a single-request escrow flow, the second
@@ -715,7 +717,7 @@ One endpoint for buyers, without an API key:
 | Endpoint | Behaviour |
 |---|---|
 | `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, programId}`, current at the time of the request. With `?session=<address>`, also the session's stored fields |
-| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `{success, transaction, paid, refunded}`, with `paid` = `owed + redirected` from the `Closed` event, as for the gate |
+| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `{success, transaction, paid, refunded}`, with `paid` = `claimed + owed + redirected` from the `Closed` event, as for the gate |
 
 Both are rate-limited per session and per client address. `GET` serves a blockhash cached for a few
 seconds, so unauthenticated requests do not each reach the node.
@@ -1211,7 +1213,7 @@ reaction), unless stated otherwise.
 
 | # | Scenario | Pass condition |
 |---|---|---|
-| 1 | Open, connect, close early | Refund = deposit − owed; the receiver receives owed |
+| 1 | Open, connect, close early | Refund = deposit − due; the receiver receives due, across claims and the close |
 | 2 | Close before `minSeconds` | `minSeconds` charged |
 | 3 | Expiry | Forwarding stopped within 5 s of `paidUntil`; the close confirmed and `4402` sent within 30 s |
 | 4 | Top-up before and after expiry | Extended; then refused |
