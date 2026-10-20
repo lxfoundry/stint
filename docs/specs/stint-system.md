@@ -960,7 +960,7 @@ not a connection is live.
 | Connection accepted | `attach()`; stop the idle timer | — |
 | Last connection drops | Start the idle timer (`idleCloseSeconds`) | — |
 | Idle timer fires (never connected, or not reconnected) | Close | `Standard` |
-| The buyer's close request | Close. Once the close is confirmed, drop connections (`4410`). If its settlement is pending, drop them when the account-closed notification arrives, and if the close's blockhash expires first, build and send the close again. If it fails, for example with `409` because `refund_to` is closed, keep them: the session continues | `Standard` |
+| The buyer's close request | Close. Once the close is confirmed, drop connections (`4410`). If its settlement is pending, drop them when the account-closed notification arrives, and if the close's blockhash expires first, build and send the close again, once. If it fails, for example with `409` because `refund_to` is closed, keep them: the session continues | `Standard` |
 | Resource outage (`closeOnOutage`) | Drop connections (`4503`); close | `WaiveMinimum` |
 | Admin command (section 7.7) | Drop connections (`4410`); close | `WaiveMinimum` |
 | A top-up seen on the account | Move the end timer | — |
@@ -1139,6 +1139,7 @@ The node's endpoint and key are configured in `.env`.
 | `topUpAheadSeconds` | 30 | How long before `paidUntil` an automatic top-up starts. It MUST exceed the facilitator's 10 s margin plus confirmation time |
 | `topUpSeconds` | The session's opening duration | Duration bought by each automatic top-up |
 | `inactivityCloseSeconds` | 300 | Close a session after this long without tool activity (distinct from the gate's `idleCloseSeconds`) |
+| `closeWaitSeconds` | 180 | How long to wait for a pending close from the gate before the next fallback step (section 9.3). It MUST exceed two blockhash lifetimes: the gate's close and its one resend |
 
 A session bought at its minimum duration has no refundable part: the minimum is charged in any
 case. To keep a refundable part, a client requests a duration above `minSeconds`, or opens at the
@@ -1189,7 +1190,9 @@ on error, and on process exit or signal.
 Before each step after the first, the client checks that the session is still open. It asks the
 gate's status endpoint, `closeUrl` with `?session=`, or its `rpc`. A close from an earlier step
 can land late, so a session already closed ends the chain. A `202` from the gate's close means
-that close is pending: the client polls the status until `404` before moving on.
+that close is pending. The client polls the status until `404`, for at most `closeWaitSeconds`,
+then moves on. A gate close that lands later is harmless: the next step first checks that the
+session is still open, and two closes of one session cannot both land.
 
 ### 9.4 API
 
