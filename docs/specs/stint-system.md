@@ -1268,8 +1268,9 @@ reported as not applicable, not as failed.
 
 **The example agent's task, scripted** (scenario 22): `stint_open_session` → `stint_send`
 (subscribe to a watched account) → the harness sends a payment to that account →
-`stint_receive` with `match` returns the notification → `stint_close_session` → the `paid` and
-`refunded` reported by the close equal the on-chain balance changes of the receiver and the buyer.
+`stint_receive` with `match` returns the notification → `stint_close_session` → the `paid`
+reported by the close equals what the receiver gained in the session's claim and close
+transactions, and `refunded` what the buyer gained in the close.
 
 **Status.** Every scenario is `required` or `pending`; the library records which, beside the
 scenario.
@@ -1283,10 +1284,23 @@ scenario.
 applicable) and duration. Continuous integration publishes it as the job summary. When a scenario
 fails, the logs of every service for that run are kept with the report.
 
-**Isolation and timing.**
-- Each scenario uses fresh keys and new sessions, so scenarios share one stack and run
-  concurrently. A scenario that stops, restarts or adds a service gets a stack of its own and runs
-  alone.
+**Isolation.** Every scenario uses fresh buyer keys and new sessions. All scenarios run
+concurrently, each in one of three groups, set by what it changes:
+
+| Group | What the scenario changes | Scenarios | Runs on |
+|---|---|---|---|
+| Shared | Nothing another scenario uses | All others | The run's common stack |
+| Own stack | It stops, restarts, adds or reconfigures a service, or changes the seller's accounts | 10, 11, 23–28, 33, 34 | A stack of its own on the run's network: Kora, the facilitator, the gate and the example resource, with their own keys and seller wallet |
+| Own network | It moves the network's time | 31 | A Surfpool and a stack of its own |
+
+Moving the network's time affects every session on that network and cannot be undone, hence the
+third group.
+
+**Measuring money.** Shared scenarios pay the same receiver at the same time, so no scenario
+measures an account's balance over a period. It reads the token balance changes recorded in its own
+sessions' transactions.
+
+**Timing.**
 - Scenarios run in real time, on a network whose clock follows the wall clock (section 12.3), with
   short terms: `minSeconds` of 5 s or less, and a short `idleCloseSeconds`. The timing tolerance of
   section 12.6 applies.
@@ -1314,9 +1328,10 @@ Before the first scenario, the harness writes:
 - the Stint program, built from this repository, at its program ID;
 - the Subscriptions & Allowances program at its devnet address (section 10), from a copy dumped
   from devnet on first use and cached outside version control;
-- per-run keys, funded with SOL: Kora's fee payer, the rent payer, the receiver authorizer, the
-  sellers' wallets and the buyers' authorities. The buyers also receive USDC, and the sellers'
-  associated token accounts are created.
+- the common stack's keys, funded with SOL: Kora's fee payer, the rent payer, the receiver
+  authorizer and the seller's wallet, whose associated token account is created. An own stack's
+  keys are written the same way when it starts (section 12.2), and so are each scenario's buyer
+  keys, which also receive USDC.
 
 Every component is configured with the devnet identifiers (program IDs, the mint, the network
 identifier) and the URLs of the local services. A configuration that passes locally therefore
@@ -1372,7 +1387,9 @@ the target accepts allowance funding. It also has a client mode, run against a r
 itself):
 - a gate configured with a test offer: `minSeconds` of 5 s or less, and a short
   `idleCloseSeconds`;
-- a buyer key funded with SOL and the offer's asset on the target network;
+- a funding key with SOL and the offer's asset on the target network. The harness creates the
+  keys that each scenario, and on `devnet` each stack, needs. It funds them from this key and
+  returns what is left at the end of the run;
 - the network's RPC URL.
 
 **Timing tolerance:** a timed condition passes within 5 s (`confirmed` commitment plus the gate's
@@ -1406,7 +1423,7 @@ section 12.2.
 | 19 | *(on `external`, with `--facilitator` and `--facilitator-key`)* `/verify` of a valid open | — | No change on-chain |
 | 20 | A session opened directly on-chain with the gate's terms but another mint (S5) | — | `403` on connect; not adopted |
 | 21 | The buyer closes its refund account and sends one base unit to the vault, then the session expires | — | Closed at expiry; the residual goes to the receiver; the rent returns to the rent payer |
-| 22 | The example agent's task, scripted (section 12.2) | Stack | `stint_receive` returns the payment to the watched account; `paid` and `refunded` equal the on-chain balance changes; the session account is closed and its rent returned to the rent payer |
+| 22 | The example agent's task, scripted (section 12.2) | Stack | `stint_receive` returns the payment to the watched account; `paid` and `refunded` equal the balance changes recorded in the session's transactions; the session account is closed and its rent returned to the rent payer |
 | 23 | The gate restarts with a session open | Stack | Timers restored from the chain; the session is not closed early, and settles at `paidUntil` as in scenario 3 |
 | 24 | The gate is unreachable when the buyer closes | Stack | The client's fallback (section 9.3) closes through `closeUrl`; refund as in scenario 1 |
 | 25 | The gate and the facilitator are unreachable when the buyer closes | Stack | With SOL on the authority: a unilateral close, refunded as in scenario 1. Without: the session runs to expiry |
