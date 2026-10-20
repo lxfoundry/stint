@@ -804,7 +804,7 @@ One endpoint for buyers, without an API key:
 
 | Endpoint | Behaviour |
 |---|---|
-| `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, blockHeight, programId}`, current at the time of the request. `blockHeight` also tells a client without node access when one of its own transactions can no longer land (section 9.3). With `?session=<address>`, also the session's stored fields |
+| `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, blockHeight, programId}`, current at the time of the request. `blockHeight` also tells a client without node access when one of its own transactions can no longer land (section 9.3). With `?session=<address>`, also the session's stored fields, or `404` if no session exists at that address (it was never opened, or has closed) |
 | `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `{success, transaction, paid, refunded}`, with `paid` = `claimed + owed + redirected` from the `Closed` event, as for the gate |
 
 Both are rate-limited per session and per client address. `GET` serves a blockhash cached for a few
