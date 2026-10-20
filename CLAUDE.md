@@ -58,7 +58,8 @@ Code layout: section 3.3 of `docs/specs/stint-system.md`.
 Named in section 3.5 of `docs/specs/stint-system.md`: Anchor, Codama clients for `@solana/kit`,
 TypeScript on Node.js, LiteSVM and Surfpool, version 0 transactions. Exact versions, the package
 manager, the test runner and the build, test and run commands are pinned by the implementation
-plan, and recorded here once set.
+plan, and recorded here once set. On Windows, everything runs inside WSL 2 (the Solana and Anchor
+toolchains require it).
 
 ## Rules
 
@@ -76,6 +77,12 @@ plan, and recorded here once set.
 6. **Work on a branch** (`<type>/<short-slug>`), never on a detached HEAD.
 7. **Captured fixtures are scrubbed at capture time** of personal data. This repository is
    publishable at any moment, and nobody re-reads a committed JSON file.
+8. **Done means integrated.** A behaviour that crosses components is done when the end-to-end
+   scenarios covering it pass on the `local` target (section 12 of
+   `docs/specs/stint-system.md`), not when its unit tests pass.
+   - Write the scenario first, as `pending`.
+   - Make it `required` in the change where it first passes.
+   - A required scenario never goes back to `pending`.
 
 ## Skills
 
