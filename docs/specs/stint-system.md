@@ -768,7 +768,10 @@ twice. The facilitator recognises a retry from its own records:
   with, and, once known, its outcome. All of the facilitator's instances share these records, in
   a store that survives restarts (section 6.5).
 - **How a retry is answered.** A payload whose message is claimed or recorded, and that comes with
-  the same requirements and API key, is answered from that record. Nothing is verified, signed or
+  the same API key and the same requirements, is answered from that record. "The same
+  requirements" leaves out the advisory fields that a fresh offer changes: `maxTimeoutSeconds`,
+  `extra.recentBlockhash` and `extra.lastValidBlockHeight`. Every field the transaction is
+  checked against must match. Nothing is verified, signed or
   submitted again: the message is the one being, or already, settled.
   - `/verify` reports it valid while its settlement is pending or has succeeded. Otherwise it
     reports the recorded failure: `blockhash_expired` for a transaction that never landed, and
@@ -788,8 +791,9 @@ twice. The facilitator recognises a retry from its own records:
 - **How long.** A record is kept until its transaction's blockhash has expired, plus a margin.
   After that the payload is verified as new and fails (`blockhash_expired`), so a landed
   transaction cannot be presented as a payment again.
-- **Other requirements or another API key.** A payload that matches a record but comes with either
-  is refused (`invalid_payment_requirements`). Its transaction belongs to another settlement,
+- **Other requirements or another API key.** A payload that matches a record but comes with other
+  requirements (beyond the advisory fields above) or another API key is refused
+  (`invalid_payment_requirements`). Its transaction belongs to another settlement,
   which may still be in flight.
 
 ### 5.6 Optional `exact` fallback
