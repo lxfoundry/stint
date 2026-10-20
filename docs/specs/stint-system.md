@@ -876,9 +876,16 @@ not a connection is live.
 | A close before `paid_until` fails because the buyer's `refund_to` is closed and owed tokens | Do not retry. The session settles at expiry with `AtExpiry`, which pays any residual to the receiver (section 4.3) | — |
 | The session ends, whatever the cause | `teardown(reason)`, once; unsubscribe | — |
 
-- **Clocks.** The gate's timers run on an injectable clock: the wall clock in production, the
-  test network's clock in tests. The chain's clock decides every amount and can differ from the
-  gate's (S15); `AtExpiry` makes an early gate harmless.
+- **Clocks.** The gate has two injectable clocks.
+  - The **session clock** runs the timers of this table (idle, end, margin). It is the wall
+    clock in production. In tests it may follow the test network's clock, so that moving the
+    network's time forward (section 12.2) moves these timers too.
+  - The **token clock** checks `iat`, `exp` and the `jti` cache (section 7.2). It is always the
+    wall clock, which clients also sign with, so a token stays valid when a test moves the
+    network's time.
+
+  The chain's clock decides every amount and can differ from both (S15); `AtExpiry` makes an
+  early gate harmless.
 - **Restarts.** On start, the gate lists the open sessions whose `receiver_authorizer` is its key
   (a program-account query filtered on that field), keeps those that pass check 4 of section 7.2
   (the mint included), and restores their timers.
