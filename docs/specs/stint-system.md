@@ -175,6 +175,40 @@ For readers who know EVM chains, the main differences:
 | Freezing | Only if the token implements it (USDC's blacklist) | Built in, if the mint has a freeze authority (S10) |
 | Paying someone else's fees | A relayer or a paymaster | A different first signer: the fee payer (S14) |
 
+### 2.3 Tooling facts the tests rely on
+
+The end-to-end harness (section 12) depends on how its tools behave. These facts were read in each
+tool's source or documentation, at the version named. They are re-checked whenever the
+implementation plan pins another version, and the sections that depend on them cite them as (T1)
+to (T7).
+
+- **T1. On Windows, Solana programs are built inside WSL.** The Solana and Anchor installation
+  guides require it, and the official installer supports macOS, Linux and WSL. *Used in 3.5.*
+- **T2. The embedded Surfpool** (`@solana/surfpool`, v1.6.1) ships native builds for macOS
+  (x86-64 and arm64) and Linux x86-64 (glibc) only. *Used in 3.5.*
+- **T3. Surfpool's chain clock is its start time plus the slot time for each block produced**
+  (v1.6.1).
+  - In `clock` mode it produces a block at every slot interval, so the chain's clock follows the
+    wall clock.
+  - The embedded library defaults to `transaction` mode, one block per transaction, with a 1 ms
+    slot.
+
+  *Used in 12.3.*
+- **T4. Surfpool's cheatcodes are JSON-RPC methods named `surfnet_*`** (v1.6.1).
+  - They can write a token account's fields, including its state, so an account can be marked
+    frozen.
+  - They can move the network's time forward, never back. The clock then keeps running from the
+    new time.
+
+  *Used in 12.2.*
+- **T5. Cheatcodes are applied outside Surfpool's transaction queue,** so a cheatcode and a
+  transaction sent together can take effect in either order (Surfpool issue #820). *Used in 12.3.*
+- **T6. Surfpool simulates commitment levels** (v1.6.1). Account reads and account subscriptions
+  return the latest state at any commitment, and account notifications carry the slot at which the
+  subscription was made. *Used in 12.5.*
+- **T7. Kora makes no outside request with its `Mock` price source and free pricing.** Its
+  `Jupiter` price source needs an API key and the network. *Used in 12.3.*
+
 ## 3. Architecture
 
 ### 3.1 Components
@@ -252,7 +286,7 @@ decimals). Only classic SPL Token mints are supported; Token-2022 is out of scop
 | Kora in tests | The `kora` binary, run as a process by the harness, so every service shares the host's network |
 | Transactions | Version 0 transactions, without address lookup tables (section 14) |
 | Local start | One command starts the whole stack locally: Surfpool, the facilitator with Kora, the gate, the example resource. The same command can use devnet in place of Surfpool |
-| Platform | Linux or macOS. On Windows, WSL 2: the Solana and Anchor toolchains require it, and the embedded Surfpool has no Windows build |
+| Platform | Linux x86-64 or macOS. On Windows, WSL 2: the Solana and Anchor toolchains require it (T1), and the embedded Surfpool has no Windows build (T2) |
 | Continuous integration | The local end-to-end target runs on every push and pull request; the devnet target runs on demand only |
 
 Exact versions, the package manager, the test runner and the build, test and run commands are
@@ -1310,13 +1344,14 @@ sessions' transactions.
 ### 12.3 Local network fixtures
 
 Surfpool runs **offline**, embedded in the harness's process. Nothing is fetched from another
-network during a run, so no remote request can fail a transaction.
+network during a run, so no remote request can fail a transaction. Kora is configured with free
+pricing and its `Mock` price source, so it makes no outside request either (T7).
 
 It **produces blocks on a clock**, with a 400 ms slot time, as a public network does. The harness
 sets both explicitly:
-- Surfpool's clock advances by the slot time with each block.
-- Its embedded library defaults to one block per transaction with a 1 ms slot. In that mode the
-  chain's clock would barely move between transactions, `paid_until` would never arrive, and
+- Surfpool's clock advances by the slot time with each block (T3).
+- Its embedded library defaults to one block per transaction with a 1 ms slot (T3). In that mode
+  the chain's clock would barely move between transactions, `paid_until` would never arrive, and
   every expiry scenario would fail.
 - In clock mode the chain's clock follows the wall clock. It falls behind when blocks are late,
   which the gate's `AtExpiry` retry already handles (section 7.3).
@@ -1337,7 +1372,7 @@ Every component is configured with the devnet identifiers (program IDs, the mint
 identifier) and the URLs of the local services. A configuration that passes locally therefore
 differs from devnet's only by its URLs.
 
-Surfpool applies cheatcodes outside its transaction queue, so the two can race. The harness
+Surfpool applies cheatcodes outside its transaction queue, so the two can race (T5). The harness
 finishes its setup, then waits for a new slot, before a scenario starts.
 
 ### 12.4 Testability requirements
@@ -1368,10 +1403,10 @@ upgrade.
 
 | Difference | Effect on the scenarios | Covered by |
 |---|---|---|
-| Commitment levels are simulated: account reads and account subscriptions return the latest state at any commitment | The delay before `confirmed`, which the gate's margin and the facilitator's 10 s top-up margin allow for, does not occur | The `devnet` target |
-| Account notifications carry the slot at which the subscription was made | The `slot` of the example stream's `account` messages (section 8) is not meaningful locally; no scenario asserts on it | The `devnet` target |
+| Commitment levels are simulated: account reads and account subscriptions return the latest state at any commitment (T6) | The delay before `confirmed`, which the gate's margin and the facilitator's 10 s top-up margin allow for, does not occur | The `devnet` target |
+| Account notifications carry the slot at which the subscription was made (T6) | The `slot` of the example stream's `account` messages (section 8) is not meaningful locally; no scenario asserts on it | The `devnet` target |
 | One node, no network latency, no other traffic | Expired blockhashes, retries and rate limits are rare | The `devnet` target |
-| The USDC mint's authorities are harness keys | Freeze scenarios run locally only: on devnet, the mint's freeze authority belongs to its issuer | — |
+| The USDC mint's authorities are harness keys | Freeze scenarios run locally only: on devnet, the mint's freeze authority (S10) is a key the harness does not hold | — |
 
 ### 12.6 Conformance suite
 
