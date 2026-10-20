@@ -974,8 +974,8 @@ not a connection is live.
 
 | Trigger | Gate action | `close` kind |
 |---|---|---|
-| Open settled | `provision()`; subscribe; start the idle timer and the end timer | — |
-| An open settled again for a session this gate already tracks (a retried or repeated payment) | Answer `201` with the session's current state. No `provision()`, and no timer is touched | — |
+| Open settled | Read the session at `confirmed`. If its account is gone (a repeated payment answered after the session closed), answer `404` and do nothing more. Otherwise `provision()`; subscribe; start the idle timer and the end timer | — |
+| An open settled again for a session this gate already tracks (a retried or repeated payment). With several instances, this is decided gate-wide (section 7.8) | Answer `201` with the session's current state. No `provision()`, and no timer is touched | — |
 | `provision()` fails | Treated as a resource outage: close | `WaiveMinimum` |
 | Connect for a session this gate has not seen (opened directly on-chain, passing every check of section 7.2, including the mint, and with this gate's receiver authorizer) | Adopt it as if its open had just settled, then accept the connection | — |
 | Connection accepted | `attach()`; stop the idle timer | — |
@@ -1095,6 +1095,7 @@ The chain is the only shared state.
 | Offers, open, top-up, status, closing expired sessions | Any instance can handle them |
 | A live connection | Handled by the instance that holds it |
 | The connection limit, `jti` replay protection, disconnect grace | Need coordination: one of the two options below |
+| Whether a settled open is a repeat for a session already tracked (section 7.3) | Needs the shared registry: `POST /sessions` carries no session id for affinity to route on |
 
 **Coordination options:**
 - **Session affinity** (RECOMMENDED): route `/sessions/:id/…` by a consistent hash of the session
