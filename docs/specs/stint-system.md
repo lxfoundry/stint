@@ -878,7 +878,7 @@ sessions it opens with itself. The API key and the limits per key bound that.
 |---|---|---|
 | `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `202 {session, transaction}` while the settlement is pending; `400 invalid_duration` |
 | `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration` |
-| `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`; `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
+| `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`; `202 {transaction}` while the settlement is pending (the client polls the status until `404`); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
 | `GET /sessions/:id` | Status from the chain: `paidUntil`, deposited and a fresh blockhash. Earned so far and time left are estimates at the gate's session clock (section 7.3); the chain's clock decides the amounts (section 4.2) | `200`; `404` |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
 | `GET /.well-known/jwks.json` | The gate's assertion keys (section 7.7) | `200` |
@@ -949,7 +949,7 @@ not a connection is live.
 | Connection accepted | `attach()`; stop the idle timer | — |
 | Last connection drops | Start the idle timer (`idleCloseSeconds`) | — |
 | Idle timer fires (never connected, or not reconnected) | Close | `Standard` |
-| The buyer's close request | Close. Once the close is confirmed, drop connections (`4410`). If it fails, for example with `409` because `refund_to` is closed, keep them: the session continues | `Standard` |
+| The buyer's close request | Close. Once the close is confirmed, drop connections (`4410`). If its settlement is pending, drop them when the account-closed notification arrives, and if the close's blockhash expires first, build and send the close again. If it fails, for example with `409` because `refund_to` is closed, keep them: the session continues | `Standard` |
 | Resource outage (`closeOnOutage`) | Drop connections (`4503`); close | `WaiveMinimum` |
 | Admin command (section 7.7) | Drop connections (`4410`); close | `WaiveMinimum` |
 | A top-up seen on the account | Move the end timer | — |
@@ -1169,6 +1169,11 @@ on error, and on process exit or signal.
    then sign the close as the authority and post it there;
 3. a unilateral on-chain close, if the authority holds SOL;
 4. otherwise, the session runs to expiry and the deposit is spent in full.
+
+Before each step after the first, the client checks that the session is still open. It asks the
+gate's status endpoint, `closeUrl` with `?session=`, or its `rpc`. A close from an earlier step
+can land late, so a session already closed ends the chain. A `202` from the gate's close means
+that close is pending: the client polls the status until `404` before moving on.
 
 ### 9.4 API
 
