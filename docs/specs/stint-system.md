@@ -1109,7 +1109,9 @@ minimum and tops up.
 - `x402Version` 2, scheme `elapsed`, `paymentFlow: "escrow"`, the configured network;
 - the program and the asset are on its allowlists, and so is the seller if a seller list is set;
 - the rate is at most `maxRate`, and `minSeconds` at most `maxMinSeconds`;
-- `minSeconds ≤ seconds ≤ maxSeconds`, and `amount = rate × seconds`;
+- `seconds` is a valid duration (section 5.2): for an open, `minSeconds ≤ seconds ≤ maxSeconds`;
+  for a top-up, at most what `maxSeconds` leaves after the time already covered;
+- `amount = rate × seconds`;
 - `amount` fits `maxPerSession` and the period budget;
 - `seconds` is what was requested.
 
