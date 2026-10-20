@@ -883,10 +883,15 @@ sessions it opens with itself. The API key and the limits per key bound that.
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
 | `GET /.well-known/jwks.json` | The gate's assertion keys (section 7.7) | `200` |
 
-- The `201`, `200` and `202` responses to open and top-up carry the `PAYMENT-RESPONSE` header. A
-  `202` means the facilitator answered `settlement_pending` (section 5.5): the transaction was
-  submitted and has not been confirmed yet. The gate keeps watching it and treats the open as
-  settled once it confirms.
+- The `201`, `200` and `202` responses to open and top-up carry the `PAYMENT-RESPONSE` header.
+- **`202` is specific to this scheme.** It means the facilitator answered `settlement_pending`
+  (section 5.5): the transaction was submitted and is not yet confirmed. Its `PAYMENT-RESPONSE`
+  has `success: false`, `errorReason: "settlement_pending"` and the submitted `transaction`.
+- **After a `202` to an open,** the gate subscribes to the session address at `confirmed` until
+  the block height passes the payload blockhash's last valid one. If the account appears with
+  the offer's terms before then, the gate proceeds as when an open settles (section 7.3).
+  Otherwise the transaction never landed, and nothing was charged. A pending top-up needs nothing
+  more: the gate is already subscribed to the session and sees it land.
 - Every check on a WebSocket connect runs before the upgrade and fails with an HTTP status. Close
   codes (section 7.4) apply only to connections already open.
 - **One gate per resource.** A gate (all of its instances), or a middleware mount, sells one
@@ -1143,9 +1148,12 @@ minimum and tops up.
 It also echoes the accepted entry byte for byte, and **builds the transaction itself** from the
 terms: it never signs a transaction supplied by the seller.
 
-**After paying,** it treats `settlement_pending` (a `202` from the gate) as not final. It polls the
-session status until the session appears (for a top-up, until `paidUntil` moves) or the blockhash
-expires.
+**After paying,** it treats `settlement_pending` (a `202` from the gate) as not final.
+- It polls the session status until the session appears (for a top-up, until `paidUntil` moves).
+- It stops once the offer's `maxTimeoutSeconds` has passed, which never outlasts the blockhash
+  (section 5.1), so a client without an `rpc` also knows when to stop.
+- A timeout or a `5xx` after paying is treated the same way. The client derives the session
+  address from its authority and seed, and polls it.
 
 **During a session:**
 - with `autoTopUp`, it tops up `topUpAheadSeconds` before `paidUntil`, only while connected and
