@@ -83,7 +83,7 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
   An instruction that accepts a different account than intended (account substitution) is a common
   flaw in Solana programs. *Used in 4.1, 12.*
 - **S3. A program-derived address (PDA)** is computed from seeds and a program ID and has no
-  private key. Only that program can sign for it. *Used in 4.1.*
+  private key. Only that program can sign for it. *Used in 4.1, 4.3.*
 
 **Tokens**
 
@@ -107,9 +107,11 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
   who does not sign. A token account whose `owner` is a given wallet or PDA therefore proves
   nothing about who created it or why. *Used in 4.1, 12.*
 - **S7. The associated token account (ATA)** of a wallet (or of a PDA) for a mint lives at an
-  address derived from (wallet, token program, mint). It is unique and predictable. Anyone can create it, and the
-  idempotent create instruction succeeds if it already exists. Creating it requires knowing the
-  wallet. *Used in 4.1, 4.3, 5.3, 6.4, 10.1, 11.*
+  address derived from (wallet, token program, mint). It is unique and predictable. Anyone can
+  create it, and the idempotent create instruction succeeds if it already exists. Creating it
+  requires knowing the wallet. The address is a PDA of the associated token account program
+  (S3), which only ever creates a token account of the named token program there. *Used in 4.1,
+  4.3, 5.3, 6.4, 10.1, 11.*
 - **S8. A token account has at most one delegate,** allowed to move tokens up to an approved
   amount. *Used in 10.1.*
 - **S9. A transfer from a token account to itself succeeds and moves nothing.** *Used in 4.3.*
@@ -463,7 +465,7 @@ instruction that credits it succeed or fail together.
      reported as `redirected`. "No longer exists" means **owned by the System program**, whatever
      its lamports (S12). A balance check would not do: anyone can send lamports to the address,
      which would block the redirect and leave the session unclosable. The address can only ever
-     hold an SPL Token account or a System-owned one (S7), so this check is complete;
+     hold an SPL Token account or a System-owned one (S3, S7), so this check is complete;
   3. closes the vault and the session, returning their lamports to `rent_payer`.
 - Emits `Closed`.
 
