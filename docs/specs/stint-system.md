@@ -305,7 +305,10 @@ registry: each session records its own terms.
 bytes) chosen at random by the client. About 250 bytes. Only the Stint program can change its data
 (S1) or sign for it (S3), which is what makes the program, and nobody else, the escrow's keeper. An
 address is unique only while its account exists: after a close, the same `(authority, seed)` could
-open again (S12), so clients draw a fresh random seed for every session.
+open again (S12), so clients draw a fresh random seed for every session. For the same reason, what
+off-chain components keep about a session ends when its account closes: the facilitator's record
+of the API key it opened through, and the gate's timers, subscription and connections. An open at
+a reused address starts with new records.
 
 | Field | Type | Meaning |
 |---|---|---|
