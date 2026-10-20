@@ -1290,7 +1290,7 @@ run is repeatable.
 | Target | What the harness starts | Network | Capabilities | Runs |
 |---|---|---|---|---|
 | `local` | Surfpool (embedded) and Kora, then the facilitator, the gate and the example resource from this repository | Surfpool, offline, with the fixtures of section 12.3 | Chain control, stack control | On every change, and in continuous integration on every push and pull request |
-| `devnet` | Kora, the facilitator, the gate and the example resource | Devnet, with the deployed program and wallets funded beforehand | Stack control | On demand. Never a merge gate: the public network is shared and rate-limited, and its faucets cannot be scripted |
+| `devnet` | Kora, the facilitator, the gate and the example resource | Devnet, with the deployed program and a funding key (section 12.6) | Stack control | On demand. Never a merge gate: the public network is shared and rate-limited, and its faucets cannot be scripted |
 | `external` | Nothing: `stint-conformance` targets a running gate, and optionally a facilitator (section 12.6) | The target's own | Chain control only if the RPC answers Surfpool's `surfnet_*` methods | Against any implementation |
 
 **Capabilities.**
@@ -1341,6 +1341,10 @@ concurrently, each in one of three groups, set by what it changes:
 
 Moving the network's time affects every session on that network and cannot be undone, hence the
 third group.
+
+On `devnet` and `external` the network's RPC is shared and rate-limited, and every own stack adds
+its own traffic. There the harness caps how many scenarios run at once, with a configurable limit.
+`local` has no cap.
 
 **Measuring money.** Shared scenarios pay the same receiver at the same time, so no scenario
 measures an account's balance over a period. It reads the token balance changes recorded in its own
@@ -1438,8 +1442,10 @@ itself):
 - a gate configured with a test offer: `minSeconds` of 5 s or less, and a short
   `idleCloseSeconds`;
 - a funding key with SOL and the offer's asset on the target network. The harness creates the
-  keys that each scenario, and on `devnet` each stack, needs. It funds them from this key and
-  returns what is left at the end of the run;
+  keys that each scenario, and on `devnet` each stack, needs, and funds them from this key. At the
+  end of the run, it first closes any of its sessions still open with `AtExpiry`, which anyone may
+  sign once `paid_until` has passed (section 4.3). This includes sessions left open when a scenario
+  stopped its stack. It then returns what is left to the funding key;
 - the network's RPC URL.
 
 **Timing tolerance:** a timed condition passes within 5 s (`confirmed` commitment plus the gate's
