@@ -1468,8 +1468,8 @@ section 12.2.
 | 15 | Sponsored close through `closeUrl`, built only from what `GET /close` returns | — | Closed and refunded. A session opened through another facilitator is refused |
 | 16 | Close by an unrelated key after `paid_until`, on a session opened directly on-chain whose receiver authorizer and rent payer are harness keys, so that no gate or sweeper closes it first | — | Succeeds: the receiver is paid, the remainder refunded, the rent returned to the harness's rent payer |
 | 17 | Top-up for an unknown session | — | `unknown_session` |
-| 18 | *(on `external`, with `--facilitator` and `--facilitator-key`)* Fee payer or rent payer in a forbidden position | — | Refused (`payer_misuse`) |
-| 19 | *(on `external`, with `--facilitator` and `--facilitator-key`)* `/verify` of a valid open | — | No change on-chain |
+| 18 | *(on `external`, only with `--facilitator` and `--facilitator-key`; otherwise not applicable)* Fee payer or rent payer in a forbidden position | — | Refused (`payer_misuse`) |
+| 19 | *(on `external`, only with `--facilitator` and `--facilitator-key`; otherwise not applicable)* `/verify` of a valid open | — | No change on-chain |
 | 20 | A session opened directly on-chain with the gate's terms but another mint (S5) | — | `403` on connect; not adopted |
 | 21 | The buyer closes its refund account and sends one base unit to the vault, asks the gate to close, then lets the session expire | — | The close request gets `409 refund_account_closed`, and the gate does not retry it. Closed at expiry; the residual goes to the receiver; the rent returns to the rent payer |
 | 22 | The example agent's task, scripted (section 12.2) | Stack | `stint_receive` returns the payment to the watched account; `paid` and `refunded` equal the balance changes recorded in the session's transactions; the session account is closed and its rent returned to the rent payer |
