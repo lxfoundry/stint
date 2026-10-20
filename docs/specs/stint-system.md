@@ -312,7 +312,9 @@ address is unique only while its account exists: after a close, the same `(autho
 open again (S12), so clients draw a fresh random seed for every session. For the same reason, what
 off-chain components keep about a session ends when its account closes: the facilitator's record
 of the API key it opened through, and the gate's timers, subscription and connections. An open at
-a reused address starts with new records.
+a reused address starts with new records. The facilitator's settlement records (section 5.5) are
+the exception: they are kept per transaction, not per session, and follow their own expiry, which
+can outlast the session.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -788,7 +790,10 @@ twice. The facilitator recognises a retry from its own records:
   for example after a store failure. The payload is then not refused: it is answered with
   `already_processed`, a non-final reason (section 5.4). The payment may have landed, so the gate
   and the client watch the chain (sections 7.1 and 9.3).
-- **How long.** A record is kept until its transaction's blockhash has expired, plus a margin.
+- **How long.** A record is kept until the node reports its transaction's blockhash as no longer
+  valid, at the commitment the facilitator verifies at, plus a margin. It is never dropped after a
+  fixed time: dropping it early cannot pay twice (S16), but it reopens the case of a retry with no
+  record.
   After that the payload is verified as new and fails (`blockhash_expired`), so a landed
   transaction cannot be presented as a payment again.
 - **Other requirements or another API key.** A payload that matches a record but comes with other
