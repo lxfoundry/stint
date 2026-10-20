@@ -111,7 +111,7 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
   create it, and the idempotent create instruction succeeds if it already exists. Creating it
   requires knowing the wallet. The address is a PDA of the associated token account program
   (S3), which only ever creates a token account of the named token program there. *Used in 4.1,
-  4.3, 5.3, 6.4, 10.1, 11.*
+  4.3, 5.3, 6.4, 10.1, 11, 12.*
 - **S8. A token account has at most one delegate,** allowed to move tokens up to an approved
   amount. *Used in 10.1.*
 - **S9. A transfer from a token account to itself succeeds and moves nothing.** *Used in 4.3.*
@@ -143,7 +143,7 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
     data or belongs to a program. Anchor's `init` relies on this; only `init_if_needed` accepts an
     account that already exists.
 
-  *Used in 4.1, 4.3, 5.3, 6.3, 11.*
+  *Used in 4.1, 4.3, 5.3, 6.3, 7.3, 11.*
 
 **Transactions and time**
 
@@ -156,7 +156,7 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
   - The fee payer is simply the first signer. It need not own anything the transaction moves,
     which is how fees are sponsored.
 
-  *Used in 5.3, 5.4, 6.2, 9.1.*
+  *Used in 5.3, 5.4, 6.2, 9.1, 12.*
 - **S15. `Clock::unix_timestamp` approximates real time.**
   - It is derived from validators' timestamps and bounded around the time expected from the slot
     count, so it can differ from a wall clock.
@@ -910,7 +910,7 @@ sessions it opens with itself. The API key and the limits per key bound that.
 |---|---|---|
 | `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `202 {session, transaction}` while the settlement is pending; `400 invalid_duration` |
 | `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration` |
-| `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`; `202 {transaction}` while the settlement is pending (the client polls the status until `404`); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
+| `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`; `202 {transaction}` while the settlement is pending (the client polls the status until `404`, for at most `closeWaitSeconds`: section 9.3); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
 | `GET /sessions/:id` | Status from the chain: `paidUntil`, deposited and a fresh blockhash. Earned so far and time left are estimates at the gate's session clock (section 7.3); the chain's clock decides the amounts (section 4.2) | `200`; `404` |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
 | `GET /.well-known/jwks.json` | The gate's assertion keys (section 7.7) | `200` |
