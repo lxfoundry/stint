@@ -1258,6 +1258,10 @@ run is repeatable.
 - **Stack control:** the harness runs the services, so it holds their keys (the seller's wallet,
   the receiver authorizer, the facilitator's API key, the resource's admin key) and can stop,
   restart or add instances of them.
+- **Allowance:** the facilitator accepts an allowance pull as the funding instruction (section
+  10), an optional mode. The `local` and `devnet` targets have it once this repository's
+  facilitator supports allowance funding (section 14, question 3). On `external`,
+  `stint-conformance` assumes it only when given `--allowance`.
 
 A scenario states the capabilities it needs (section 12.7). On a target that lacks one, it is
 reported as not applicable, not as failed.
@@ -1356,9 +1360,13 @@ upgrade.
 
 ### 12.6 Conformance suite
 
-`stint-conformance --gate <url> [--facilitator <url>] [--rpc <url>]` runs the scenarios of
-section 12.7 whose capabilities the target offers. It also has a client mode, run against a
-reference gate.
+```
+stint-conformance --gate <url> [--facilitator <url> [--facilitator-key <key>]] [--rpc <url>] [--allowance]
+```
+
+It runs the scenarios of section 12.7 whose capabilities the target offers. `--facilitator-key` is
+an API key of that facilitator, which `/verify` requires (section 6.5); `--allowance` declares that
+the target accepts allowance funding. It also has a client mode, run against a reference gate.
 
 **Prerequisites** for the `devnet` and `external` targets (the `local` target sets these up
 itself):
@@ -1372,7 +1380,8 @@ reaction), unless stated otherwise.
 
 ### 12.7 Scenarios
 
-**Needs:** "—" runs on every target; "Stack" and "Chain" are the capabilities of section 12.2.
+**Needs:** "—" runs on every target; "Chain", "Stack" and "Allowance" are the capabilities of
+section 12.2.
 
 | # | Scenario | Needs | Pass condition |
 |---|---|---|---|
@@ -1387,14 +1396,14 @@ reaction), unless stated otherwise.
 | 9 | Disconnect past the grace period; reconnect within it; never connect | — | Closed and refunded; kept; closed and refunded |
 | 10 | Resource outage | Stack | Closed; only the time served is charged |
 | 11 | Two gate instances, reconnecting elsewhere | Stack | Not closed |
-| 12 | Allowance funding | — | Pulled from the owner; refunded to the owner; refused over the cap |
+| 12 | Allowance funding | Allowance | Pulled from the owner; refunded to the owner; refused over the cap |
 | 13 | Payment whose `accepted` differs from the offer by one byte; `x402Version` 1 | — | Refused (`invalid_payment_requirements`; `invalid_x402_version`); no session |
 | 14 | The same payment sent twice | — | The same session reported twice; one session on-chain |
 | 15 | Sponsored close through `closeUrl`, built only from what `GET /close` returns | — | Closed and refunded. A session opened through another facilitator is refused |
-| 16 | Close by an unrelated key after `paid_until` | — | Succeeds: the receiver is paid, the remainder refunded |
+| 16 | Close by an unrelated key after `paid_until`, on a session opened directly on-chain whose receiver authorizer and rent payer are harness keys, so that no gate or sweeper closes it first | — | Succeeds: the receiver is paid, the remainder refunded, the rent returned to the harness's rent payer |
 | 17 | Top-up for an unknown session | — | `unknown_session` |
-| 18 | *(with `--facilitator`)* Fee payer or rent payer in a forbidden position | — | Refused (`payer_misuse`) |
-| 19 | *(with `--facilitator`)* `/verify` of a valid open | — | No change on-chain |
+| 18 | *(on `external`, with `--facilitator` and `--facilitator-key`)* Fee payer or rent payer in a forbidden position | — | Refused (`payer_misuse`) |
+| 19 | *(on `external`, with `--facilitator` and `--facilitator-key`)* `/verify` of a valid open | — | No change on-chain |
 | 20 | A session opened directly on-chain with the gate's terms but another mint (S5) | — | `403` on connect; not adopted |
 | 21 | The buyer closes its refund account and sends one base unit to the vault, then the session expires | — | Closed at expiry; the residual goes to the receiver; the rent returns to the rent payer |
 | 22 | The example agent's task, scripted (section 12.2) | Stack | `stint_receive` returns the payment to the watched account; `paid` and `refunded` equal the on-chain balance changes; the session account is closed and its rent returned to the rent payer |
