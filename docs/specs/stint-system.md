@@ -1387,7 +1387,8 @@ differs from devnet's only by its URLs and its keys (section 14, question 7 is t
 that could arise).
 
 Surfpool applies cheatcodes outside its transaction queue, so the two can race (T5). The harness
-finishes its setup, then waits for a new slot, before a scenario starts.
+therefore waits for a new slot after its setup, and after every cheatcode a scenario sends, on any
+target, before the next step.
 
 ### 12.4 Testability requirements
 
@@ -1420,7 +1421,7 @@ upgrade.
 | Commitment levels are simulated: account reads and account subscriptions return the latest state at any commitment (T6) | The delay before `confirmed`, which the gate's margin and the facilitator's 10 s top-up margin allow for, does not occur | The `devnet` target |
 | Account notifications carry the slot at which the subscription was made (T6) | The `slot` of the example stream's `account` messages (section 8) is not meaningful locally; no scenario asserts on it | The `devnet` target |
 | One node, no network latency, no other traffic | Expired blockhashes, retries and rate limits are rare | The `devnet` target |
-| The USDC mint's authorities are harness keys | Freeze scenarios run locally only: on devnet, the mint's freeze authority (S10) is a key the harness does not hold | — |
+| The USDC mint's authorities are harness keys | Freezes use the real instructions locally. They cannot run on `devnet`, whose mint's freeze authority (S10) is a key the harness does not hold and which has no cheatcodes. An external Surfpool freezes through cheatcodes instead (section 12.2) | — |
 
 ### 12.6 Conformance suite
 
