@@ -954,6 +954,7 @@ not a connection is live.
 | Trigger | Gate action | `close` kind |
 |---|---|---|
 | Open settled | `provision()`; subscribe; start the idle timer and the end timer | — |
+| An open settled again for a session this gate already tracks (a retried or repeated payment) | Answer `201` with the session's current state. No `provision()`, and no timer is touched | — |
 | `provision()` fails | Treated as a resource outage: close | `WaiveMinimum` |
 | Connect for a session this gate has not seen (opened directly on-chain, passing every check of section 7.2, including the mint, and with this gate's receiver authorizer) | Adopt it as if its open had just settled, then accept the connection | — |
 | Connection accepted | `attach()`; stop the idle timer | — |
@@ -1522,7 +1523,7 @@ section 12.2.
 | 11 | Two gate instances, reconnecting elsewhere | Stack | Not closed |
 | 12 | Allowance funding | Allowance | Pulled from the owner; refunded to the owner; refused over the cap |
 | 13 | Payment whose `accepted` differs from the offer by one byte; `x402Version` 1 | — | Refused (`invalid_payment_requirements`; `invalid_x402_version`); no session |
-| 14 | The same payment sent twice | — | The same session reported twice; one session on-chain |
+| 14 | The same payment sent twice | — | The same session reported twice; one session on-chain; the second answer changes nothing at the gate (its idle timer keeps running from the first) |
 | 15 | Sponsored close through `closeUrl`, built only from what `GET /close` returns | — | Closed and refunded. A session whose rent payer is not one of this facilitator's keys (opened directly on-chain with a harness rent payer) is refused |
 | 16 | Close by an unrelated key after `paid_until`, on a session opened directly on-chain whose receiver authorizer and rent payer are harness keys, so that no gate or sweeper closes it first | — | Succeeds: the receiver is paid, the remainder refunded, the rent returned to the harness's rent payer |
 | 17 | Top-up for an unknown session | — | `unknown_session` |
