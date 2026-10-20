@@ -1369,8 +1369,9 @@ Before the first scenario, the harness writes:
   its mint authority and its freeze authority. Balances are minted by ordinary transactions, and
   freeze scenarios use the real `FreezeAccount` instruction (S10);
 - the Stint program, built from this repository, at its program ID;
-- the Subscriptions & Allowances program at its devnet address (section 10), from a copy dumped
-  from devnet on first use and cached outside version control;
+- the Subscriptions & Allowances program at its devnet address (section 10), from a copy cached
+  outside version control. When the cache is empty, the copy is fetched from devnet before the
+  run starts and checked against a pinned hash, so the run itself stays offline;
 - the common stack's keys, funded with SOL: Kora's fee payer, the rent payer, the receiver
   authorizer and the seller's wallet, whose associated token account is created. An own stack's
   keys are written the same way when it starts (section 12.2), and so are each scenario's buyer
@@ -1378,7 +1379,8 @@ Before the first scenario, the harness writes:
 
 Every component is configured with the devnet identifiers (program IDs, the mint, the network
 identifier) and the URLs of the local services. A configuration that passes locally therefore
-differs from devnet's only by its URLs.
+differs from devnet's only by its URLs and its keys (section 14, question 7 is the one exception
+that could arise).
 
 Surfpool applies cheatcodes outside its transaction queue, so the two can race (T5). The harness
 finishes its setup, then waits for a new slot, before a scenario starts.
@@ -1502,3 +1504,4 @@ section 12.2.
 | 4 | Do the x402 TypeScript SDK and Kora accept version 0 transactions? | Legacy transactions |
 | 5 | Does Kora's TypeScript client work with the `@solana/kit` major version the plan pins? Its published releases declare earlier Kit major versions as peer dependencies | Call Kora's JSON-RPC interface directly |
 | 6 | Does Surfpool, offline, run the Subscriptions program from a copy written at its devnet address, and accept the USDC mint written at its devnet address with harness keys as its authorities (section 12.3)? | Fork devnet, with those accounts preloaded from a snapshot |
+| 7 | Does any component, such as the x402 SVM SDK or Kora, compare the node's genesis hash with the network identifier (`solana:EtWT…`)? If so, which genesis hash does offline Surfpool report? | The `local` target configures the network identifier from Surfpool's genesis hash |
