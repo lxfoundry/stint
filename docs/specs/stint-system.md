@@ -821,7 +821,7 @@ One endpoint for buyers, without an API key:
 
 | Endpoint | Behaviour |
 |---|---|
-| `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, blockHeight, programId}`, current at the time of the request. `blockHeight` also tells a client without node access when one of its own transactions can no longer land (section 9.3). With `?session=<address>`, also the session's stored fields, or `404` if no session exists at that address (it was never opened, or has closed) |
+| `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, blockHeight, programId}`, current at the time of the request. `blockHeight` is read at `confirmed`, and also tells a client without node access when one of its own transactions can no longer land (section 9.3). With `?session=<address>`, also the session's stored fields, or `404` if no session exists at that address (it was never opened, or has closed) |
 | `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `{success, transaction, paid, refunded}`, with `paid` = `claimed + owed + redirected` from the `Closed` event, as for the gate |
 
 Both are rate-limited per session and per client address. `GET` serves a blockhash cached for a few
@@ -915,13 +915,15 @@ sessions it opens with itself. The API key and the limits per key bound that.
   (section 5.5): the transaction was submitted and is not yet confirmed. Its `PAYMENT-RESPONSE`
   has `success: false`, `errorReason: "settlement_pending"` and the submitted `transaction`.
 - **After a `202` to an open,** the gate subscribes to the session address at `confirmed` until
-  the transaction's own blockhash is no longer valid. If the account appears with the offer's
-  terms before then, the gate proceeds as when an open settles (section 7.3).
+  the transaction's own blockhash is no longer valid. It then reads the address once more, since a
+  transaction that landed just before the expiry can become visible just after. If the account
+  has appeared with the offer's terms, the gate proceeds as when an open settles (section 7.3).
   Otherwise the transaction never landed, and nothing was charged. A pending top-up needs nothing
   more: the gate is already subscribed to the session and sees it land.
 - **When the facilitator answers `already_processed`** (section 5.4), the payment may have landed
   without a record of it. The gate answers `503`, never `402`. It watches the session address as
-  after a `202`, taking the address from the payload's `stint.open` accounts. The client treats
+  after a `202`: for an open, it takes the address from the payload's `stint.open` accounts; for a
+  top-up, it is already subscribed. The client treats
   the `503` as it treats any `5xx` after paying: it polls the session (section 9.3).
 - Every check on a WebSocket connect runs before the upgrade and fails with an HTTP status. Close
   codes (section 7.4) apply only to connections already open.
@@ -1185,8 +1187,8 @@ terms: it never signs a transaction supplied by the seller.
 **After paying,** it treats `settlement_pending` (a `202` from the gate) as not final.
 - It polls the session status until the session appears (for a top-up, until `paidUntil` moves).
 - It stops only once its transaction can no longer land, that is, once the transaction's
-  blockhash has expired. Stopping earlier could report a failure for a payment that lands
-  afterwards.
+  blockhash has expired, and after one last read of the status (as the gate does: section 7.1).
+  Stopping earlier could report a failure for a payment that lands afterwards.
   - With an `rpc`, the client checks the blockhash itself.
   - Without one, it built the transaction from the offer's `recentBlockhash`. It compares that
     offer's `lastValidBlockHeight` (section 5.1) with the current block height, which `GET
