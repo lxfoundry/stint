@@ -1503,9 +1503,9 @@ itself):
   keys that each scenario, and on `devnet` each stack, needs, and funds them from this key. At the
   end of the run, it first closes any of its sessions still open, including those left open when
   a scenario stopped its stack. It holds every buyer key, so it closes each one at once with a
-  `Standard` close signed and paid for by the session's authority (section 4.3). The exception is
-  a session whose refund account is closed: it waits for `paid_until` and closes with `AtExpiry`.
-  The harness then returns what is left to the funding key;
+  `Standard` close signed by the session's authority (section 4.3). The funding key is the fee
+  payer (S14), since some buyers hold no SOL. If a scenario closed the buyer's refund account, the
+  harness recreates it first (S7). It then returns what is left to the funding key;
 - the network's RPC URL.
 
 **Timing tolerance:** a timed condition passes within 5 s (`confirmed` commitment plus the gate's
