@@ -82,7 +82,8 @@ toolchains require it).
    `docs/specs/stint-system.md`), not when its unit tests pass.
    - Write the scenario first, as `pending`.
    - Make it `required` in the change where it first passes.
-   - A required scenario never goes back to `pending`.
+   - A required scenario never goes back to `pending`, unless the behaviour it covers is removed
+     from the specification.
 
 ## Skills
 

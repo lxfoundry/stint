@@ -1319,8 +1319,9 @@ scenario.
 - Both kinds run every time. A failing required scenario fails the run; a pending one is only
   reported.
 - A behaviour is written as a pending scenario before it is built.
-- A pending scenario that passes is made required in the same change. A required scenario never
-  goes back to pending, unless the behaviour it covers is removed from this specification.
+- A pending scenario that passes is made required in the same change, and the report flags it
+  until it is. A required scenario never goes back to pending, unless the behaviour it covers is
+  removed from this specification.
 
 **Report.** Every run writes a table: scenario, target, status, result (pass, fail, pending, not
 applicable) and duration. Continuous integration publishes it as the job summary. When a scenario
