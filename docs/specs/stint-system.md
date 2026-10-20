@@ -1485,9 +1485,11 @@ itself):
   `idleCloseSeconds`;
 - a funding key with SOL and the offer's asset on the target network. The harness creates the
   keys that each scenario, and on `devnet` each stack, needs, and funds them from this key. At the
-  end of the run, it first closes any of its sessions still open with `AtExpiry`, which anyone may
-  sign once `paid_until` has passed (section 4.3). This includes sessions left open when a scenario
-  stopped its stack. It then returns what is left to the funding key;
+  end of the run, it first closes any of its sessions still open, including those left open when
+  a scenario stopped its stack. It holds every buyer key, so it closes each one at once with a
+  `Standard` close signed and paid for by the session's authority (section 4.3). The exception is
+  a session whose refund account is closed: it waits for `paid_until` and closes with `AtExpiry`.
+  The harness then returns what is left to the funding key;
 - the network's RPC URL.
 
 **Timing tolerance:** a timed condition passes within 5 s (`confirmed` commitment plus the gate's
