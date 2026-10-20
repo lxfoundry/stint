@@ -1472,7 +1472,7 @@ section 12.2.
 | 12 | Allowance funding | Allowance | Pulled from the owner; refunded to the owner; refused over the cap |
 | 13 | Payment whose `accepted` differs from the offer by one byte; `x402Version` 1 | — | Refused (`invalid_payment_requirements`; `invalid_x402_version`); no session |
 | 14 | The same payment sent twice | — | The same session reported twice; one session on-chain |
-| 15 | Sponsored close through `closeUrl`, built only from what `GET /close` returns | — | Closed and refunded. A session opened through another facilitator is refused |
+| 15 | Sponsored close through `closeUrl`, built only from what `GET /close` returns | — | Closed and refunded. A session whose rent payer is not one of this facilitator's keys (opened directly on-chain with a harness rent payer) is refused |
 | 16 | Close by an unrelated key after `paid_until`, on a session opened directly on-chain whose receiver authorizer and rent payer are harness keys, so that no gate or sweeper closes it first | — | Succeeds: the receiver is paid, the remainder refunded, the rent returned to the harness's rent payer |
 | 17 | Top-up for an unknown session | — | `unknown_session` |
 | 18 | *(on `external`, only with `--facilitator` and `--facilitator-key`; otherwise not applicable)* Fee payer or rent payer in a forbidden position | — | Refused (`payer_misuse`) |
@@ -1492,7 +1492,7 @@ section 12.2.
 | 32 | A duration below `minSeconds`; above `maxSeconds`; a top-up that would take the session past `maxSeconds` | — | `400 invalid_duration` each time; nothing signed, nothing on-chain |
 | 33 | The reply to an open's settlement is lost after the transaction lands: a proxy run by the harness, between the stack and the network, forwards the transaction and drops the reply | Stack | Exactly one session on-chain, charged once; the client ends up with that session, from a retried settlement (section 5.5) or by polling after `settlement_pending` (section 9.3) |
 | 34 | A top-up lands while the gate is closing at expiry: the gate's session clock runs 5 s ahead, so its `AtExpiry` close fails with `NotExpired`, and the authority tops up on-chain meanwhile | Stack | The gate resumes forwarding and resets its end timer; the session continues to the new `paidUntil`, and the top-up counts |
-| 35 | A session opened directly on-chain with the gate's terms, mint and receiver authorizer, then a connect (the valid counterpart of scenario 20) | — | The connection is accepted and the gate adopts the session; the buyer's close through the gate settles it, refunded as in scenario 1 |
+| 35 | A session opened directly on-chain with the gate's terms, mint and receiver authorizer, and a harness key as rent payer, then a connect (the valid counterpart of scenario 20) | — | The connection is accepted and the gate adopts the session; the buyer's close through the gate settles it, refunded as in scenario 1, with the rent returned to the harness's rent payer |
 
 ## 13. Not built
 
