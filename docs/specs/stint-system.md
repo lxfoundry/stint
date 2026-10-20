@@ -677,10 +677,8 @@ settles, the facilitator records which API key it came through.
 
 `/verify` MUST be read-only: it simulates and never submits.
 
-**A transaction that has already landed** (a retry: see Idempotency in section 5.5) gets every
-check below except the blockhash and the simulation, which it would now fail. Its successful
-status on-chain takes the simulation's place. The other checks still run, so a client cannot pass
-off a landed transaction with other terms as its payment.
+**A payload this facilitator has already signed** (a retry: see Idempotency in section 5.5) is not
+verified again. `/verify` answers from its record.
 
 **Every type:**
 
@@ -727,13 +725,12 @@ it is used.
 
 ### 5.5 Settlement (facilitator `/settle`)
 
-1. If the transaction has already landed successfully (see Idempotency, below), verify it as
-   section 5.4 does for a landed transaction. Then report it as settled, with that transaction's
-   ID and the same session, without signing or submitting it again.
+1. If this facilitator holds a record for the transaction's message, answer from it (see
+   Idempotency, below).
 2. Otherwise, re-verify.
 3. The rent payer signs (`open`, and a `close` that recreates `receiver_token`).
 4. Kora signs as fee payer.
-5. Submit, and wait for `confirmed`.
+5. Record the transaction (see Idempotency), then submit it and wait for `confirmed`.
 
 The response follows x402 v2:
 - `success`, `transaction`, `network`;
@@ -760,18 +757,26 @@ settlement happens on a later request, or after expiry. So the gate drives both 
 rather than through a per-request middleware flow.
 
 **Idempotency.** A message is processed at most once (S16), so a retried settlement can never pay
-twice. The facilitator recognises the retry and answers it with the first result:
-- **What identifies the transaction.** Its ID is the fee payer's signature, which Kora adds at
-  settlement, so a retried payload does not carry it. The facilitator uses a signature the payload
-  already holds: the authority's (open, top-up, sponsored close) or the receiver authorizer's (a
-  close from the gate).
-- **Where to look.** It lists the transactions of the session address, which it derives itself
-  (section 5.3), back to the slot of the payload's blockhash, since no transaction lands before
-  its blockhash. It looks for one that carries that signature and whose recorded status has no
-  error.
-- **When.** `/verify` and `/settle` both run this check first (section 5.4, and step 1 above). A
-  landed open or close would fail simulation. A landed top-up might still simulate, but would be
-  refused at submission (S16).
+twice. The facilitator recognises a retry from its own records:
+- **What it records.** Before submitting a transaction, it records it under the hash of its
+  message. The record holds the signed transaction, its ID (the fee payer's signature), the
+  requirements and API key it came with, and, once known, its outcome. All of the facilitator's
+  instances share these records (section 6.5).
+- **How a retry is answered.** A payload whose message has a record, and that comes with the same
+  requirements and API key, is answered from that record. Nothing is verified, signed or
+  submitted again: the message is the one already verified.
+  - `/verify` reports it valid.
+  - `/settle` reports the recorded outcome. If the outcome is not known yet, it first looks the
+    transaction up by its ID. If the transaction has not landed and its blockhash is still
+    valid, it submits the recorded transaction again, which S16 makes safe.
+- **A concurrent duplicate.** Two identical payloads can both pass step 1 before either is
+  recorded. The second submission is then refused with `AlreadyProcessed` (S16), and `/settle`
+  answers it from the first one's record: `settlement_pending` until that confirms.
+- **How long.** A record is kept until its transaction's blockhash has expired, plus a margin.
+  After that the payload is verified as new and fails (`blockhash_expired`), so a landed
+  transaction cannot be presented as a payment again.
+- **Other requirements or another API key.** A payload that matches a record but comes with
+  either is verified as new. The transaction has already landed, so that verification fails.
 
 ### 5.6 Optional `exact` fallback
 
@@ -868,6 +873,7 @@ A Docker Compose stack: the facilitator, Kora and a configuration template.
 | Rate limits | Per API key and per authority; for `/close`, per session and per client address |
 | Seller allowlist | Optional, for hosted operators |
 | Sponsorship policy | Who pays fees (sponsored by default) |
+| Store | Where the settlement records (section 5.5) and the record of each open's API key live: in memory for a single instance, or a store shared by all instances, such as Redis |
 
 Fees are sponsored and rent is fronted, and a deposit comes back only when its account closes
 (S11). An anonymous resource server could therefore make the facilitator lock rent in long
@@ -1311,7 +1317,7 @@ maths.
 |---|---|---|
 | Program | LiteSVM, with clock control | The maths, including property tests: `claimed + owed ≤ deposited` always, `earned ≤ due` at every close, `claimed ≤ earned` while the clock never steps back, and every token that entered the vault leaves it exactly once (`claimed + owed + refunded + redirected = deposited + uncredited`). Every signer on every instruction, before and after `paid_until`. Every `close` kind: `AtExpiry` before and after `paid_until`, `WaiveMinimum` by each signer, a waiver after a claim. Account substitution on every instruction (S2, S6: a vault that is not the canonical one, payout accounts other than the derived ones, another rent payer; `receiver` or `refund_owner` equal to the session). Zero transfers skipped with a missing destination. A residual redirected to the receiver when `refund_to` is closed, at and after `paid_until` but never before, including when someone has sent lamports to the closed address. A clock that steps back. Funding by a preceding transfer. Top-up refused after expiry. Rent return. Events |
 | Scheme | Unit tests | Offer construction, payload parsing, every refusal reason, byte-for-byte echo, number encoding |
-| Facilitator | Surfpool with the fixtures of section 12.3, and Kora | Every action in both funding modes; fee-payer and rent-payer isolation; the sponsored close, including `GET /close` for a client without node access; recreating a closed `receiver_token`, and never a `refund_to`; limits per API key; rent round trip; the sweeper, including its back-off on a frozen account; `settlement_pending` |
+| Facilitator | Surfpool with the fixtures of section 12.3, and Kora | Every action in both funding modes; fee-payer and rent-payer isolation; the sponsored close, including `GET /close` for a client without node access; recreating a closed `receiver_token`, and never a `refund_to`; limits per API key; rent round trip; the sweeper, including its back-off on a frozen account; `settlement_pending`; settlement records: a retry answered from its record, a concurrent duplicate, a retry with other requirements or another API key, a record's expiry |
 | Gate | Unit tests, plus a fake upstream and injected clocks (section 7.3) | Tokens, close codes, policies, the lifecycle table of section 7.3, assertions, the JWKS, events, timers, restart recovery. The failures that stay inside the gate: a failed `provision()`, a connection replaced with `4429`, `402` on a connect within the margin or after the end, `404` |
 | Client | Unit tests against a fake gate | Policy refusals, closing paths, reconnects, top-up timing, the optional store and RPC |
 | End to end | The harness of section 12.2: the whole stack on Surfpool for every change, and the same scenarios against devnet on demand | The example agent's task, every scenario of section 12.7, and every failure in section 11 |
