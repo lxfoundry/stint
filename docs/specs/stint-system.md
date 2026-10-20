@@ -200,12 +200,8 @@ on them cite them as (T1) to (T8).
     slot.
 
   *Used in 12.3.*
-- **T4. Surfpool's cheatcodes are JSON-RPC methods named `surfnet_*`** (v1.6.1).
-  - They can write a token account's fields, including its state, so an account can be marked
-    frozen.
-  - They can move the network's time forward, never back. The clock then keeps running from the
-    new time.
-
+- **T4. Surfpool's cheatcodes are JSON-RPC methods named `surfnet_*`** (v1.6.1). They can move
+  the network's time forward, never back. The clock then keeps running from the new time.
   *Used in 12.2.*
 - **T5. Cheatcodes are applied outside Surfpool's transaction queue,** so a cheatcode and a
   transaction sent together can take effect in either order (Surfpool issue #820). *Used in 12.3.*
@@ -1339,15 +1335,13 @@ run is repeatable.
 |---|---|---|---|---|
 | `local` | Surfpool (embedded) and Kora, then the facilitator, the gate and the example resource from this repository | Surfpool, offline, with the fixtures of section 12.3 | Chain control, stack control | On every change, and in continuous integration on every push and pull request |
 | `devnet` | Kora, the facilitator, the gate and the example resource | Devnet, with the deployed program and a funding key (section 12.6) | Stack control | On demand. Never a merge gate: the public network is shared and rate-limited, and its faucets cannot be scripted |
-| `external` | Nothing: `stint-conformance` targets a running gate, and optionally a facilitator (section 12.6) | The target's own | Chain control only if the RPC answers Surfpool's `surfnet_*` methods | Against any implementation |
+| `external` | Nothing: `stint-conformance` targets a running gate, and optionally a facilitator (section 12.6) | The target's own | Allowance, when declared (below). Every scenario that needs chain control also needs stack control, so none runs here | Against any implementation |
 
 **Capabilities.**
-- **Chain control:** freeze and thaw a token account, and move the network's time forward.
-  - On `local`, the harness freezes and thaws with the real `FreezeAccount` and `ThawAccount`
-    instructions, as the mint's freeze authority (section 12.3, S10). It moves time with
-    Surfpool's cheatcodes (T4).
-  - On `external`, both go through the cheatcodes, when the target's RPC answers them: the
-    account's state is written as frozen, then back as initialized (T4).
+- **Chain control** (`local` only): freeze and thaw a token account, and move the network's time
+  forward. The harness freezes and thaws with the real `FreezeAccount` and `ThawAccount`
+  instructions, as the mint's freeze authority (section 12.3, S10), and moves time with Surfpool's
+  cheatcodes (T4).
 - **Stack control:** the harness runs the services, so it holds their keys (the seller's wallet,
   the receiver authorizer, the facilitator's API key, the resource's admin key) and can stop,
   restart or add instances of them.
@@ -1439,8 +1433,8 @@ differs from devnet's only by its URLs and its keys (section 14, question 7 is t
 that could arise).
 
 Surfpool applies cheatcodes outside its transaction queue, so the two can race (T5). The harness
-therefore waits for a new slot after its setup, and after every cheatcode a scenario sends, on any
-target, before the next step.
+therefore waits for a new slot after its setup, and after every cheatcode a scenario sends,
+before the next step.
 
 ### 12.4 Testability requirements
 
@@ -1473,7 +1467,7 @@ upgrade.
 | Commitment levels are simulated: account reads and account subscriptions return the latest state at any commitment (T6) | The delay before `confirmed`, which the gate's margin and the facilitator's 10 s top-up margin allow for, does not occur | The `devnet` target |
 | Account notifications carry the slot at which the subscription was made (T6) | The `slot` of the example stream's `account` messages (section 8) is not meaningful locally; no scenario asserts on it | The `devnet` target |
 | One node, no network latency, no other traffic | Expired blockhashes, retries and rate limits are rare | The `devnet` target |
-| The USDC mint's authorities are harness keys | Freezes use the real instructions locally. They cannot run on `devnet`, whose mint's freeze authority (S10) is a key the harness does not hold and which has no cheatcodes. An external Surfpool freezes through cheatcodes instead (section 12.2) | — |
+| The USDC mint's authorities are harness keys | Freeze scenarios run locally only: on `devnet`, the mint's freeze authority (S10) is a key the harness does not hold | — |
 
 ### 12.6 Conformance suite
 
