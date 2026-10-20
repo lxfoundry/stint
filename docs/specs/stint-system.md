@@ -436,21 +436,25 @@ instruction that credits it succeed or fail together.
 **A transfer of zero is skipped, and its destination need not exist.** Payout accounts belong to
 other parties, who can empty and close them at any time (S12), and one failed transfer would fail
 the whole close (S13).
-- A destination that is owed tokens must exist (S4). If it has been closed, the close fails until
-  someone recreates it (S7).
+- A close **pays** a payout account when it transfers a non-zero amount to it: `receiver_token`
+  when `owed` plus any `redirected` residual is not zero, and `refund_to` when the residual is not
+  zero and not redirected. This is wider than `owed > 0`: once claims have taken everything
+  earned, a redirected residual alone still pays the receiver.
+- An account the close pays must exist (S4). If it has been closed, the close fails until someone
+  recreates it (S7).
 - Whoever closes a recreated account keeps its deposit (S12), whichever payout account it is.
   The facilitator therefore recreates a closed `receiver_token` only because the seller is
   accountable through its API key, which each recreation counts against. It never recreates a
   `refund_to` (section 5.3).
 - **After the paid time, a missing refund account never blocks a close.** From `paid_until` on,
-  the residual owed to a `refund_to` that no longer exists goes to `receiver_token` (effect 2).
+  a residual whose `refund_to` no longer exists goes to `receiver_token` (effect 2).
   - By then the deposit has been charged in full, so the residual is only the rounding remainder
     plus tokens sent to the vault by mistake. Both are zero when only exact payments (multiples
     of the rate, as the facilitator requires) reached the vault.
   - Without this rule, a buyer could close its refund account, send one base unit to the vault,
     and leave the session unclosable. Its rent would stay locked, and the seller's earnings
     unpaid.
-  - Before `paid_until`, a close that owes tokens to a missing `refund_to` still fails, since the
+  - Before `paid_until`, a close that pays a missing `refund_to` still fails, since the
     unused time belongs to the buyer.
 - Frozen accounts are covered in section 4.6.
 
@@ -490,8 +494,8 @@ refunded.
   destination, not only point refunds elsewhere. The cap and the delegation's expiry bound that
   exposure.
 - **Frozen accounts.** USDC's mint has a freeze authority (S10).
-  - If it freezes `receiver_token` or `refund_to`, a close that owes that account tokens fails
-    (S13) until the account is thawed. A close that owes it nothing still settles.
+  - If it freezes `receiver_token` or `refund_to`, a close that pays that account (section 4.3)
+    fails (S13) until the account is thawed. A close that pays it nothing still settles.
   - If it freezes the vault itself, no `claim` or `close` can move tokens out until the vault is
     thawed.
 
@@ -601,7 +605,7 @@ left unsigned by the client: the facilitator pays the fees, and the client holds
 |---|---|
 | `open` | [compute budget, optional] → create the vault, idempotent (S7), its rent deposit funded by `rentPayer` (S11) → **exactly one** funding instruction: a `TransferChecked` from the authority's associated token account (or one allowance pull, section 10) into the vault for exactly `amount` → `stint.open` |
 | `topUp` | [compute budget, optional] → exactly one funding instruction into the vault for exactly `amount` → `stint.top_up` |
-| `close` | [compute budget, optional] → [recreate a closed `receiver_token` that is owed tokens, idempotent, funded by `rentPayer`; optional] → `stint.close`, whose `closer` is `receiverAuthorizer` (gate), the authority (sponsored close) or the rent payer (sweeper) |
+| `close` | [compute budget, optional] → [recreate a closed `receiver_token` that the close pays (section 4.3), idempotent, funded by `rentPayer`; optional] → `stint.close`, whose `closer` is `receiverAuthorizer` (gate), the authority (sponsored close) or the rent payer (sweeper) |
 
 **Where the facilitator's keys may appear.** The facilitator co-signs transactions that clients
 build, and its signature authorizes every instruction in which its key appears as a signer (S14).
@@ -621,9 +625,9 @@ Its keys are therefore confined:
 **Recreating an account is a cost, not an advance.** The creator pays the new account's deposit
 (S11), but its owner gets that deposit when it closes the account (S12). A buyer could close its
 refund account, have the facilitator recreate it, and pocket the deposit, over and over. The
-facilitator therefore never recreates a buyer's `refund_to`. It recreates
-a seller's `receiver_token` only when the seller is owed tokens, and counts each recreation against
-the seller's API key (section 6.5). Sponsored and sweeper closes carry no API key, so when an open
+facilitator therefore never recreates a buyer's `refund_to`. It recreates a seller's
+`receiver_token` only when the close pays it (section 4.3), and counts each recreation against the
+seller's API key (section 6.5). Sponsored and sweeper closes carry no API key, so when an open
 settles, the facilitator records which API key it came through.
 
 ### 5.4 Verification (facilitator `/verify`)
@@ -776,11 +780,12 @@ whose `paid_until` has passed, and closes them with `close(AtExpiry)`, the rent 
 - the buyer gets any residual, or the receiver does if the buyer has closed its refund account
   (section 4.3).
 
-If the receiver is owed tokens and `receiver_token` has been closed, it recreates that account in
-the same transaction (S7). It never recreates `refund_to` (section 5.3), and never needs to: after
-`paid_until`, a residual owed to a closed refund account goes to the receiver (section 4.3). Every
-expired session therefore closes, and its rent comes back. A close that fails because an account
-is frozen (S10) is retried with an increasing back-off.
+If the close pays the receiver (section 4.3: `owed`, plus the residual when it is redirected) and
+`receiver_token` has been closed, it recreates that account in the same transaction (S7). It never
+recreates `refund_to` (section 5.3), and never needs to: after `paid_until`, a residual whose
+refund account is closed goes to the receiver (section 4.3). Every expired session therefore
+closes, and its rent comes back. A close that fails because an account is frozen (S10) is retried
+with an increasing back-off.
 
 It runs on one elected instance, or on all of them tolerating duplicates: a second close finds the
 account gone and is skipped.
@@ -811,7 +816,7 @@ sessions it opens with itself. The API key and the limits per key bound that.
 |---|---|---|
 | `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `400 invalid_duration` |
 | `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}` |
-| `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`; `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and owed tokens) |
+| `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`; `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
 | `GET /sessions/:id` | Status from the chain: `paidUntil`, deposited, earned so far, time left, a fresh blockhash | `200`; `404` |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
 | `GET /.well-known/jwks.json` | The gate's assertion keys (section 7.7) | `200` |
@@ -880,7 +885,7 @@ not a connection is live.
 | A top-up seen on the account | Move the end timer | — |
 | End timer fires | Re-read the session at `confirmed`. If `paid_until` moved, reset the timer. Otherwise stop forwarding and close. On `NotExpired`, re-read: if `paid_until` moved (a top-up landed), resume forwarding and reset the timer; if not (the chain's clock is behind), retry. Once the close is confirmed, drop connections (`4402`) | `AtExpiry` |
 | Account closed by another party | Drop connections (`4410`) | — |
-| A close before `paid_until` fails because the buyer's `refund_to` is closed and owed tokens | Do not retry. The session settles at expiry with `AtExpiry`, which pays any residual to the receiver (section 4.3) | — |
+| A close before `paid_until` fails because the buyer's `refund_to` is closed and the close pays it | Do not retry. The session settles at expiry with `AtExpiry`, which pays any residual to the receiver (section 4.3) | — |
 | The session ends, whatever the cause | `teardown(reason)`, once; unsubscribe | — |
 
 - **Clocks.** The gate has two injectable clocks.
@@ -1206,8 +1211,8 @@ Facilitator checks:
 | Close | Gate unreachable | Sponsored close through the facilitator | Unused time above the minimum refunded |
 | Close | Gate and facilitator unreachable | Unilateral close if the authority holds SOL; otherwise the session runs to expiry | With SOL: unused time refunded. Without: the deposit is spent in full |
 | Close | The seller closed its `receiver_token` (S12) | The close transaction recreates it (S7), counted against the seller's API key | Unaffected |
-| Close | The buyer closed its `refund_to` (S12) | Before `paid_until`, closes that owe it tokens fail (`409`) until the buyer recreates it. Otherwise the session settles at expiry, and any residual goes to the receiver | Unused time is charged unless the buyer recreates the account. The residual at expiry (zero when only exact payments reached the vault) goes to the seller |
-| Close | The mint's freeze authority freezes a payout account that is owed tokens, or the vault itself (S10) | Closes, and for a frozen vault claims too, fail until it is thawed (S13) | Held in the vault |
+| Close | The buyer closed its `refund_to` (S12) | Before `paid_until`, closes that pay it fail (`409`) until the buyer recreates it. Otherwise the session settles at expiry, and any residual goes to the receiver | Unused time is charged unless the buyer recreates the account. The residual at expiry (zero when only exact payments reached the vault) goes to the seller |
+| Close | The mint's freeze authority freezes a payout account that the close pays, or the vault itself (S10) | Closes, and for a frozen vault claims too, fail until it is thawed (S13) | Held in the vault |
 | Crash | The agent stops with a session open | On restart, closed via the store or a chain lookup; otherwise at expiry | Bounded by the deposit |
 
 Funds are only ever in the buyer's account, in a session's vault, or paid out by the program's
@@ -1387,8 +1392,8 @@ reaction), unless stated otherwise.
 | 24 | The gate is unreachable when the buyer closes | Stack | The client's fallback (section 9.3) closes through `closeUrl`; refund as in scenario 1 |
 | 25 | The gate and the facilitator are unreachable when the buyer closes | Stack | With SOL on the authority: a unilateral close, refunded as in scenario 1. Without: the session runs to expiry |
 | 26 | An expired session that nobody closes (the gate is stopped) | Stack | The sweeper closes it with `AtExpiry`: the receiver is paid, the rent returns to the rent payer |
-| 27 | The seller has closed its `receiver_token` before a close that owes it tokens | Stack | The close recreates it, counted against the seller's API key; the receiver is paid |
-| 28 | The mint's freeze authority freezes a payout account that is owed tokens; in a second session, the vault | Chain | Closes (and, for the vault, claims) fail until the account is thawed, then succeed; the funds stay in the vault meanwhile |
+| 27 | The seller has closed its `receiver_token` before a close that pays it | Stack | The close recreates it, counted against the seller's API key; the receiver is paid |
+| 28 | The mint's freeze authority freezes a payout account that the close pays; in a second session, the vault | Chain | Closes (and, for the vault, claims) fail until the account is thawed, then succeed; the funds stay in the vault meanwhile |
 | 29 | The buyer's process stops with a session open, then restarts with the same store | — | The restarted client finds the session and closes it; refund as in scenario 1 |
 | 30 | The resource closes a session through the gate's admin port | Stack | Connections dropped (`4410`); the close waives the minimum, so only the time served is charged |
 | 31 | A session bought for `maxSeconds`, with the network's time moved forward to its end | Chain, Stack | Forwarding stops and the session settles with `AtExpiry` within the timing tolerance, measured on the network's clock |
