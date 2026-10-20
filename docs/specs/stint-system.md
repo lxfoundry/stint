@@ -70,7 +70,7 @@ Everyone shares **one deployed Stint program**, the **`elapsed` scheme specifica
 ### 2.2 Solana facts the design relies on
 
 Many decisions in this specification follow from how Solana stores accounts and tokens. The facts
-are listed here once, and the sections that depend on them cite them as (S1) to (S15).
+are listed here once, and the sections that depend on them cite them as (S1) to (S16).
 
 **Accounts and programs**
 
@@ -163,6 +163,10 @@ are listed here once, and the sections that depend on them cite them as (S1) to 
   - The runtime keeps it from moving backwards, but test harnesses can set it to any value.
 
   *Used in 4.2, 7.3.*
+- **S16. A transaction message is processed at most once.** The runtime records the hash of every
+  message it processes and rejects the same message again (`AlreadyProcessed`) while its
+  blockhash is valid. After that the blockhash has expired, and the message can no longer land.
+  This holds whatever signatures the transaction carries. *Used in 5.5.*
 
 For readers who know EVM chains, the main differences:
 
@@ -673,6 +677,11 @@ settles, the facilitator records which API key it came through.
 
 `/verify` MUST be read-only: it simulates and never submits.
 
+**A transaction that has already landed** (a retry: see Idempotency in section 5.5) gets every
+check below except the blockhash and the simulation, which it would now fail. Its successful
+status on-chain takes the simulation's place. The other checks still run, so a client cannot pass
+off a landed transaction with other terms as its payment.
+
 **Every type:**
 
 - **Payload:** `x402Version` is 2; `scheme`, `network` and `asset` match (the asset is a mint
@@ -718,9 +727,9 @@ it is used.
 
 ### 5.5 Settlement (facilitator `/settle`)
 
-1. If the transaction has already landed, report it as settled, with the same session (see
-   Idempotency, below). This comes first because a transaction that has landed would now fail
-   simulation.
+1. If the transaction has already landed successfully (see Idempotency, below), verify it as
+   section 5.4 does for a landed transaction. Then report it as settled, with that transaction's
+   ID and the same session, without signing or submitting it again.
 2. Otherwise, re-verify.
 3. The rent payer signs (`open`, and a `close` that recreates `receiver_token`).
 4. Kora signs as fee payer.
@@ -750,11 +759,19 @@ the second (the final charge and the refund). Unlike a single-request escrow flo
 settlement happens on a later request, or after expiry. So the gate drives both settlements itself
 rather than through a per-request middleware flow.
 
-**Idempotency.** A session address is unique per `(authority, seed)` while it exists, and a
-signed transaction cannot land twice. A retried settlement whose transaction has already landed is
-reported as a success, with the same session. The facilitator finds it by the transaction's first
-signature, the fee payer's. Ed25519 signs the same message identically every time (RFC 8032), so
-a retry of the same payload yields the same transaction ID.
+**Idempotency.** A message is processed at most once (S16), so a retried settlement can never pay
+twice. The facilitator recognises the retry and answers it with the first result:
+- **What identifies the transaction.** Its ID is the fee payer's signature, which Kora adds at
+  settlement, so a retried payload does not carry it. The facilitator uses a signature the payload
+  already holds: the authority's (open, top-up, sponsored close) or the receiver authorizer's (a
+  close from the gate).
+- **Where to look.** It lists the transactions of the session address, which it derives itself
+  (section 5.3), back to the slot of the payload's blockhash, since no transaction lands before
+  its blockhash. It looks for one that carries that signature and whose recorded status has no
+  error.
+- **When.** `/verify` and `/settle` both run this check first (section 5.4, and step 1 above). A
+  landed open or close would fail simulation. A landed top-up might still simulate, but would be
+  refused at submission (S16).
 
 ### 5.6 Optional `exact` fallback
 
