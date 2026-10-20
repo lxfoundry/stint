@@ -741,8 +741,10 @@ seller's gate is unreachable.
 Kora runs beside the facilitator and is reachable only by it, with an API key.
 
 - **Policy:**
-  - allowed programs as in section 5.4, plus the System program, which account creation invokes
-    (whether Kora checks inner instructions is confirmed in section 14);
+  - allowed programs as in section 5.4, plus the System program, which account creation invokes.
+    Kora applies its program allowlist and its fee-payer policy to the inner instructions of the
+    simulated transaction as well, so every program reached through a call from another program
+    must be listed (to be confirmed at run time: section 14);
   - the fee payer may not transfer SOL or tokens, create accounts, or act on token accounts:
     its signature would otherwise authorize any of these in a client-built transaction (S14);
   - a cap on lamports per transaction.
@@ -1269,6 +1271,7 @@ reaction), unless stated otherwise.
 | # | Question | Fallback |
 |---|---|---|
 | 1 | Does `@x402/core` (TypeScript) register a third-party scheme on client, resource server and facilitator, and declare its payment flow? | Implement the v2 handshake directly: the headers `PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE` and `PAYMENT-RESPONSE`, and the facilitator calls |
-| 2 | Does Kora sign as fee payer for transactions where another signer (the rent payer) funds account creation inside our program? Does its allowed-programs policy inspect inner instructions? | The facilitator signs as fee payer without Kora |
+| 2 | Does Kora sign as fee payer for transactions where another signer (the rent payer) funds account creation inside our program? Its source applies the program allowlist and the fee-payer policy to the simulated inner instructions (section 6.2): confirm this at run time | The facilitator signs as fee payer without Kora |
 | 3 | Can an allowance pull and `stint.open` share one transaction, through Kora, and what are the pull instruction's exact name and accounts? | Allowance funding stays disabled; direct funding remains |
 | 4 | Do the x402 TypeScript SDK and Kora accept version 0 transactions? | Legacy transactions |
+| 5 | Does Kora's TypeScript client work with the `@solana/kit` major version the plan pins? Its published releases declare earlier Kit major versions as peer dependencies | Call Kora's JSON-RPC interface directly |
