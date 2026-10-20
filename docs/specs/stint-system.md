@@ -854,7 +854,7 @@ sessions it opens with itself. The API key and the limits per key bound that.
 | `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `400 invalid_duration` |
 | `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}`; `400 invalid_duration` |
 | `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`; `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
-| `GET /sessions/:id` | Status from the chain: `paidUntil`, deposited, earned so far, time left, a fresh blockhash | `200`; `404` |
+| `GET /sessions/:id` | Status from the chain: `paidUntil`, deposited and a fresh blockhash. Earned so far and time left are estimates at the gate's session clock (section 7.3); the chain's clock decides the amounts (section 4.2) | `200`; `404` |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
 | `GET /.well-known/jwks.json` | The gate's assertion keys (section 7.7) | `200` |
 
@@ -929,9 +929,10 @@ not a connection is live.
   - The **session clock** runs the timers of this table (idle, end, margin). It is the wall
     clock in production. In tests it may follow the test network's clock, so that moving the
     network's time forward (section 12.2) moves these timers too.
-  - The **token clock** checks `iat`, `exp` and the `jti` cache (section 7.2). It is always the
-    wall clock, which clients also sign with, so a token stays valid when a test moves the
-    network's time.
+  - The **token clock** checks `iat`, `exp` and the `jti` cache (section 7.2). It also stamps the
+    `iat` and `exp` of assertions and the `timestamp` of events (section 7.7). It is always the
+    wall clock, which clients and resources also use, so tokens, assertions and events stay valid
+    when a test moves the network's time.
 
   The chain's clock decides every amount and can differ from both (S15); `AtExpiry` makes an
   early gate harmless.
@@ -1264,7 +1265,7 @@ maths.
 | Program | LiteSVM, with clock control | The maths, including property tests: `claimed + owed ≤ deposited` always, `earned ≤ due` at every close, `claimed ≤ earned` while the clock never steps back, and every token that entered the vault leaves it exactly once (`claimed + owed + refunded + redirected = deposited + uncredited`). Every signer on every instruction, before and after `paid_until`. Every `close` kind: `AtExpiry` before and after `paid_until`, `WaiveMinimum` by each signer, a waiver after a claim. Account substitution on every instruction (S2, S6: a vault that is not the canonical one, payout accounts other than the derived ones, another rent payer; `receiver` or `refund_owner` equal to the session). Zero transfers skipped with a missing destination. A residual redirected to the receiver when `refund_to` is closed, at and after `paid_until` but never before, including when someone has sent lamports to the closed address. A clock that steps back. Funding by a preceding transfer. Top-up refused after expiry. Rent return. Events |
 | Scheme | Unit tests | Offer construction, payload parsing, every refusal reason, byte-for-byte echo, number encoding |
 | Facilitator | Surfpool with the fixtures of section 12.3, and Kora | Every action in both funding modes; fee-payer and rent-payer isolation; the sponsored close, including `GET /close` for a client without node access; recreating a closed `receiver_token`, and never a `refund_to`; limits per API key; rent round trip; the sweeper, including its back-off on a frozen account; `settlement_pending` |
-| Gate | Unit tests, plus a fake upstream and an injected clock | Tokens, close codes, policies, the lifecycle table of section 7.3, assertions, the JWKS, events, timers, restart recovery. The failures that stay inside the gate: a failed `provision()`, a connection replaced with `4429`, `402` on a connect within the margin or after the end, `404` |
+| Gate | Unit tests, plus a fake upstream and injected clocks (section 7.3) | Tokens, close codes, policies, the lifecycle table of section 7.3, assertions, the JWKS, events, timers, restart recovery. The failures that stay inside the gate: a failed `provision()`, a connection replaced with `4429`, `402` on a connect within the margin or after the end, `404` |
 | Client | Unit tests against a fake gate | Policy refusals, closing paths, reconnects, top-up timing, the optional store and RPC |
 | End to end | The harness of section 12.2: the whole stack on Surfpool for every change, and the same scenarios against devnet on demand | The example agent's task, every scenario of section 12.7, and every failure in section 11 |
 
@@ -1393,7 +1394,7 @@ These let the harness run the services. They are part of each component's interf
   `inactivityCloseSeconds`. The facilitator's `start` also returns a `sweepOnce()`, which runs one
   sweep immediately.
 - **Clocks are injectable:** the gate's session clock and token clock (section 7.3), the client's
-  timers, and the sweeper's clock.
+  timers, and the facilitator's clock, which runs the sweeper and the top-up margin of section 5.4.
 - **Health and logs.** Each service answers a health check, and writes structured logs to a
   destination named in its configuration.
 - **The example resource** takes its node endpoint from its configuration, so it streams from
