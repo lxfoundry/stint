@@ -1455,7 +1455,7 @@ section 12.2.
 | 2 | Close before `minSeconds` | — | `minSeconds` charged |
 | 3 | Expiry | — | Forwarding stopped within 5 s of `paidUntil`; the close confirmed and `4402` sent within 30 s |
 | 4 | Top-up before and after expiry | — | Extended; then refused |
-| 5 | Wrong terms or amount | — | `403`, or `verify` invalid |
+| 5 | A payment with wrong terms or a wrong amount | — | `402` with the reason (`verify` invalid); no session on-chain |
 | 6 | Failed payment | — | `402`, and no session created |
 | 7 | Unilateral on-chain close | — | Connection dropped (`4410`) within 5 s |
 | 8 | Token: expired, wrong `aud`, wrong `purpose`, replayed | — | `401` each time |
