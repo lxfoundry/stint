@@ -1283,8 +1283,9 @@ fails, the logs of every service for that run are kept with the report.
 - Each scenario uses fresh keys and new sessions, so scenarios share one stack and run
   concurrently. A scenario that stops, restarts or adds a service gets a stack of its own and runs
   alone.
-- Scenarios run in real time, with short terms: `minSeconds` of 5 s or less, and a short
-  `idleCloseSeconds`. The timing tolerance of section 12.6 applies.
+- Scenarios run in real time, on a network whose clock follows the wall clock (section 12.3), with
+  short terms: `minSeconds` of 5 s or less, and a short `idleCloseSeconds`. The timing tolerance of
+  section 12.6 applies.
 - Moving the network's time forward is used only where a scenario needs a long horizon
   (scenario 31). It requires the gate's session clock to follow the network (section 7.3).
 
@@ -1292,6 +1293,15 @@ fails, the logs of every service for that run are kept with the report.
 
 Surfpool runs **offline**, embedded in the harness's process. Nothing is fetched from another
 network during a run, so no remote request can fail a transaction.
+
+It **produces blocks on a clock**, with a 400 ms slot time, as a public network does. The harness
+sets both explicitly:
+- Surfpool's clock advances by the slot time with each block.
+- Its embedded library defaults to one block per transaction with a 1 ms slot. In that mode the
+  chain's clock would barely move between transactions, `paid_until` would never arrive, and
+  every expiry scenario would fail.
+- In clock mode the chain's clock follows the wall clock. It falls behind when blocks are late,
+  which the gate's `AtExpiry` retry already handles (section 7.3).
 
 Before the first scenario, the harness writes:
 - the USDC mint at its devnet address (section 3.4: SPL Token, 6 decimals), with harness keys as
