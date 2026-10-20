@@ -775,8 +775,9 @@ twice. The facilitator recognises a retry from its own records:
 - **How long.** A record is kept until its transaction's blockhash has expired, plus a margin.
   After that the payload is verified as new and fails (`blockhash_expired`), so a landed
   transaction cannot be presented as a payment again.
-- **Other requirements or another API key.** A payload that matches a record but comes with
-  either is verified as new. The transaction has already landed, so that verification fails.
+- **Other requirements or another API key.** A payload that matches a record but comes with either
+  is refused (`invalid_payment_requirements`). Its transaction belongs to another settlement,
+  which may still be in flight.
 
 ### 5.6 Optional `exact` fallback
 
