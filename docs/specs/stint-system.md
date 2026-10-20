@@ -770,7 +770,9 @@ twice. The facilitator recognises a retry from its own records:
 - **How a retry is answered.** A payload whose message is claimed or recorded, and that comes with
   the same requirements and API key, is answered from that record. Nothing is verified, signed or
   submitted again: the message is the one being, or already, settled.
-  - `/verify` reports it valid.
+  - `/verify` reports it valid while its settlement is pending or has succeeded. Otherwise it
+    reports the recorded failure: `blockhash_expired` for a transaction that never landed, and
+    `simulation_failed` for one that landed with an error.
   - `/settle` reports the recorded outcome, or `settlement_pending` while there is none yet. If
     the transaction was submitted but its outcome is not known, it first looks the transaction
     up by its ID. If the transaction has not landed and its blockhash is still valid, it submits
