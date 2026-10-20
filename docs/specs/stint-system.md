@@ -815,7 +815,7 @@ sessions it opens with itself. The API key and the limits per key bound that.
 | Endpoint | Purpose | Responses |
 |---|---|---|
 | `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `400 invalid_duration` |
-| `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}` |
+| `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}`; `400 invalid_duration` |
 | `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`; `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
 | `GET /sessions/:id` | Status from the chain: `paidUntil`, deposited, earned so far, time left, a fresh blockhash | `200`; `404` |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
@@ -1226,8 +1226,8 @@ maths.
 |---|---|---|
 | Program | LiteSVM, with clock control | The maths, including property tests: `claimed + owed ≤ deposited` always, `earned ≤ due` at every close, `claimed ≤ earned` while the clock never steps back, and every token that entered the vault leaves it exactly once (`claimed + owed + refunded + redirected = deposited + uncredited`). Every signer on every instruction, before and after `paid_until`. Every `close` kind: `AtExpiry` before and after `paid_until`, `WaiveMinimum` by each signer, a waiver after a claim. Account substitution on every instruction (S2, S6: a vault that is not the canonical one, payout accounts other than the derived ones, another rent payer; `receiver` or `refund_owner` equal to the session). Zero transfers skipped with a missing destination. A residual redirected to the receiver when `refund_to` is closed, at and after `paid_until` but never before, including when someone has sent lamports to the closed address. A clock that steps back. Funding by a preceding transfer. Top-up refused after expiry. Rent return. Events |
 | Scheme | Unit tests | Offer construction, payload parsing, every refusal reason, byte-for-byte echo, number encoding |
-| Facilitator | Surfpool with the fixtures of section 12.3, and Kora | Every action in both funding modes; fee-payer and rent-payer isolation; the sponsored close, including `GET /close` for a client without node access; recreating a closed `receiver_token`, and never a `refund_to`; limits per API key; rent round trip; the sweeper; `settlement_pending` |
-| Gate | Unit tests, plus a fake upstream and an injected clock | Tokens, close codes, policies, the lifecycle table of section 7.3, assertions, the JWKS, events, timers, restart recovery |
+| Facilitator | Surfpool with the fixtures of section 12.3, and Kora | Every action in both funding modes; fee-payer and rent-payer isolation; the sponsored close, including `GET /close` for a client without node access; recreating a closed `receiver_token`, and never a `refund_to`; limits per API key; rent round trip; the sweeper, including its back-off on a frozen account; `settlement_pending` |
+| Gate | Unit tests, plus a fake upstream and an injected clock | Tokens, close codes, policies, the lifecycle table of section 7.3, assertions, the JWKS, events, timers, restart recovery. The failures that stay inside the gate: a failed `provision()`, a connection replaced with `4429`, `402` on a connect within the margin or after the end, `404` |
 | Client | Unit tests against a fake gate | Policy refusals, closing paths, reconnects, top-up timing, the optional store and RPC |
 | End to end | The harness of section 12.2: the whole stack on Surfpool for every change, and the same scenarios against devnet on demand | The example agent's task, every scenario of section 12.7, and every failure in section 11 |
 
@@ -1422,7 +1422,7 @@ section 12.2.
 | 18 | *(on `external`, with `--facilitator` and `--facilitator-key`)* Fee payer or rent payer in a forbidden position | — | Refused (`payer_misuse`) |
 | 19 | *(on `external`, with `--facilitator` and `--facilitator-key`)* `/verify` of a valid open | — | No change on-chain |
 | 20 | A session opened directly on-chain with the gate's terms but another mint (S5) | — | `403` on connect; not adopted |
-| 21 | The buyer closes its refund account and sends one base unit to the vault, then the session expires | — | Closed at expiry; the residual goes to the receiver; the rent returns to the rent payer |
+| 21 | The buyer closes its refund account and sends one base unit to the vault, asks the gate to close, then lets the session expire | — | The close request gets `409 refund_account_closed`, and the gate does not retry it. Closed at expiry; the residual goes to the receiver; the rent returns to the rent payer |
 | 22 | The example agent's task, scripted (section 12.2) | Stack | `stint_receive` returns the payment to the watched account; `paid` and `refunded` equal the balance changes recorded in the session's transactions; the session account is closed and its rent returned to the rent payer |
 | 23 | The gate restarts with a session open | Stack | Timers restored from the chain; the session is not closed early, and settles at `paidUntil` as in scenario 3 |
 | 24 | The gate is unreachable when the buyer closes | Stack | The client's fallback (section 9.3) closes through `closeUrl`; refund as in scenario 1 |
@@ -1430,9 +1430,13 @@ section 12.2.
 | 26 | An expired session that nobody closes (the gate is stopped) | Stack | The sweeper closes it with `AtExpiry`: the receiver is paid, the rent returns to the rent payer |
 | 27 | The seller has closed its `receiver_token` before a close that pays it | Stack | The close recreates it, counted against the seller's API key; the receiver is paid |
 | 28 | The mint's freeze authority freezes a payout account that the close pays; in a second session, the vault | Chain | Closes (and, for the vault, claims) fail until the account is thawed, then succeed; the funds stay in the vault meanwhile |
-| 29 | The buyer's process stops with a session open, then restarts with the same store | — | The restarted client finds the session and closes it; refund as in scenario 1 |
+| 29 | The buyer's process stops with a session open, then restarts: with the same store; and, in a second session, with no store but with an `rpc` | — | The restarted client finds the session (from the store; by a chain lookup) and closes it; refund as in scenario 1 |
 | 30 | The resource closes a session through the gate's admin port | Stack | Connections dropped (`4410`); the close waives the minimum, so only the time served is charged |
 | 31 | A session bought for `maxSeconds`, with the network's time moved forward to its end | Chain, Stack | Forwarding stops and the session settles with `AtExpiry` within the timing tolerance, measured on the network's clock |
+| 32 | A duration below `minSeconds`; above `maxSeconds`; a top-up that would take the session past `maxSeconds` | — | `400 invalid_duration` each time; nothing signed, nothing on-chain |
+| 33 | The reply to an open's settlement is lost after the transaction lands: a proxy run by the harness, between the stack and the network, forwards the transaction and drops the reply | Stack | Exactly one session on-chain, charged once; the client ends up with that session, from a retried settlement (section 5.5) or by polling after `settlement_pending` (section 9.3) |
+| 34 | A top-up lands while the gate is closing at expiry: the gate's session clock runs 5 s ahead, so its `AtExpiry` close fails with `NotExpired`, and the authority tops up on-chain meanwhile | Stack | The gate resumes forwarding and resets its end timer; the session continues to the new `paidUntil`, and the top-up counts |
+| 35 | A session opened directly on-chain with the gate's terms, mint and receiver authorizer, then a connect (the valid counterpart of scenario 20) | — | The connection is accepted and the gate adopts the session; the buyer's close through the gate settles it, refunded as in scenario 1 |
 
 ## 13. Not built
 
