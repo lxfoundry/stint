@@ -804,7 +804,7 @@ One endpoint for buyers, without an API key:
 
 | Endpoint | Behaviour |
 |---|---|
-| `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, programId}`, current at the time of the request. With `?session=<address>`, also the session's stored fields |
+| `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, blockHeight, programId}`, current at the time of the request. `blockHeight` also tells a client without node access when one of its own transactions can no longer land (section 9.3). With `?session=<address>`, also the session's stored fields |
 | `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `{success, transaction, paid, refunded}`, with `paid` = `claimed + owed + redirected` from the `Closed` event, as for the gate |
 
 Both are rate-limited per session and per client address. `GET` serves a blockhash cached for a few
@@ -898,8 +898,8 @@ sessions it opens with itself. The API key and the limits per key bound that.
   (section 5.5): the transaction was submitted and is not yet confirmed. Its `PAYMENT-RESPONSE`
   has `success: false`, `errorReason: "settlement_pending"` and the submitted `transaction`.
 - **After a `202` to an open,** the gate subscribes to the session address at `confirmed` until
-  the block height passes the payload blockhash's last valid one. If the account appears with
-  the offer's terms before then, the gate proceeds as when an open settles (section 7.3).
+  the transaction's own blockhash is no longer valid. If the account appears with the offer's
+  terms before then, the gate proceeds as when an open settles (section 7.3).
   Otherwise the transaction never landed, and nothing was charged. A pending top-up needs nothing
   more: the gate is already subscribed to the session and sees it land.
 - Every check on a WebSocket connect runs before the upgrade and fails with an HTTP status. Close
@@ -1161,8 +1161,13 @@ terms: it never signs a transaction supplied by the seller.
 
 **After paying,** it treats `settlement_pending` (a `202` from the gate) as not final.
 - It polls the session status until the session appears (for a top-up, until `paidUntil` moves).
-- It stops once the offer's `maxTimeoutSeconds` has passed, which never outlasts the blockhash
-  (section 5.1), so a client without an `rpc` also knows when to stop.
+- It stops only once its transaction can no longer land, that is, once the transaction's
+  blockhash has expired. Stopping earlier could report a failure for a payment that lands
+  afterwards.
+  - With an `rpc`, the client checks the blockhash itself.
+  - Without one, it built the transaction from the offer's `recentBlockhash`. It compares that
+    offer's `lastValidBlockHeight` (section 5.1) with the current block height, which `GET
+    closeUrl` reports (section 6.1).
 - A timeout or a `5xx` after paying is treated the same way. The client derives the session
   address from its authority and seed, and polls it.
 
