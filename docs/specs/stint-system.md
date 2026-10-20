@@ -1478,7 +1478,7 @@ section 12.2.
 | 25 | The gate and the facilitator are unreachable when the buyer closes | Stack | With SOL on the authority: a unilateral close, refunded as in scenario 1. Without: the session runs to expiry |
 | 26 | An expired session that nobody closes (the gate is stopped) | Stack | The sweeper closes it with `AtExpiry`: the receiver is paid, the rent returns to the rent payer |
 | 27 | The seller has closed its `receiver_token` before a close that pays it | Stack | The close recreates it, counted against the seller's API key; the receiver is paid |
-| 28 | A payout account that the close pays is frozen (S10); in a second session, the vault | Chain | Closes (and, for the vault, claims) fail until the account is thawed, then succeed; the funds stay in the vault meanwhile |
+| 28 | A payout account that the close pays is frozen (S10); in a second session, the vault | Chain, Stack | Closes (and, for the vault, claims) fail until the account is thawed, then succeed; the funds stay in the vault meanwhile |
 | 29 | The buyer's process stops with a session open, then restarts: with the same store; and, in a second session, with no store but with an `rpc` | — | The restarted client finds the session (from the store; by a chain lookup) and closes it; refund as in scenario 1 |
 | 30 | The resource closes a session through the gate's admin port | Stack | Connections dropped (`4410`); the close waives the minimum, so only the time served is charged |
 | 31 | A session bought for `maxSeconds`, with the network's time moved forward to its end | Chain, Stack | Forwarding stops and the session settles with `AtExpiry` within the timing tolerance, measured on the network's clock |
