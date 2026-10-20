@@ -924,7 +924,7 @@ not a connection is live.
 | Admin command (section 7.7) | Drop connections (`4410`); close | `WaiveMinimum` |
 | A top-up seen on the account | Move the end timer | — |
 | End timer fires | Re-read the session at `confirmed`. If `paid_until` moved, reset the timer. Otherwise stop forwarding and close. On `NotExpired`, re-read: if `paid_until` moved (a top-up landed), resume forwarding and reset the timer; if not (the chain's clock is behind), retry. Once the close is confirmed, drop connections (`4402`) | `AtExpiry` |
-| Account closed by another party | Drop connections (`4410`) | — |
+| Account closed by another party | Drop connections: `4402` if the session closed at or after `paid_until` (the `at` of its `Closed` event), since the paid time ran out whoever closed it; otherwise `4410` | — |
 | A close before `paid_until` fails because the buyer's `refund_to` is closed and the close pays it | Do not retry. The session settles at expiry with `AtExpiry`, which pays any residual to the receiver (section 4.3) | — |
 | The session ends, whatever the cause | `teardown(reason)`, once; unsubscribe | — |
 
