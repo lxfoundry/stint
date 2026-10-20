@@ -677,8 +677,8 @@ settles, the facilitator records which API key it came through.
 
 `/verify` MUST be read-only: it simulates and never submits.
 
-**A payload this facilitator has already signed** (a retry: see Idempotency in section 5.5) is not
-verified again. `/verify` answers from its record.
+**A payload whose message this facilitator has claimed or recorded** (a retry: see Idempotency in
+section 5.5) is not verified again. `/verify` answers from its record.
 
 **Every type:**
 
@@ -722,15 +722,19 @@ it is used.
 | `session_expired` | A top-up after `paid_until` |
 | `simulation_failed` | Including an exhausted allowance |
 | `unknown_session` | No such session |
+| `already_processed` | The chain has already processed this message, and the facilitator holds no record of it (section 5.5). **Not final:** the payment may have landed |
 
 ### 5.5 Settlement (facilitator `/settle`)
 
-1. If this facilitator holds a record for the transaction's message, answer from it (see
-   Idempotency, below).
-2. Otherwise, re-verify.
+1. Claim the hash of the transaction's message. The claim is atomic, and succeeds only if no claim
+   or record exists for that hash. If one exists, the payload is a retry and is answered as
+   described under Idempotency, below.
+2. Re-verify.
 3. The rent payer signs (`open`, and a `close` that recreates `receiver_token`).
 4. Kora signs as fee payer.
-5. Record the transaction (see Idempotency), then submit it and wait for `confirmed`.
+5. Complete the record (see Idempotency), then submit the transaction and wait for `confirmed`.
+
+If step 2, 3 or 4 refuses the payload, the claim is released.
 
 The response follows x402 v2:
 - `success`, `transaction`, `network`;
@@ -758,20 +762,27 @@ rather than through a per-request middleware flow.
 
 **Idempotency.** A message is processed at most once (S16), so a retried settlement can never pay
 twice. The facilitator recognises a retry from its own records:
-- **What it records.** Before submitting a transaction, it records it under the hash of its
-  message. The record holds the signed transaction, its ID (the fee payer's signature), the
-  requirements and API key it came with, and, once known, its outcome. All of the facilitator's
-  instances share these records (section 6.5).
-- **How a retry is answered.** A payload whose message has a record, and that comes with the same
-  requirements and API key, is answered from that record. Nothing is verified, signed or
-  submitted again: the message is the one already verified.
+- **What it records.** A record starts as the claim of step 1, made before anything is verified,
+  so two identical payloads can never both proceed. Before submission it is completed with the
+  signed transaction, its ID (the fee payer's signature), the requirements and API key it came
+  with, and, once known, its outcome. All of the facilitator's instances share these records, in
+  a store that survives restarts (section 6.5).
+- **How a retry is answered.** A payload whose message is claimed or recorded, and that comes with
+  the same requirements and API key, is answered from that record. Nothing is verified, signed or
+  submitted again: the message is the one being, or already, settled.
   - `/verify` reports it valid.
-  - `/settle` reports the recorded outcome. If the outcome is not known yet, it first looks the
-    transaction up by its ID. If the transaction has not landed and its blockhash is still
-    valid, it submits the recorded transaction again, which S16 makes safe.
-- **A concurrent duplicate.** Two identical payloads can both pass step 1 before either is
-  recorded. The second submission is then refused with `AlreadyProcessed` (S16), and `/settle`
-  answers it from the first one's record: `settlement_pending` until that confirms.
+  - `/settle` reports the recorded outcome, or `settlement_pending` while there is none yet. If
+    the transaction was submitted but its outcome is not known, it first looks the transaction
+    up by its ID. If the transaction has not landed and its blockhash is still valid, it submits
+    the recorded transaction again, which S16 makes safe.
+- **A repeated submission.** Submitting the recorded transaction again either returns the same
+  ID, since the bytes are identical, or is refused with `AlreadyProcessed` because the first
+  submission has landed (S16). Either way, the facilitator then reads the outcome by that ID.
+- **Already processed, with no record.** The chain can report a message as already processed
+  (`AlreadyProcessed`, in simulation or at submission) for which the facilitator holds no record,
+  for example after a store failure. The payload is then not refused: it is answered with
+  `already_processed`, a non-final reason (section 5.4). The payment may have landed, so the gate
+  and the client watch the chain (sections 7.1 and 9.3).
 - **How long.** A record is kept until its transaction's blockhash has expired, plus a margin.
   After that the payload is verified as new and fails (`blockhash_expired`), so a landed
   transaction cannot be presented as a payment again.
@@ -874,7 +885,7 @@ A Docker Compose stack: the facilitator, Kora and a configuration template.
 | Rate limits | Per API key and per authority; for `/close`, per session and per client address |
 | Seller allowlist | Optional, for hosted operators |
 | Sponsorship policy | Who pays fees (sponsored by default) |
-| Store | Where the settlement records (section 5.5) and the record of each open's API key live: in memory for a single instance, or a store shared by all instances, such as Redis |
+| Store | Where the settlement records (section 5.5) and the record of each open's API key live: a store that survives restarts and is shared by all instances, such as Redis. An in-memory store is for tests only: a restart loses its records |
 
 Fees are sponsored and rent is fronted, and a deposit comes back only when its account closes
 (S11). An anonymous resource server could therefore make the facilitator lock rent in long
@@ -902,6 +913,10 @@ sessions it opens with itself. The API key and the limits per key bound that.
   terms before then, the gate proceeds as when an open settles (section 7.3).
   Otherwise the transaction never landed, and nothing was charged. A pending top-up needs nothing
   more: the gate is already subscribed to the session and sees it land.
+- **When the facilitator answers `already_processed`** (section 5.4), the payment may have landed
+  without a record of it. The gate answers `503`, never `402`. It watches the session address as
+  after a `202`, taking the address from the payload's `stint.open` accounts. The client treats
+  the `503` as it treats any `5xx` after paying: it polls the session (section 9.3).
 - Every check on a WebSocket connect runs before the upgrade and fails with an HTTP status. Close
   codes (section 7.4) apply only to connections already open.
 - **One gate per resource.** A gate (all of its instances), or a middleware mount, sells one
