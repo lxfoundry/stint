@@ -181,12 +181,12 @@ For readers who know EVM chains, the main differences:
 | Freezing | Only if the token implements it (USDC's blacklist) | Built in, if the mint has a freeze authority (S10) |
 | Paying someone else's fees | A relayer or a paymaster | A different first signer: the fee payer (S14) |
 
-### 2.3 Tooling facts the tests rely on
+### 2.3 Tooling facts the design relies on
 
-The end-to-end harness (section 12) depends on how its tools behave. These facts were read in each
-tool's source or documentation, at the version named. They are re-checked whenever the
-implementation plan pins another version, and the sections that depend on them cite them as (T1)
-to (T7).
+The facilitator (section 6) and the end-to-end harness (section 12) depend on how their tools
+behave. These facts were read in each tool's source or documentation, at the version named. They
+are re-checked whenever the implementation plan pins another version, and the sections that depend
+on them cite them as (T1) to (T8).
 
 - **T1. On Windows, Solana programs are built inside WSL.** The Solana and Anchor installation
   guides require it, and the official installer supports macOS, Linux and WSL. *Used in 3.5.*
@@ -214,6 +214,10 @@ to (T7).
   subscription was made. *Used in 12.5.*
 - **T7. Kora makes no outside request with its `Mock` price source and free pricing.** Its
   `Jupiter` price source needs an API key and the network. *Used in 12.3.*
+- **T8. Kora's Lighthouse assertions change the message Kora signs.** With `[kora.lighthouse]
+  enabled = true` (off by default; present in v2.2.0-beta.8, absent from v2.0.5), Kora appends an
+  instruction that checks the fee payer's balance to a transaction it signs without sending.
+  *Used in 6.2.*
 
 ## 3. Architecture
 
@@ -819,6 +823,9 @@ Kora runs beside the facilitator and is reachable only by it, with an API key.
   - the fee payer may not transfer SOL or tokens, create accounts, or act on token accounts:
     its signature would otherwise authorize any of these in a client-built transaction (S14);
   - a cap on lamports per transaction.
+- **Lighthouse assertions off.** The facilitator has Kora sign without sending, then submits the
+  transaction itself (section 5.5). With Lighthouse on, Kora would add an instruction, which
+  changes the message and invalidates the client's signature (T8).
 - **Pricing:** `free` (fees sponsored).
 - **Several signers** MAY be configured to spread fee-payer write locks.
 
