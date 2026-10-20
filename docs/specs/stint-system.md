@@ -919,7 +919,7 @@ not a connection is live.
 | Connection accepted | `attach()`; stop the idle timer | — |
 | Last connection drops | Start the idle timer (`idleCloseSeconds`) | — |
 | Idle timer fires (never connected, or not reconnected) | Close | `Standard` |
-| The buyer's close request | Drop connections (`4410`); close | `Standard` |
+| The buyer's close request | Close. Once the close is confirmed, drop connections (`4410`). If it fails, for example with `409` because `refund_to` is closed, keep them: the session continues | `Standard` |
 | Resource outage (`closeOnOutage`) | Drop connections (`4503`); close | `WaiveMinimum` |
 | Admin command (section 7.7) | Drop connections (`4410`); close | `WaiveMinimum` |
 | A top-up seen on the account | Move the end timer | — |
