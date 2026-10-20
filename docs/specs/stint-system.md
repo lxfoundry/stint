@@ -718,10 +718,13 @@ it is used.
 
 ### 5.5 Settlement (facilitator `/settle`)
 
-1. Re-verify.
-2. The rent payer signs (`open`, and a `close` that recreates `receiver_token`).
-3. Kora signs as fee payer.
-4. Submit, and wait for `confirmed`.
+1. If the transaction has already landed, report it as settled, with the same session (see
+   Idempotency, below). This comes first because a transaction that has landed would now fail
+   simulation.
+2. Otherwise, re-verify.
+3. The rent payer signs (`open`, and a `close` that recreates `receiver_token`).
+4. Kora signs as fee payer.
+5. Submit, and wait for `confirmed`.
 
 The response follows x402 v2:
 - `success`, `transaction`, `network`;
@@ -749,7 +752,9 @@ rather than through a per-request middleware flow.
 
 **Idempotency.** A session address is unique per `(authority, seed)` while it exists, and a
 signed transaction cannot land twice. A retried settlement whose transaction has already landed is
-reported as a success, with the same session.
+reported as a success, with the same session. The facilitator finds it by the transaction's first
+signature, the fee payer's. Ed25519 signs the same message identically every time (RFC 8032), so
+a retry of the same payload yields the same transaction ID.
 
 ### 5.6 Optional `exact` fallback
 
@@ -854,14 +859,17 @@ sessions it opens with itself. The API key and the limits per key bound that.
 
 | Endpoint | Purpose | Responses |
 |---|---|---|
-| `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `400 invalid_duration` |
-| `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}`; `400 invalid_duration` |
+| `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `202 {session, transaction}` while the settlement is pending; `400 invalid_duration` |
+| `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration` |
 | `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`; `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
 | `GET /sessions/:id` | Status from the chain: `paidUntil`, deposited and a fresh blockhash. Earned so far and time left are estimates at the gate's session clock (section 7.3); the chain's clock decides the amounts (section 4.2) | `200`; `404` |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
 | `GET /.well-known/jwks.json` | The gate's assertion keys (section 7.7) | `200` |
 
-- The `201` and `200` responses to open and top-up carry the `PAYMENT-RESPONSE` header.
+- The `201`, `200` and `202` responses to open and top-up carry the `PAYMENT-RESPONSE` header. A
+  `202` means the facilitator answered `settlement_pending` (section 5.5): the transaction was
+  submitted and has not been confirmed yet. The gate keeps watching it and treats the open as
+  settled once it confirms.
 - Every check on a WebSocket connect runs before the upgrade and fails with an HTTP status. Close
   codes (section 7.4) apply only to connections already open.
 - **One gate per resource.** A gate (all of its instances), or a middleware mount, sells one
@@ -1118,8 +1126,9 @@ minimum and tops up.
 It also echoes the accepted entry byte for byte, and **builds the transaction itself** from the
 terms: it never signs a transaction supplied by the seller.
 
-**After paying,** it treats `settlement_pending` as not final: it polls the session status until
-the session appears or the blockhash expires.
+**After paying,** it treats `settlement_pending` (a `202` from the gate) as not final. It polls the
+session status until the session appears (for a top-up, until `paidUntil` moves) or the blockhash
+expires.
 
 **During a session:**
 - with `autoTopUp`, it tops up `topUpAheadSeconds` before `paidUntil`, only while connected and
