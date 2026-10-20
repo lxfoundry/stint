@@ -1533,7 +1533,8 @@ itself):
   end of the run, it first closes any of its sessions still open, including those left open when
   a scenario stopped its stack. It holds every buyer key, so it closes each one at once with a
   `Standard` close signed by the session's authority (section 4.3). The funding key is the fee
-  payer (S14), since some buyers hold no SOL. If a scenario closed the buyer's refund account, the
+  payer (S14), since some buyers hold no SOL. If a scenario closed a payout account that the close
+  pays (section 4.3), either the buyer's refund account or the seller's `receiver_token`, the
   harness recreates it first (S7). It then returns what is left to the funding key;
 - the network's RPC URL.
 
