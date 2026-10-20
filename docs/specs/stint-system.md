@@ -723,8 +723,9 @@ it is used.
 The response follows x402 v2:
 - `success`, `transaction`, `network`;
 - **`payer` = the session authority** (not the fee payer);
-- `amount`: for `open` and `topUp`, the amount deposited; for `close`, the amount the close paid
-  the receiver;
+- `amount`: for `open` and `topUp`, the amount deposited; for `close`, `owed + redirected` from
+  the `Closed` event, which is what this transaction paid the receiver. It leaves out earlier
+  claims, which the gate's `paid` adds (below);
 - `settlement_pending` is a non-final `errorReason`, accompanied by a non-empty `transaction`.
 
 Servers MUST derive the payer from the signed transaction, not from the response.
