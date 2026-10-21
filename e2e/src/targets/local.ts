@@ -81,8 +81,11 @@ export async function startLocalStack(): Promise<LocalStack> {
       keys,
       kora,
       stop: async () => {
-        await kora.stop();
-        network.stop();
+        try {
+          await kora.stop();
+        } finally {
+          network.stop();
+        }
       },
     };
   } catch (error) {
