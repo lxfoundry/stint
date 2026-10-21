@@ -13,13 +13,14 @@ export function renderReport(outcomes: readonly ScenarioOutcome[]): string {
   });
 
   const count = (predicate: (outcome: ScenarioOutcome) => boolean) => outcomes.filter(predicate).length;
-  const summary = [
-    `Required: ${count((o) => o.status === "required")}`,
-    `Pending: ${count((o) => o.status === "pending")}`,
-    `Passed: ${count((o) => o.result === "pass")}`,
-    `Failed: ${count((o) => o.result === "fail")}`,
-    `Not applicable: ${count((o) => o.result === "not applicable")}`,
-  ].join(" · ");
+  const statuses = `required ${count((o) => o.status === "required")}, pending ${count((o) => o.status === "pending")}`;
+  const results = [
+    `pass ${count((o) => o.result === "pass")}`,
+    `fail ${count((o) => o.result === "fail")}`,
+    `pending ${count((o) => o.result === "pending")}`,
+    `not applicable ${count((o) => o.result === "not applicable")}`,
+  ].join(", ");
+  const summary = `Status: ${statuses} · Result: ${results}`;
 
   const flagged = count((o) => o.passesWhilePending);
   const failures = outcomes

@@ -37,7 +37,7 @@ describe("renderReport", () => {
       outcome({ id: 2, result: "not applicable" }),
       outcome({ id: 3, title: "A failure", status: "required", result: "fail", error: "boom" }),
     ]);
-    expect(report).toContain("Required: 2 · Pending: 1 · Passed: 1 · Failed: 1 · Not applicable: 1");
+    expect(report).toContain("Status: required 2, pending 1 · Result: pass 1, fail 1, pending 0, not applicable 1");
     expect(report).toContain("3. A failure: boom");
   });
 });
