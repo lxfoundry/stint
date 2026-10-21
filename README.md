@@ -19,6 +19,7 @@ The toolchain is pinned in `CLAUDE.md` (section "Toolchain") and checked by
 `scripts/check-toolchain.sh`. On Windows, work inside WSL 2.
 
     anchor build                              # build the program
+    cargo test -p stint                       # program unit tests
     pnpm install
     pnpm generate:client                      # regenerate the program client after an interface change
     scripts/fetch-subscriptions-program.sh    # fetch and check the Subscriptions program copy, once
