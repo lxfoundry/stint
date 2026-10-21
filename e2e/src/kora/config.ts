@@ -53,7 +53,7 @@ export function renderKoraConfig(input: KoraConfigInput): string {
     "get_supported_tokens = true",
     "get_payer_signer = true",
     "sign_transaction = true",
-    "sign_and_send_transaction = true",
+    "sign_and_send_transaction = false",
     "transfer_transaction = false",
     "get_blockhash = true",
     "get_config = true",
