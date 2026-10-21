@@ -52,6 +52,7 @@ __pycache__/
 coverage/
 test-results/
 .cache/
+e2e/report/
 # <<< scaffold-hackathon-repo <<<
 
 # >>> solana >>>

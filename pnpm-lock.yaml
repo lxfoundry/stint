@@ -179,6 +179,29 @@ importers:
         specifier: 5.0.5
         version: 5.0.5(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15))
 
+  conformance: {}
+
+  e2e:
+    dependencies:
+      '@lxfoundry/stint-conformance':
+        specifier: workspace:*
+        version: link:../conformance
+      '@lxfoundry/stint-program-client':
+        specifier: workspace:*
+        version: link:../packages/program-client
+      '@solana-program/token':
+        specifier: 0.18.0
+        version: 0.18.0(@solana/kit@8.5.0(typescript@7.0.2))
+      '@solana/kit':
+        specifier: 8.5.0
+        version: 8.5.0(typescript@7.0.2)
+      '@solana/surfpool':
+        specifier: 1.6.1
+        version: 1.6.1(@solana/kit@8.5.0(typescript@7.0.2))
+      '@solana/sysvars':
+        specifier: 8.5.0
+        version: 8.5.0(typescript@7.0.2)
+
   packages/program-client:
     dependencies:
       '@solana/kit':
@@ -504,6 +527,16 @@ packages:
 
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
+
+  '@solana-program/system@0.16.0':
+    resolution: {integrity: sha512-/RG6q2E2vG/XpdOt8Jj/kbQktPlL5JyJuNGAeN9wDcxKDKQtrGTJpDrJgQUxiEy23fsPNXQbLN8XeCtYoMof3Q==}
+    peerDependencies:
+      '@solana/kit': ^8.5.0
+
+  '@solana-program/token@0.18.0':
+    resolution: {integrity: sha512-YNN13I4BxBnGPGk0NzP/LLQMCmJVdunbtgqjl7/Gfp1fDXQrKXh9df8xu+2ayNdvjGJYC4c9D5vZpVetHdyJaQ==}
+    peerDependencies:
+      '@solana/kit': ^8.5.0
 
   '@solana/accounts@8.5.0':
     resolution: {integrity: sha512-vwwXYCobg1oG4kFeUEsGiNORjPujI2ff3yKLp6lCa7QBIlKaD7kZ2QRI3PZFYcNrMJ6HYNwNeZXR7ixg02pWdA==}
@@ -849,6 +882,40 @@ packages:
       typescript: '>=5.4.0'
     peerDependenciesMeta:
       typescript:
+        optional: true
+
+  '@solana/surfpool-darwin-arm64@1.6.1':
+    resolution: {integrity: sha512-IJsNi/5k2i5SPnS4JF1n25myS8N7qivqr2m5+IDov1lzN1k7QC2m3jk+33d0UgPaFMiZ7/U4N2wCIuyYMguHrg==}
+    engines: {node: '>=18'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@solana/surfpool-darwin-x64@1.6.1':
+    resolution: {integrity: sha512-er72HpPKSTNqdVsxY9qxnvPniDBWRkweIDE5y3fGmSdoBQUvn5MXIKbeAZ7DDX2lxowcMA1tczyN0hScojAwGA==}
+    engines: {node: '>=18'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@solana/surfpool-linux-x64-gnu@1.6.1':
+    resolution: {integrity: sha512-axWaVlmOUp8B+fIe/eex6Y1S5KpWj63B3njbUj5mjn5CvAeypycQf9dPwiXpo89K0yTrklU0yKktr2qSVCGX2Q==}
+    engines: {node: '>=18'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@solana/surfpool@1.6.1':
+    resolution: {integrity: sha512-QBRd70IPT1xRCQ1J+c6FgBQ9jRFsw7RrzU2i5gwBQ5bSusDXEaRHqkAPZOlGkB//zFw06wxVsy6ketrA6XFYUQ==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@solana/kit': ^8.0.0
+      '@solana/kit-plugin-rpc': ^0.18.0
+      '@solana/kit-plugin-signer': ^0.18.0
+    peerDependenciesMeta:
+      '@solana/kit':
+        optional: true
+      '@solana/kit-plugin-rpc':
+        optional: true
+      '@solana/kit-plugin-signer':
         optional: true
 
   '@solana/sysvars@8.5.0':
@@ -1649,6 +1716,15 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
+  '@solana-program/system@0.16.0(@solana/kit@8.5.0(typescript@7.0.2))':
+    dependencies:
+      '@solana/kit': 8.5.0(typescript@7.0.2)
+
+  '@solana-program/token@0.18.0(@solana/kit@8.5.0(typescript@7.0.2))':
+    dependencies:
+      '@solana-program/system': 0.16.0(@solana/kit@8.5.0(typescript@7.0.2))
+      '@solana/kit': 8.5.0(typescript@7.0.2)
+
   '@solana/accounts@8.5.0(typescript@7.0.2)':
     dependencies:
       '@solana/addresses': 8.5.0(typescript@7.0.2)
@@ -2058,6 +2134,22 @@ snapshots:
       '@solana/promises': 8.5.0(typescript@7.0.2)
     optionalDependencies:
       typescript: 7.0.2
+
+  '@solana/surfpool-darwin-arm64@1.6.1':
+    optional: true
+
+  '@solana/surfpool-darwin-x64@1.6.1':
+    optional: true
+
+  '@solana/surfpool-linux-x64-gnu@1.6.1':
+    optional: true
+
+  '@solana/surfpool@1.6.1(@solana/kit@8.5.0(typescript@7.0.2))':
+    optionalDependencies:
+      '@solana/kit': 8.5.0(typescript@7.0.2)
+      '@solana/surfpool-darwin-arm64': 1.6.1
+      '@solana/surfpool-darwin-x64': 1.6.1
+      '@solana/surfpool-linux-x64-gnu': 1.6.1
 
   '@solana/sysvars@8.5.0(typescript@7.0.2)':
     dependencies:
