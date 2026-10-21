@@ -2,10 +2,12 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getTransferSolInstruction } from "@solana-program/system";
 import { fetchToken, getTransferCheckedInstruction } from "@solana-program/token";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import {
   appendTransactionMessageInstructions,
+  createNoopSigner,
   createTransactionMessage,
   getBase64EncodedWireTransaction,
   getBase64Encoder,
@@ -125,5 +127,34 @@ describe("Kora on the local network", () => {
     expect(meta).toBeDefined();
     const paid = meta!.preBalances[0]! - meta!.postBalances[0]!;
     expect(paid).toBe(meta!.fee);
+  });
+
+  it("refuses a transaction in which its fee payer transfers SOL", async () => {
+    const recipient = await newHarnessKey();
+    const { value: latestBlockhash } = await network.rpc.getLatestBlockhash({ commitment: "confirmed" }).send();
+    const message = pipe(
+      createTransactionMessage({ version: 0 }),
+      (m) => setTransactionMessageFeePayer(feePayer.signer.address, m),
+      (m) => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, m),
+      (m) =>
+        appendTransactionMessageInstructions(
+          [
+            getTransferSolInstruction({
+              source: createNoopSigner(feePayer.signer.address),
+              destination: recipient.signer.address,
+              amount: 900_000n, // above the rent minimum of a new account, so only Kora's policy can refuse it
+            }),
+          ],
+          m,
+        ),
+    );
+    const partiallySigned = await partiallySignTransactionMessageWithSigners(message);
+    const client = createKoraClient(kora.url, kora.apiKey);
+    await expect(client.signTransaction(getBase64EncodedWireTransaction(partiallySigned))).rejects.toThrow(/Fee payer cannot be used for 'System Transfer'/);
+  });
+
+  it("refuses a request without its API key", async () => {
+    const client = createKoraClient(kora.url, "wrong-key");
+    await expect(client.getPayerSigner()).rejects.toThrow(/401/);
   });
 });

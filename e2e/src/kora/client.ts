@@ -19,7 +19,11 @@ export function createKoraClient(url: string, apiKey: string): KoraClient {
       headers: { "content-type": "application/json", "x-api-key": apiKey },
       body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }),
     });
-    const body = (await response.json()) as { result?: T; error?: { code: number; message: string } };
+    const text = await response.text();
+    if (!response.ok && !text.trimStart().startsWith("{")) {
+      throw new Error(`Kora ${method}: HTTP ${response.status} ${response.statusText} ${text}`.trim());
+    }
+    const body = JSON.parse(text) as { result?: T; error?: { code: number; message: string } };
     if (body.error) throw new Error(`Kora ${method}: ${body.error.message} (${body.error.code})`);
     if (body.result === undefined) throw new Error(`Kora ${method}: empty response`);
     return body.result;
