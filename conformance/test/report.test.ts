@@ -1,5 +1,8 @@
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { renderReport } from "../src/report.js";
+import { renderReport, writeReport } from "../src/report.js";
 import type { ScenarioOutcome } from "../src/types.js";
 
 const outcome = (overrides: Partial<ScenarioOutcome>): ScenarioOutcome => ({
@@ -39,5 +42,20 @@ describe("renderReport", () => {
     ]);
     expect(report).toContain("Status: required 2, pending 1 · Result: pass 1, fail 1, pending 0, not applicable 1");
     expect(report).toContain("3. A failure: boom");
+  });
+
+  it("keeps each row and each error on one line", () => {
+    const report = renderReport([
+      outcome({ title: "two\nlines", status: "required", result: "fail", error: "first\n  second | third" }),
+    ]);
+    expect(report).toContain("| 1. two lines | local |");
+    expect(report).toContain("- 1. two lines: first second \\| third");
+  });
+
+  it("writes report.md and report.json", () => {
+    const directory = mkdtempSync(join(tmpdir(), "stint-report-"));
+    writeReport(directory, [outcome({})]);
+    expect(readFileSync(join(directory, "report.md"), "utf8")).toContain("| 1. Open, connect, close early |");
+    expect(JSON.parse(readFileSync(join(directory, "report.json"), "utf8"))).toHaveLength(1);
   });
 });
