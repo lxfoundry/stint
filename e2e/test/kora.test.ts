@@ -153,7 +153,7 @@ describe("Kora on the local network", () => {
     await expect(client.signTransaction(getBase64EncodedWireTransaction(partiallySigned))).rejects.toThrow(/Fee payer cannot be used for 'System Transfer'/);
   });
 
-  it("refuses a request without its API key", async () => {
+  it("refuses a request with a wrong API key", async () => {
     const client = createKoraClient(kora.url, "wrong-key");
     await expect(client.getPayerSigner()).rejects.toThrow(/401/);
   });
