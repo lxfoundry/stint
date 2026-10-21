@@ -40,9 +40,13 @@ import {
   type SessionArgs,
 } from "../accounts/index.js";
 import {
+  getCloseInstruction,
   getOpenInstructionAsync,
+  parseCloseInstruction,
   parseOpenInstruction,
+  type CloseInput,
   type OpenAsyncInput,
+  type ParsedCloseInstruction,
   type ParsedOpenInstruction,
 } from "../instructions/index.js";
 import { findSessionPda } from "../pdas/index.js";
@@ -136,6 +140,7 @@ export function identifyStintEvent(
 }
 
 export enum StintInstruction {
+  Close,
   Open,
 }
 
@@ -143,6 +148,17 @@ export function identifyStintInstruction(
   instruction: { data: ReadonlyUint8Array } | ReadonlyUint8Array,
 ): StintInstruction {
   const data = "data" in instruction ? instruction.data : instruction;
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([98, 165, 201, 177, 108, 65, 206, 96]),
+      ),
+      0,
+    )
+  ) {
+    return StintInstruction.Close;
+  }
   if (
     containsBytes(
       data,
@@ -162,15 +178,26 @@ export function identifyStintInstruction(
 
 export type ParsedStintInstruction<
   TProgram extends string = "5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr",
-> = {
-  instructionType: StintInstruction.Open;
-} & ParsedOpenInstruction<TProgram>;
+> =
+  | ({
+      instructionType: StintInstruction.Close;
+    } & ParsedCloseInstruction<TProgram>)
+  | ({
+      instructionType: StintInstruction.Open;
+    } & ParsedOpenInstruction<TProgram>);
 
 export function parseStintInstruction<TProgram extends string>(
   instruction: Instruction<TProgram> & InstructionWithData<ReadonlyUint8Array>,
 ): ParsedStintInstruction<TProgram> {
   const instructionType = identifyStintInstruction(instruction);
   switch (instructionType) {
+    case StintInstruction.Close: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: StintInstruction.Close,
+        ...parseCloseInstruction(instruction),
+      };
+    }
     case StintInstruction.Open: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -201,6 +228,10 @@ export type StintPluginAccounts = {
 };
 
 export type StintPluginInstructions = {
+  close: (
+    input: CloseInput,
+    config?: { programAddress?: Address | HasAddress },
+  ) => ReturnType<typeof getCloseInstruction> & SelfPlanAndSendFunctions;
   open: (
     input: OpenAsyncInput,
     config?: { programAddress?: Address | HasAddress },
@@ -225,6 +256,14 @@ export function stintProgram(
       stint: <StintPlugin>{
         accounts: { session: addSelfFetchFunctions(client, getSessionCodec()) },
         instructions: {
+          close: (input, instructionConfig) =>
+            addSelfPlanAndSendFunctions(
+              client,
+              getCloseInstruction(input, {
+                programAddress:
+                  instructionConfig?.programAddress ?? config.programAddress,
+              }),
+            ),
           open: (input, instructionConfig) =>
             addSelfPlanAndSendFunctions(
               client,

@@ -30,10 +30,13 @@ import {
 } from "@solana/kit";
 import { FailedTransactionMetadata, LiteSVM } from "litesvm";
 import {
+  CloseKind,
   STINT_PROGRAM_ADDRESS,
   eventAccounts,
   findSessionPda,
+  getCloseInstruction,
   getOpenInstruction,
+  getSessionDecoder,
   type ProgramInstruction,
 } from "../../src/index.js";
 
@@ -65,6 +68,16 @@ export interface OpenOptions {
   readonly receiver?: Address;
   readonly refundOwner?: Address;
   readonly vault?: Address;
+}
+
+export interface CloseOptions {
+  readonly session: Address;
+  readonly closer: KeyPairSigner;
+  readonly kind?: CloseKind;
+  readonly vault?: Address;
+  readonly receiverToken?: Address;
+  readonly refundTo?: Address;
+  readonly rentPayer?: Address;
 }
 
 export interface Opened {
@@ -247,5 +260,23 @@ export class Fixture {
     });
     const sent = await this.send([...fund, open]);
     return { session, vault, sent };
+  }
+
+  /** `close`, with each account derived from the stored session unless overridden. */
+  async close(options: CloseOptions): Promise<Sent> {
+    const account = this.svm.getAccount(options.session);
+    if (!account.exists) throw new Error(`no session at ${options.session}`);
+    const stored = getSessionDecoder().decode(account.data);
+    const instruction = getCloseInstruction({
+      closer: options.closer,
+      session: options.session,
+      vault: options.vault ?? (await this.ata(options.session)),
+      receiverToken: options.receiverToken ?? (await this.ata(stored.receiver)),
+      refundTo: options.refundTo ?? (await this.ata(stored.refundOwner)),
+      rentPayer: options.rentPayer ?? stored.rentPayer,
+      ...(await eventAccounts()),
+      kind: options.kind ?? CloseKind.Standard,
+    });
+    return this.send([instruction]);
   }
 }
