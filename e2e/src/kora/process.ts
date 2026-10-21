@@ -77,8 +77,15 @@ export async function startKora(options: KoraOptions): Promise<KoraProcess> {
     stop = async () => {
       if (!exited) {
         child.kill("SIGINT"); // Kora 2.0.5 shuts down on Ctrl-C only.
-        const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 5_000));
-        if ((await Promise.race([exit, timeout])) === "timeout") child.kill("SIGKILL");
+        let timer: NodeJS.Timeout | undefined;
+        const timeout = new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), 5_000);
+        });
+        try {
+          if ((await Promise.race([exit, timeout])) === "timeout") child.kill("SIGKILL");
+        } finally {
+          clearTimeout(timer);
+        }
         await exit;
       }
       cleanUp();
