@@ -1,0 +1,18 @@
+{
+  "name": "stint",
+  "private": true,
+  "packageManager": "pnpm@12.14.0",
+  "engines": { "node": "24.22.0" },
+  "scripts": {
+    "generate:client": "pnpm --filter @lxfoundry/stint-program-client run generate",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "e2e:local": "pnpm --filter @lxfoundry/stint-e2e run local"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}
