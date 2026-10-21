@@ -81,10 +81,14 @@ jobs:
       - name: Build the program
         run: anchor build --ignore-keys
 
+      - name: Program tests
+        run: cargo test -p stint
+
       - name: Check the generated client is current
         run: |
           pnpm generate:client
           git diff --exit-code -- packages/program-client
+          test -z "$(git status --porcelain -- packages/program-client)"
 
       - name: Cache the Subscriptions program copy
         uses: actions/cache@v6
