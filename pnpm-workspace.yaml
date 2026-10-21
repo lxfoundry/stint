@@ -1,0 +1,8 @@
+packages:
+  - packages/*
+  - conformance
+  - e2e
+
+# esbuild's install script is not run: tests pass without it, and no dependency install scripts run unless needed.
+allowBuilds:
+  esbuild: false

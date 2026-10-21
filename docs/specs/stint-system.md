@@ -1513,6 +1513,7 @@ upgrade.
 | Account notifications carry the slot at which the subscription was made (T6) | The `slot` of the example stream's `account` messages (section 8) is not meaningful locally; no scenario asserts on it | The `devnet` target |
 | One node, no network latency, no other traffic | Expired blockhashes, retries and rate limits are rare | The `devnet` target |
 | The USDC mint's authorities are harness keys | Freeze scenarios run locally only: on `devnet`, the mint's freeze authority (S10) is a key the harness does not hold | — |
+| The feature gate `disable_sbpf_v0_v1_v2_deployment` is disabled, so programs built for older SBPF versions can be deployed | The Subscriptions program copy deploys and runs locally (section 14, question 6), but a program devnet would refuse to deploy could still deploy locally | The `devnet` target |
 
 ### 12.6 Conformance suite
 

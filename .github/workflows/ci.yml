@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  local:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RUST_VERSION: "1.99.1"
+      AGAVE_VERSION: "4.3.2"
+      ANCHOR_VERSION: "1.2.1"
+      SURFPOOL_VERSION: "1.6.1"
+      KORA_VERSION: "2.0.5"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libudev-dev llvm libclang-dev protobuf-compiler libssl-dev
+
+      - name: Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUST_VERSION"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo binaries
+        id: cargo-bin
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/avm
+            ~/.cargo/bin/anchor
+            ~/.cargo/bin/kora
+            ~/.avm
+          key: cargo-bin-${{ runner.os }}-rust${{ env.RUST_VERSION }}-anchor${{ env.ANCHOR_VERSION }}-kora${{ env.KORA_VERSION }}
+
+      - name: Agave
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v${AGAVE_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Anchor and Kora
+        if: steps.cargo-bin.outputs.cache-hit != 'true'
+        run: |
+          cargo install --git https://github.com/otter-sec/anchor --tag "v${ANCHOR_VERSION}" avm --locked --force
+          avm install "$ANCHOR_VERSION"
+          cargo install kora-cli --version "$KORA_VERSION" --locked
+
+      - name: Select Anchor
+        run: avm use "$ANCHOR_VERSION"
+
+      - name: Surfpool
+        run: |
+          curl -sL https://run.surfpool.run/ | VERSION="v${SURFPOOL_VERSION}" bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Check the toolchain
+        run: scripts/check-toolchain.sh
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the program
+        run: anchor build --ignore-keys
+
+      - name: Program tests
+        run: cargo test -p stint
+
+      - name: Check the generated client is current
+        run: |
+          pnpm generate:client
+          git diff --exit-code -- packages/program-client
+          test -z "$(git status --porcelain -- packages/program-client)"
+
+      - name: Cache the Subscriptions program copy
+        uses: actions/cache@v6
+        with:
+          path: e2e/.cache
+          key: subscriptions-${{ hashFiles('e2e/fixtures/subscriptions.sha256') }}
+
+      - name: Fetch and check the Subscriptions program copy
+        run: scripts/fetch-subscriptions-program.sh
+
+      - name: Type check
+        run: pnpm typecheck
+
+      - name: Unit and integration tests
+        run: pnpm test
+
+      - name: End-to-end, local target
+        run: pnpm e2e:local
+
+      - name: Report
+        if: always()
+        run: |
+          if [ -f e2e/report/report.md ]; then cat e2e/report/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Keep the report and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-report
+          path: e2e/report
+          if-no-files-found: ignore

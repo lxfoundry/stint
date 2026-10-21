@@ -1,0 +1,23 @@
+{
+  "name": "@lxfoundry/stint-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "local": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@lxfoundry/stint-conformance": "workspace:*",
+    "@lxfoundry/stint-program-client": "workspace:*",
+    "@solana-program/system": "0.16.0",
+    "@solana-program/token": "0.18.0",
+    "@solana/kit": "8.5.0",
+    "@solana/surfpool": "1.6.1",
+    "@solana/sysvars": "8.5.0"
+  }
+}

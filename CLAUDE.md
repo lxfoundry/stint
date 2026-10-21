@@ -55,11 +55,27 @@ Code layout: section 3.3 of `docs/specs/stint-system.md`.
 
 ## Toolchain
 
-Named in section 3.5 of `docs/specs/stint-system.md`: Anchor, Codama clients for `@solana/kit`,
-TypeScript on Node.js, LiteSVM and Surfpool, version 0 transactions. Exact versions, the package
-manager, the test runner and the build, test and run commands are pinned by the implementation
-plan, and recorded here once set. On Windows, everything runs inside WSL 2 (the Solana and Anchor
-toolchains require it).
+Named in section 3.5 of `docs/specs/stint-system.md` and pinned by
+`docs/plans/00-toolchain-and-harness.md`:
+
+| Tool | Version |
+|---|---|
+| Rust | 1.99.1 (`rust-toolchain.toml`) |
+| Agave (Solana CLI) | 4.3.2 |
+| Anchor | 1.2.1 |
+| Node.js | 24.22.0 (`.nvmrc`) |
+| pnpm | 12.14.0 (`packageManager`) |
+| Surfpool | 1.6.1 |
+| Kora | 2.0.5 |
+
+`scripts/check-toolchain.sh` checks the installed tools and the files that pin them. Commands: `anchor build` builds the program;
+`pnpm generate:client` regenerates its client; `pnpm test` runs the unit and integration tests (the integration tests need `anchor build`,
+`scripts/fetch-subscriptions-program.sh` and the `surfpool` and `kora` binaries first); `pnpm e2e:local`
+runs the end-to-end scenarios on the `local` target. On Windows, everything runs inside WSL 2 (the
+Solana and Anchor toolchains require it). Running `anchor` outside a project that pins
+`[toolchain] solana_version` in `Anchor.toml` can switch the Solana CLI to the version Anchor
+bundles (3.1.10 for Anchor 1.2.1); `agave-install init 4.3.2` restores the pinned one, which
+`scripts/check-toolchain.sh` checks.
 
 ## Rules
 
