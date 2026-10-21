@@ -7,15 +7,73 @@
  */
 
 import {
+  assertIsInstructionWithAccounts,
   containsBytes,
+  extendClient,
   fixEncoderSize,
   getBytesEncoder,
+  SOLANA_ERROR__PROGRAM_CLIENTS__FAILED_TO_IDENTIFY_ACCOUNT,
+  SOLANA_ERROR__PROGRAM_CLIENTS__FAILED_TO_IDENTIFY_INSTRUCTION,
+  SOLANA_ERROR__PROGRAM_CLIENTS__UNRECOGNIZED_INSTRUCTION_TYPE,
+  SolanaError,
   type Address,
+  type ClientWithRpc,
+  type ClientWithTransactionPlanning,
+  type ClientWithTransactionSending,
+  type ExtendedClient,
+  type GetAccountInfoApi,
+  type GetMultipleAccountsApi,
+  type HasAddress,
+  type Instruction,
+  type InstructionWithData,
   type ReadonlyUint8Array,
 } from "@solana/kit";
+import {
+  addSelfFetchFunctions,
+  addSelfPlanAndSendFunctions,
+  type SelfFetchFunctions,
+  type SelfPlanAndSendFunctions,
+} from "@solana/program-client-core";
+import {
+  getSessionCodec,
+  type Session,
+  type SessionArgs,
+} from "../accounts/index.js";
+import {
+  getOpenInstructionAsync,
+  parseOpenInstruction,
+  type OpenAsyncInput,
+  type ParsedOpenInstruction,
+} from "../instructions/index.js";
+import { findSessionPda } from "../pdas/index.js";
 
 export const STINT_PROGRAM_ADDRESS =
   "5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr" as Address<"5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr">;
+
+export enum StintAccount {
+  Session,
+}
+
+export function identifyStintAccount(
+  account: { data: ReadonlyUint8Array } | ReadonlyUint8Array,
+): StintAccount {
+  const data = "data" in account ? account.data : account;
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([243, 81, 72, 115, 214, 188, 72, 144]),
+      ),
+      0,
+    )
+  ) {
+    return StintAccount.Session;
+  }
+  throw new SolanaError(
+    SOLANA_ERROR__PROGRAM_CLIENTS__FAILED_TO_IDENTIFY_ACCOUNT,
+    { accountData: data, programName: "stint" },
+  );
+}
 
 export enum StintEvent {
   Claimed,
@@ -75,4 +133,118 @@ export function identifyStintEvent(
   throw new Error(
     "The provided event could not be identified as a stint event.",
   );
+}
+
+export enum StintInstruction {
+  Open,
+}
+
+export function identifyStintInstruction(
+  instruction: { data: ReadonlyUint8Array } | ReadonlyUint8Array,
+): StintInstruction {
+  const data = "data" in instruction ? instruction.data : instruction;
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([228, 220, 155, 71, 199, 189, 60, 45]),
+      ),
+      0,
+    )
+  ) {
+    return StintInstruction.Open;
+  }
+  throw new SolanaError(
+    SOLANA_ERROR__PROGRAM_CLIENTS__FAILED_TO_IDENTIFY_INSTRUCTION,
+    { instructionData: data, programName: "stint" },
+  );
+}
+
+export type ParsedStintInstruction<
+  TProgram extends string = "5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr",
+> = {
+  instructionType: StintInstruction.Open;
+} & ParsedOpenInstruction<TProgram>;
+
+export function parseStintInstruction<TProgram extends string>(
+  instruction: Instruction<TProgram> & InstructionWithData<ReadonlyUint8Array>,
+): ParsedStintInstruction<TProgram> {
+  const instructionType = identifyStintInstruction(instruction);
+  switch (instructionType) {
+    case StintInstruction.Open: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: StintInstruction.Open,
+        ...parseOpenInstruction(instruction),
+      };
+    }
+    default:
+      throw new SolanaError(
+        SOLANA_ERROR__PROGRAM_CLIENTS__UNRECOGNIZED_INSTRUCTION_TYPE,
+        { instructionType: instructionType as string, programName: "stint" },
+      );
+  }
+}
+
+export type StintPlugin = {
+  accounts: StintPluginAccounts;
+  instructions: StintPluginInstructions;
+  pdas: StintPluginPdas;
+  identifyAccount: typeof identifyStintAccount;
+  identifyInstruction: typeof identifyStintInstruction;
+  parseInstruction: typeof parseStintInstruction;
+};
+
+export type StintPluginAccounts = {
+  session: ReturnType<typeof getSessionCodec> &
+    SelfFetchFunctions<SessionArgs, Session>;
+};
+
+export type StintPluginInstructions = {
+  open: (
+    input: OpenAsyncInput,
+    config?: { programAddress?: Address | HasAddress },
+  ) => ReturnType<typeof getOpenInstructionAsync> & SelfPlanAndSendFunctions;
+};
+
+export type StintPluginPdas = { session: typeof findSessionPda };
+
+export type StintPluginRequirements = ClientWithRpc<
+  GetAccountInfoApi & GetMultipleAccountsApi
+> &
+  ClientWithTransactionPlanning &
+  ClientWithTransactionSending;
+
+export function stintProgram(
+  config: { programAddress?: Address | HasAddress } = {},
+) {
+  return <T extends StintPluginRequirements>(
+    client: T,
+  ): ExtendedClient<T, { stint: StintPlugin }> => {
+    return extendClient(client, {
+      stint: <StintPlugin>{
+        accounts: { session: addSelfFetchFunctions(client, getSessionCodec()) },
+        instructions: {
+          open: (input, instructionConfig) =>
+            addSelfPlanAndSendFunctions(
+              client,
+              getOpenInstructionAsync(input, {
+                programAddress:
+                  instructionConfig?.programAddress ?? config.programAddress,
+              }),
+            ),
+        },
+        pdas: {
+          session: (seeds, pdaConfig) =>
+            findSessionPda(seeds, {
+              programAddress:
+                pdaConfig?.programAddress ?? config.programAddress,
+            }),
+        },
+        identifyAccount: identifyStintAccount,
+        identifyInstruction: identifyStintInstruction,
+        parseInstruction: parseStintInstruction,
+      },
+    });
+  };
 }
