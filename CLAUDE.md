@@ -68,8 +68,9 @@ Named in section 3.5 of `docs/specs/stint-system.md` and pinned by
 | Surfpool | 1.6.1 |
 | Kora | 2.0.5 |
 
-`scripts/check-toolchain.sh` checks them. Commands: `anchor build` builds the program;
-`pnpm generate:client` regenerates its client; `pnpm test` runs the unit tests; `pnpm e2e:local`
+`scripts/check-toolchain.sh` checks the installed tools and the files that pin them. Commands: `anchor build` builds the program;
+`pnpm generate:client` regenerates its client; `pnpm test` runs the unit and integration tests (the integration tests need `anchor build`,
+`scripts/fetch-subscriptions-program.sh` and the `surfpool` and `kora` binaries first); `pnpm e2e:local`
 runs the end-to-end scenarios on the `local` target. On Windows, everything runs inside WSL 2 (the
 Solana and Anchor toolchains require it). Running `anchor` outside a project that pins
 `[toolchain] solana_version` in `Anchor.toml` can switch the Solana CLI to the version Anchor
