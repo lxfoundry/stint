@@ -19,7 +19,8 @@ check() {
 
 check rustc    "rustc --version"    "1.99.1"
 check solana   "solana --version"   "4.3.2"
-check anchor   "anchor --version"   "1.2.1"
+# Runs the installed binary directly: the `anchor` shim re-points the Solana CLI outside a project that pins it.
+check anchor   "${AVM_HOME:-$HOME/.avm}/bin/anchor-1.2.1 --version" "1.2.1"
 check node     "node --version"     "v24.22.0"
 check pnpm     "pnpm --version"     "12.14.0"
 check surfpool "surfpool --version" "1.6.1"
