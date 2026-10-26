@@ -1,14 +1,18 @@
 import {
+  createNoopSigner,
   generateKeyPairSigner,
   getBase64EncodedWireTransaction,
   partiallySignTransaction,
   type Address,
   type KeyPairSigner,
+  type SignatureBytes,
 } from "@solana/kit";
-import { getSetComputeUnitPriceInstruction } from "@solana-program/compute-budget";
+import { getSetComputeUnitLimitInstruction, getSetComputeUnitPriceInstruction } from "@solana-program/compute-budget";
+import { getCreateAssociatedTokenIdempotentInstruction } from "@solana-program/token";
 import { beforeAll, describe, expect, it } from "vitest";
 import { CloseKind, type Session } from "@lxfoundry/stint-program-client";
 import {
+  associatedTokenAddress,
   buildCloseTransaction,
   buildOpenOffer,
   buildOpenTransaction,
@@ -21,6 +25,13 @@ import {
 } from "../src/index.js";
 import { offerInput } from "./fixtures.js";
 import { rebuild } from "./rebuild.js";
+
+/** The same transaction with `signer`'s signature replaced by 64 bytes that are not a signature. */
+function forged(wire: string, signer: Address): string {
+  const { transaction } = inspectTransaction(wire)!;
+  const signatures = { ...transaction.signatures, [signer]: new Uint8Array(64).fill(7) as SignatureBytes };
+  return getBase64EncodedWireTransaction({ ...transaction, signatures });
+}
 
 describe("open transactions (spec §5.3, §5.4)", () => {
   let buyer: KeyPairSigner;
@@ -76,6 +87,39 @@ describe("open transactions (spec §5.3, §5.4)", () => {
     expect(await checkOpenTransaction(inspectTransaction(reversed)!, offer, keys())).toMatchObject({ ok: false, reason: "unexpected_instruction" });
   });
 
+  it("accepts a compute-unit limit and refuses a compute-unit price", async () => {
+    const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
+    const withLimit = await rebuild(built.transaction, buyer, (ixs) => [getSetComputeUnitLimitInstruction({ units: 200_000 }), ...ixs]);
+    expect(await checkOpenTransaction(inspectTransaction(withLimit)!, offer, keys())).toMatchObject({ ok: true });
+    const withPrice = await rebuild(built.transaction, buyer, (ixs) => [getSetComputeUnitPriceInstruction({ microLamports: 1n }), ...ixs]);
+    expect(await checkOpenTransaction(inspectTransaction(withPrice)!, offer, keys())).toMatchObject({ ok: false, reason: "unexpected_instruction" });
+  });
+
+  it("refuses the rent payer funding any account but the vault", async () => {
+    const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
+    const mint = offer.asset as Address;
+    const createFor = async (owner: Address) =>
+      getCreateAssociatedTokenIdempotentInstruction({
+        payer: createNoopSigner(rentPayer),
+        ata: await associatedTokenAddress(owner, mint),
+        owner,
+        mint,
+      });
+    const extra = await createFor(buyer.address);
+    const replaced = await rebuild(built.transaction, buyer, (ixs) => [extra, ...ixs.slice(1)]);
+    expect(await checkOpenTransaction(inspectTransaction(replaced)!, offer, keys())).toMatchObject({ ok: false, reason: "payer_misuse" });
+    const added = await rebuild(built.transaction, buyer, (ixs) => [extra, ...ixs]);
+    expect(await checkOpenTransaction(inspectTransaction(added)!, offer, keys())).toMatchObject({ ok: false, reason: "payer_misuse" });
+    const noOpen = await rebuild(built.transaction, buyer, (ixs) => ixs.slice(0, 2));
+    expect(await checkOpenTransaction(inspectTransaction(noOpen)!, offer, keys())).toMatchObject({ ok: false, reason: "payer_misuse" });
+  });
+
+  it("refuses an authority signature that is not valid over the message", async () => {
+    const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
+    const check = await checkOpenTransaction(inspectTransaction(forged(built.transaction, buyer.address))!, offer, keys());
+    expect(check).toMatchObject({ ok: false, reason: "invalid_payload" });
+  });
+
   it("refuses a transaction whose fee payer has already signed", async () => {
     const payer = await generateKeyPairSigner();
     const payerOffer = { ...offer, extra: { ...offer.extra, feePayer: payer.address } };
@@ -115,18 +159,26 @@ describe("close transactions (spec §5.3, §5.4)", () => {
       lifetime: { blockhash: "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N", lastValidBlockHeight: 100n },
     });
     const tx = inspectTransaction(wire)!;
-    expect(checkCloseTransaction(tx, { session, closer: closer.address }, { feePayer, rentPayer })).toMatchObject({
+    expect(await checkCloseTransaction(tx, { session, closer: closer.address }, { feePayer, rentPayer })).toMatchObject({
       ok: true,
       value: { kind: CloseKind.Standard },
     });
-    expect(checkCloseTransaction(tx, { session, closer: authority.address }, { feePayer, rentPayer })).toMatchObject({
+    expect(await checkCloseTransaction(tx, { session, closer: authority.address }, { feePayer, rentPayer })).toMatchObject({
       ok: false,
       reason: "invalid_payload",
     });
-    expect(checkCloseTransaction(tx, { session: closer.address, closer: closer.address }, { feePayer, rentPayer })).toMatchObject({
+    expect(await checkCloseTransaction(tx, { session: closer.address, closer: closer.address }, { feePayer, rentPayer })).toMatchObject({
       ok: false,
       reason: "invalid_terms",
     });
+    const withLimit = await rebuild(wire, closer, (ixs) => [getSetComputeUnitLimitInstruction({ units: 100_000 }), ...ixs]);
+    expect(await checkCloseTransaction(inspectTransaction(withLimit)!, { session, closer: closer.address }, { feePayer, rentPayer })).toMatchObject({
+      ok: true,
+    });
+    const forgedWire = forged(wire, closer.address);
+    expect(
+      await checkCloseTransaction(inspectTransaction(forgedWire)!, { session, closer: closer.address }, { feePayer, rentPayer }),
+    ).toMatchObject({ ok: false, reason: "invalid_payload" });
   });
 });
 

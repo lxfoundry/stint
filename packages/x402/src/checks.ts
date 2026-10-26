@@ -15,6 +15,7 @@ import {
 } from "@solana-program/token";
 import {
   address,
+  getPublicKeyFromAddress,
   isInstructionWithAccounts,
   isInstructionWithData,
   type AccountMeta,
@@ -23,6 +24,7 @@ import {
   type InstructionWithAccounts,
   type InstructionWithData,
   type ReadonlyUint8Array,
+  verifySignature,
 } from "@solana/kit";
 import {
   STINT_PROGRAM_ADDRESS,
@@ -43,12 +45,15 @@ export interface FacilitatorKeys {
   readonly rentPayer: Address;
 }
 
-type Full = Instruction & InstructionWithAccounts<readonly AccountMeta[]> & InstructionWithData<ReadonlyUint8Array>;
+type WithData = Instruction & InstructionWithData<ReadonlyUint8Array>;
+type Full = WithData & InstructionWithAccounts<readonly AccountMeta[]>;
 
-const full = (ix: Instruction): ix is Full => isInstructionWithAccounts(ix) && isInstructionWithData(ix);
-
-function is<T>(identify: (ix: Full) => T, ix: Instruction, programAddress: Address, kind: T): ix is Full {
-  if (ix.programAddress !== programAddress || !full(ix)) return false;
+/**
+ * Kit leaves `accounts` out of an instruction that has none (compute budget), so identification
+ * needs the data only; the predicates that read accounts add their own guard.
+ */
+function is<T>(identify: (ix: WithData) => T, ix: Instruction, programAddress: Address, kind: T): ix is WithData {
+  if (ix.programAddress !== programAddress || !isInstructionWithData(ix)) return false;
   try {
     return identify(ix) === kind;
   } catch {
@@ -57,11 +62,23 @@ function is<T>(identify: (ix: Full) => T, ix: Instruction, programAddress: Addre
 }
 
 const isVaultCreation = (ix: Instruction): ix is Full =>
-  is(identifyAssociatedTokenInstruction, ix, ASSOCIATED_TOKEN_PROGRAM_ADDRESS, AssociatedTokenInstruction.CreateAssociatedTokenIdempotent);
+  is(identifyAssociatedTokenInstruction, ix, ASSOCIATED_TOKEN_PROGRAM_ADDRESS, AssociatedTokenInstruction.CreateAssociatedTokenIdempotent) &&
+  isInstructionWithAccounts(ix);
 const isTransferChecked = (ix: Instruction): ix is Full =>
-  is(identifyTokenInstruction, ix, TOKEN_PROGRAM_ADDRESS, TokenInstruction.TransferChecked);
+  is(identifyTokenInstruction, ix, TOKEN_PROGRAM_ADDRESS, TokenInstruction.TransferChecked) && isInstructionWithAccounts(ix);
 const isStint = (ix: Instruction, kind: StintInstruction): ix is Full =>
-  is(identifyStintInstruction, ix, STINT_PROGRAM_ADDRESS, kind);
+  is(identifyStintInstruction, ix, STINT_PROGRAM_ADDRESS, kind) && isInstructionWithAccounts(ix);
+
+/** Whether the signature the transaction carries for `signer` is a valid one over its message. */
+async function signedBy(tx: InspectedTransaction, signer: Address): Promise<boolean> {
+  const signature = tx.transaction.signatures[signer];
+  if (!signature) return false;
+  try {
+    return await verifySignature(await getPublicKeyFromAddress(signer), signature, tx.transaction.messageBytes);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Where the facilitator's keys may appear (spec §5.3). The fee payer: only as the first account,
@@ -101,6 +118,21 @@ function layoutBody(tx: InspectedTransaction): Check<readonly Instruction[]> {
   return { ok: true, value: tx.instructions.slice(start) };
 }
 
+/** The vault of the transaction's first parseable `stint.open`: the session's associated token account. */
+async function vaultOf(tx: InspectedTransaction): Promise<Address | undefined> {
+  for (const ix of tx.instructions) {
+    if (!isStint(ix, StintInstruction.Open)) continue;
+    try {
+      const o = parseOpenInstruction(ix);
+      const [session] = await findSessionPda(o.accounts.authority.address, o.data.seed);
+      return await associatedTokenAddress(session, o.accounts.mint.address);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 export interface OpenFacts {
   readonly session: Address;
   readonly authority: Address;
@@ -115,10 +147,14 @@ export async function checkOpenTransaction(
   requirements: ElapsedRequirements,
   keys: FacilitatorKeys,
 ): Promise<Check<OpenFacts>> {
+  // The rent payer may fund only the vault the `stint.open` names, so that vault is derived first.
+  const canonicalVault = await vaultOf(tx);
   const positions = checkPayerPositions(
     tx,
     keys,
-    (ix, index) => (isVaultCreation(ix) && index === 0) || (isStint(ix, StintInstruction.Open) && index === 1),
+    (ix, index) =>
+      (isVaultCreation(ix) && index === 0 && canonicalVault !== undefined && ix.accounts[1]?.address === canonicalVault) ||
+      (isStint(ix, StintInstruction.Open) && index === 1),
   );
   if (!positions.ok) return positions;
 
@@ -176,7 +212,7 @@ export async function checkOpenTransaction(
   if (t.data.amount !== BigInt(requirements.amount)) {
     return refuse("invalid_amount", `the funding moves ${t.data.amount}, not ${requirements.amount}`);
   }
-  if (!tx.signed.has(authority) || !tx.signed.has(t.accounts.authority.address)) {
+  if (!(await signedBy(tx, authority)) || !(await signedBy(tx, t.accounts.authority.address))) {
     return refuse("invalid_payload", "the authority has not signed");
   }
   return { ok: true, value: { session, authority, seed: o.data.seed, vault, refundOwner } };
@@ -187,11 +223,11 @@ export interface CloseFacts {
 }
 
 /** The static checks of spec §5.4 for a `close` sent by a gate through `/settle`. */
-export function checkCloseTransaction(
+export async function checkCloseTransaction(
   tx: InspectedTransaction,
   expected: { readonly session: Address; readonly closer: Address },
   keys: FacilitatorKeys,
-): Check<CloseFacts> {
+): Promise<Check<CloseFacts>> {
   // `rent_payer` is the sixth account of `close`: it receives lamports and does not sign.
   const positions = checkPayerPositions(tx, keys, (ix, index) => isStint(ix, StintInstruction.Close) && index === 5);
   if (!positions.ok) return positions;
@@ -203,7 +239,7 @@ export function checkCloseTransaction(
   }
   const parsed = parseCloseInstruction(close);
   if (parsed.accounts.session.address !== expected.session) return refuse("invalid_terms", "another session");
-  if (parsed.accounts.closer.address !== expected.closer || !tx.signed.has(expected.closer)) {
+  if (parsed.accounts.closer.address !== expected.closer || !(await signedBy(tx, expected.closer))) {
     return refuse("invalid_payload", "the close is not signed by the expected closer");
   }
   return { ok: true, value: { kind: parsed.data.kind } };
