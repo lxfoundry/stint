@@ -248,6 +248,28 @@ importers:
         specifier: 8.18.2
         version: 8.18.2
 
+  packages/client:
+    dependencies:
+      '@lxfoundry/stint-program-client':
+        specifier: workspace:*
+        version: link:../program-client
+      '@lxfoundry/stint-x402':
+        specifier: workspace:*
+        version: link:../x402
+      '@solana/kit':
+        specifier: 8.5.0
+        version: 8.5.0(typescript@7.0.2)
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
+    devDependencies:
+      '@lxfoundry/stint-gate':
+        specifier: workspace:*
+        version: link:../gate
+      '@types/ws':
+        specifier: 8.18.2
+        version: 8.18.2
+
   packages/gate:
     dependencies:
       '@lxfoundry/stint-program-client':
