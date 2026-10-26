@@ -136,7 +136,7 @@ export function createStintClient(options: ClientOptions): StintClient {
         .map(readElapsedRequirements)
         .find((entry) => entry?.extra.action === "open" && (seconds === undefined || entry.extra.seconds === seconds));
       if (!offer) throw new StintError(`No elapsed offer${seconds === undefined ? "" : ` for ${seconds} s`}`);
-      const check = checkOffer(options.policy, offer, seconds ?? offer.extra.seconds, locked());
+      const check = checkOffer(options.policy, offer, seconds ?? offer.extra.seconds, locked(), options.signer.address);
       if (!check.ok) throw new StintError(`Policy refuses the offer: ${check.reason}`);
 
       // Reserved in the same synchronous step as the check, so that concurrent opens cannot

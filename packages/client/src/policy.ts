@@ -29,10 +29,16 @@ export type PolicyCheck =
 
 const no = (reason: string): PolicyCheck => ({ ok: false, reason });
 
-/** The checks before signing any payment (spec §9.3). `locked` is what this period already locked. */
-export function checkOffer(policy: Policy, offer: ElapsedRequirements, requested: number, locked: bigint): PolicyCheck {
+/**
+ * The checks before signing any payment (spec §9.3). `locked` is what this period already locked;
+ * `signer` is the buyer's key, which must not be the facilitator's fee payer or rent payer: its
+ * signature would then authorize what the facilitator's keys are confined from (spec §5.3).
+ */
+export function checkOffer(policy: Policy, offer: ElapsedRequirements, requested: number, locked: bigint, signer: Address): PolicyCheck {
   const extra = offer.extra;
   if (extra.action !== "open") return no("not an open offer");
+  if (extra.feePayer === signer) return no("the offer names this client's own signer as the fee payer");
+  if (extra.rentPayer === signer) return no("the offer names this client's own signer as the rent payer");
   if (!(policy.networks ?? [SOLANA_DEVNET]).includes(offer.network)) return no(`network ${offer.network} is not allowed`);
   if (!(policy.programs ?? [STINT_PROGRAM_ADDRESS]).includes(extra.programId as Address)) {
     return no(`program ${extra.programId} is not allowed`);
