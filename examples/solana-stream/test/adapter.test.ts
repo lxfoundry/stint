@@ -33,6 +33,29 @@ function fakeSubscriptions(notifications: unknown[]) {
 const info = { session: "11111111111111111111111111111111", authority: "11111111111111111111111111111111", paidUntil: 0n } as never;
 const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
 
+type Script = "reject" | "end" | "hold";
+
+/**
+ * Each `accountNotifications` subscribe consumes the next script: `reject` fails, `end` yields
+ * nothing and returns, `hold` waits until aborted. Once the scripts run out, subscribes hold.
+ */
+function scriptedSubscriptions(scripts: Script[] = []) {
+  const signals: AbortSignal[] = [];
+  const subscriptions = {
+    accountNotifications: () => ({
+      subscribe: async ({ abortSignal }: { abortSignal: AbortSignal }) => {
+        signals.push(abortSignal);
+        const script = scripts.shift() ?? "hold";
+        if (script === "reject") throw new Error("boom");
+        return (async function* () {
+          if (script === "hold") await new Promise((resolve) => abortSignal.addEventListener("abort", resolve));
+        })();
+      },
+    }),
+  };
+  return { subscriptions: subscriptions as unknown as RpcSubscriptions<SolanaRpcSubscriptionsApi>, signals };
+}
+
 describe("stream messages (spec §8)", () => {
   it("parses subscribe and unsubscribe, and refuses anything else", () => {
     const account = "So11111111111111111111111111111111111111112";
@@ -90,5 +113,56 @@ describe("stream adapter", () => {
     await tick();
     socket.emit("close");
     expect(signals.every((signal) => signal.aborted)).toBe(true);
+  });
+
+  it("a rejected subscription frees its slot, so a re-subscribe of the same account succeeds", async () => {
+    const account = (await generateKeyPairSigner()).address;
+    const { subscriptions, signals } = scriptedSubscriptions(["reject", "hold"]);
+    const socket = new FakeSocket();
+    createStreamAdapter(subscriptions).attach(info, socket as unknown as WebSocket, null);
+    socket.emit("message", JSON.stringify({ op: "subscribe", accounts: [account] }));
+    await tick();
+    expect(socket.sent).toEqual([{ type: "error", code: "subscription_failed", message: `${account}: boom` }]);
+    socket.emit("message", JSON.stringify({ op: "subscribe", accounts: [account] }));
+    await tick();
+    expect(socket.sent).toHaveLength(1);
+    expect(signals).toHaveLength(2);
+  });
+
+  it("an iterator that ends without an abort sends subscription_failed and frees the slot", async () => {
+    const account = (await generateKeyPairSigner()).address;
+    const { subscriptions, signals } = scriptedSubscriptions(["end", "hold"]);
+    const socket = new FakeSocket();
+    createStreamAdapter(subscriptions).attach(info, socket as unknown as WebSocket, null);
+    socket.emit("message", JSON.stringify({ op: "subscribe", accounts: [account] }));
+    await tick();
+    expect(socket.sent).toEqual([{ type: "error", code: "subscription_failed", message: `${account}: notifications ended` }]);
+    socket.emit("message", JSON.stringify({ op: "subscribe", accounts: [account] }));
+    await tick();
+    expect(socket.sent).toHaveLength(1);
+    expect(signals).toHaveLength(2);
+  });
+
+  it("allows exactly MAX_ACCOUNTS accounts on a connection", async () => {
+    const { subscriptions } = scriptedSubscriptions();
+    const socket = new FakeSocket();
+    createStreamAdapter(subscriptions).attach(info, socket as unknown as WebSocket, null);
+    const accounts = await Promise.all(Array.from({ length: MAX_ACCOUNTS }, async () => (await generateKeyPairSigner()).address));
+    socket.emit("message", JSON.stringify({ op: "subscribe", accounts }));
+    await tick();
+    expect(socket.sent).toEqual([]);
+  });
+
+  it("unsubscribe frees a slot", async () => {
+    const { subscriptions } = scriptedSubscriptions();
+    const socket = new FakeSocket();
+    createStreamAdapter(subscriptions).attach(info, socket as unknown as WebSocket, null);
+    const accounts = await Promise.all(Array.from({ length: MAX_ACCOUNTS }, async () => (await generateKeyPairSigner()).address));
+    socket.emit("message", JSON.stringify({ op: "subscribe", accounts }));
+    socket.emit("message", JSON.stringify({ op: "unsubscribe", accounts: [accounts[0]] }));
+    const extra = (await generateKeyPairSigner()).address;
+    socket.emit("message", JSON.stringify({ op: "subscribe", accounts: [extra] }));
+    await tick();
+    expect(socket.sent).toEqual([]);
   });
 });

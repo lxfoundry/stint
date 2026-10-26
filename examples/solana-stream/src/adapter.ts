@@ -63,10 +63,17 @@ export function createStreamAdapter(subscriptions: RpcSubscriptions<SolanaRpcSub
               data: Array.isArray(value.data) ? value.data[0] : value.data,
             });
           }
+          if (!controller.signal.aborted) {
+            send({ type: "error", code: "subscription_failed", message: `${account}: notifications ended` });
+          }
         } catch (error) {
           if (!controller.signal.aborted) {
             send({ type: "error", code: "subscription_failed", message: `${account}: ${error instanceof Error ? error.message : String(error)}` });
           }
+        } finally {
+          // A failed or ended subscription frees its slot. The identity check keeps a stale
+          // controller from removing a newer subscription to the same account.
+          if (watching.get(account) === controller) watching.delete(account);
         }
       }
 
