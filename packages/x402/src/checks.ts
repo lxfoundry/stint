@@ -81,6 +81,22 @@ async function signedBy(tx: InspectedTransaction, signer: Address): Promise<bool
 }
 
 /**
+ * The transaction requires signatures from exactly `required` (spec §5.3): an extra signer could
+ * authorize something no check looked at. Every signature but the facilitator's, which it adds
+ * itself, must be present and valid over the message.
+ */
+async function checkSigners(tx: InspectedTransaction, required: ReadonlySet<Address>, keys: FacilitatorKeys): Promise<Check<null>> {
+  if (tx.signers.length !== required.size || tx.signers.some((signer) => !required.has(signer))) {
+    return refuse("invalid_payload", "the transaction requires a signature from an account outside the expected signers");
+  }
+  for (const signer of tx.signers) {
+    if (signer === keys.feePayer || signer === keys.rentPayer) continue;
+    if (!(await signedBy(tx, signer))) return refuse("invalid_payload", `${signer} has not signed`);
+  }
+  return { ok: true, value: null };
+}
+
+/**
  * Where the facilitator's keys may appear (spec §5.3). The fee payer: only as the first account,
  * unsigned. The rent payer: only where `rentPayerAllowed` says.
  */
@@ -212,9 +228,9 @@ export async function checkOpenTransaction(
   if (t.data.amount !== BigInt(requirements.amount)) {
     return refuse("invalid_amount", `the funding moves ${t.data.amount}, not ${requirements.amount}`);
   }
-  if (!(await signedBy(tx, authority)) || !(await signedBy(tx, t.accounts.authority.address))) {
-    return refuse("invalid_payload", "the authority has not signed");
-  }
+  // The authority and the transfer authority may be the same key.
+  const signers = await checkSigners(tx, new Set([keys.feePayer, keys.rentPayer, authority, t.accounts.authority.address]), keys);
+  if (!signers.ok) return signers;
   return { ok: true, value: { session, authority, seed: o.data.seed, vault, refundOwner } };
 }
 
@@ -239,9 +255,9 @@ export async function checkCloseTransaction(
   }
   const parsed = parseCloseInstruction(close);
   if (parsed.accounts.session.address !== expected.session) return refuse("invalid_terms", "another session");
-  if (parsed.accounts.closer.address !== expected.closer || !(await signedBy(tx, expected.closer))) {
-    return refuse("invalid_payload", "the close is not signed by the expected closer");
-  }
+  if (parsed.accounts.closer.address !== expected.closer) return refuse("invalid_payload", "the closer is not the expected one");
+  const signers = await checkSigners(tx, new Set([keys.feePayer, expected.closer]), keys);
+  if (!signers.ok) return signers;
   return { ok: true, value: { kind: parsed.data.kind } };
 }
 

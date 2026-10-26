@@ -1,9 +1,11 @@
 import {
+  AccountRole,
   createNoopSigner,
   generateKeyPairSigner,
   getBase64EncodedWireTransaction,
   partiallySignTransaction,
   type Address,
+  type Instruction,
   type KeyPairSigner,
   type SignatureBytes,
 } from "@solana/kit";
@@ -32,6 +34,12 @@ function forged(wire: string, signer: Address): string {
   const signatures = { ...transaction.signatures, [signer]: new Uint8Array(64).fill(7) as SignatureBytes };
   return getBase64EncodedWireTransaction({ ...transaction, signatures });
 }
+
+/** The instruction with `extra` appended to its accounts as a signer, which its parser ignores. */
+const withExtraSigner = (ix: Instruction, extra: KeyPairSigner): Instruction => ({
+  ...ix,
+  accounts: [...(ix.accounts ?? []), { address: extra.address, role: AccountRole.READONLY_SIGNER, signer: extra } as never],
+});
 
 describe("open transactions (spec §5.3, §5.4)", () => {
   let buyer: KeyPairSigner;
@@ -132,6 +140,15 @@ describe("open transactions (spec §5.3, §5.4)", () => {
     expect(check).toMatchObject({ ok: false, reason: "payer_misuse" });
   });
 
+  it("refuses an extra signer, even one whose signature is valid", async () => {
+    const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
+    const extra = await generateKeyPairSigner();
+    const wire = await rebuild(built.transaction, buyer, (ixs) => [...ixs.slice(0, -1), withExtraSigner(ixs.at(-1)!, extra)]);
+    const tx = inspectTransaction(wire)!;
+    expect(tx.signed).toEqual(new Set([buyer.address, extra.address]));
+    expect(await checkOpenTransaction(tx, offer, keys())).toMatchObject({ ok: false, reason: "invalid_payload" });
+  });
+
   it("returns undefined for bytes that are not a version 0 transaction", () => {
     expect(inspectTransaction("AQ==")).toBeUndefined();
   });
@@ -174,6 +191,13 @@ describe("close transactions (spec §5.3, §5.4)", () => {
     const withLimit = await rebuild(wire, closer, (ixs) => [getSetComputeUnitLimitInstruction({ units: 100_000 }), ...ixs]);
     expect(await checkCloseTransaction(inspectTransaction(withLimit)!, { session, closer: closer.address }, { feePayer, rentPayer })).toMatchObject({
       ok: true,
+    });
+    const extra = await generateKeyPairSigner();
+    const withExtra = await rebuild(wire, closer, (ixs) => [withExtraSigner(ixs[0]!, extra)]);
+    expect(inspectTransaction(withExtra)!.signed).toEqual(new Set([closer.address, extra.address]));
+    expect(await checkCloseTransaction(inspectTransaction(withExtra)!, { session, closer: closer.address }, { feePayer, rentPayer })).toMatchObject({
+      ok: false,
+      reason: "invalid_payload",
     });
     const forgedWire = forged(wire, closer.address);
     expect(
