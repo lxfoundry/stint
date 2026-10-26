@@ -149,6 +149,16 @@ describe("open transactions (spec §5.3, §5.4)", () => {
     expect(await checkOpenTransaction(tx, offer, keys())).toMatchObject({ ok: false, reason: "invalid_payload" });
   });
 
+  it("refuses a TransferChecked with too few accounts instead of throwing", async () => {
+    const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
+    const wire = await rebuild(built.transaction, buyer, ([create, transfer, open]) => [
+      create!,
+      { ...transfer!, accounts: transfer!.accounts!.slice(0, 2) },
+      open!,
+    ]);
+    expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason: "unexpected_instruction" });
+  });
+
   it("returns undefined for bytes that are not a version 0 transaction", () => {
     expect(inspectTransaction("AQ==")).toBeUndefined();
   });

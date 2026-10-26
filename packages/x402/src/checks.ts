@@ -96,6 +96,15 @@ async function checkSigners(tx: InspectedTransaction, required: ReadonlySet<Addr
   return { ok: true, value: null };
 }
 
+/** `parse`'s result, or undefined when an identified instruction is malformed (too few accounts, short data). */
+function tryParse<T>(parse: () => T): T | undefined {
+  try {
+    return parse();
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Where the facilitator's keys may appear (spec §5.3). The fee payer: only as the first account,
  * unsigned. The rent payer: only where `rentPayerAllowed` says.
@@ -184,9 +193,10 @@ export async function checkOpenTransaction(
     return refuse("unexpected_instruction", "an open is: create the vault, one funding transfer, stint.open");
   }
 
-  const c = parseCreateAssociatedTokenIdempotentInstruction(create);
-  const t = parseTransferCheckedInstruction(transfer);
-  const o = parseOpenInstruction(open);
+  const c = tryParse(() => parseCreateAssociatedTokenIdempotentInstruction(create));
+  const t = tryParse(() => parseTransferCheckedInstruction(transfer));
+  const o = tryParse(() => parseOpenInstruction(open));
+  if (!c || !t || !o) return refuse("unexpected_instruction", "an instruction of the open is malformed");
   const extra = requirements.extra;
   const asset = address(requirements.asset);
 
@@ -253,7 +263,8 @@ export async function checkCloseTransaction(
   if (!close || rest.length > 0 || !isStint(close, StintInstruction.Close)) {
     return refuse("unexpected_instruction", "a close is stint.close alone");
   }
-  const parsed = parseCloseInstruction(close);
+  const parsed = tryParse(() => parseCloseInstruction(close));
+  if (!parsed) return refuse("unexpected_instruction", "the stint.close is malformed");
   if (parsed.accounts.session.address !== expected.session) return refuse("invalid_terms", "another session");
   if (parsed.accounts.closer.address !== expected.closer) return refuse("invalid_payload", "the closer is not the expected one");
   const signers = await checkSigners(tx, new Set([keys.feePayer, expected.closer]), keys);
