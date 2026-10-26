@@ -7,3 +7,4 @@ export * from "./transactions.js";
 export * from "./inspect.js";
 export * from "./checks.js";
 export * from "./chain.js";
+export * from "./http.js";

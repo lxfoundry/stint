@@ -1,95 +1,81 @@
 import { randomUUID } from "node:crypto";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import type { Target } from "@lxfoundry/stint-conformance";
-import type { Address } from "@solana/kit";
-import { fundSol, newHarnessKey, type HarnessKey } from "../fixtures/keys.js";
-import { SUBSCRIPTIONS_PROGRAM_ADDRESS, deployStintProgram, deploySubscriptionsProgram } from "../fixtures/programs.js";
-import { USDC_DEVNET_MINT, createUsdcAccount, writeUsdcMint } from "../fixtures/usdc.js";
+import { startFacilitator, type RunningFacilitator } from "@lxfoundry/stint-facilitator";
+import { SOLANA_DEVNET } from "@lxfoundry/stint-x402";
+import { SUBSCRIPTIONS_PROGRAM_ADDRESS } from "../fixtures/programs.js";
+import { USDC_DEVNET_MINT } from "../fixtures/usdc.js";
 import { KORA_ALLOWED_PROGRAMS } from "../kora/config.js";
 import { startKora, type KoraProcess } from "../kora/process.js";
-import { startLocalNetwork, waitForNewSlot, type LocalNetwork } from "../network/surfnet.js";
+import type { LocalNetwork } from "../network/surfnet.js";
+import { startLocalChain, type CommonKeys } from "./chain.js";
 
-/** The common stack's keys (spec section 12.3). */
-export interface CommonKeys {
-  readonly mintAuthority: HarnessKey;
-  readonly freezeAuthority: HarnessKey;
-  readonly koraFeePayer: HarnessKey;
-  readonly rentPayer: HarnessKey;
-  readonly receiverAuthorizer: HarnessKey;
-  readonly seller: HarnessKey;
-  readonly sellerUsdcAccount: Address;
-}
+export type { CommonKeys } from "./chain.js";
 
 export interface LocalStack {
   readonly target: Target;
   readonly network: LocalNetwork;
   readonly keys: CommonKeys;
   readonly kora: KoraProcess;
+  readonly facilitator: RunningFacilitator;
+  readonly facilitatorApiKey: string;
   stop(): Promise<void>;
 }
 
+/** Stops each service in turn, and the network last, even when one of them fails to stop. */
+async function stopAll(stops: readonly (() => Promise<void> | void)[]): Promise<void> {
+  let failure: unknown;
+  for (const stop of stops) {
+    try {
+      await stop();
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (failure !== undefined) throw failure;
+}
+
 /**
- * The `local` target (spec section 12.2): Surfpool, offline and embedded, with the fixtures of
- * spec section 12.3, and Kora. Allowance funding joins its capabilities once the facilitator
- * supports it.
+ * The `local` target (spec §12.2): the local chain, Kora and the facilitator. Allowance funding
+ * joins its capabilities once the facilitator supports it.
  */
 export async function startLocalStack(): Promise<LocalStack> {
-  const network = startLocalNetwork();
+  const chain = await startLocalChain();
+  const stops: (() => Promise<void> | void)[] = [() => chain.stop()];
   try {
-    const mintAuthority = await newHarnessKey();
-    const freezeAuthority = await newHarnessKey();
-    const koraFeePayer = await newHarnessKey();
-    const rentPayer = await newHarnessKey();
-    const receiverAuthorizer = await newHarnessKey();
-    const seller = await newHarnessKey();
-    for (const key of [mintAuthority, koraFeePayer, rentPayer, receiverAuthorizer, seller]) {
-      fundSol(network, key.signer.address, 10);
-    }
-    await writeUsdcMint(network, {
-      mintAuthority: mintAuthority.signer.address,
-      freezeAuthority: freezeAuthority.signer.address,
-    });
-    deployStintProgram(network);
-    deploySubscriptionsProgram(network);
-    await waitForNewSlot(network.rpc);
-
-    const sellerUsdcAccount = await createUsdcAccount(network.rpc, mintAuthority.signer, seller.signer.address);
     const kora = await startKora({
-      rpcUrl: network.rpcUrl,
+      rpcUrl: chain.network.rpcUrl,
       config: {
         allowedPrograms: [...KORA_ALLOWED_PROGRAMS, STINT_PROGRAM_ADDRESS, SUBSCRIPTIONS_PROGRAM_ADDRESS],
         allowedTokens: [USDC_DEVNET_MINT],
         maxAllowedLamports: 1_000_000,
       },
-      feePayerSecretKey: koraFeePayer.secretKey,
+      feePayerSecretKey: chain.keys.koraFeePayer.secretKey,
       apiKey: randomUUID(),
     });
+    stops.unshift(() => kora.stop());
+    const facilitatorApiKey = randomUUID();
+    const facilitator = await startFacilitator({
+      rpcUrl: chain.network.rpcUrl,
+      network: SOLANA_DEVNET,
+      kora: { url: kora.url, apiKey: kora.apiKey },
+      rentPayerSecretKey: chain.keys.rentPayer.secretKey,
+      apiKeys: [facilitatorApiKey],
+    });
+    stops.unshift(() => facilitator.stop());
 
-    const keys: CommonKeys = {
-      mintAuthority,
-      freezeAuthority,
-      koraFeePayer,
-      rentPayer,
-      receiverAuthorizer,
-      seller,
-      sellerUsdcAccount,
-    };
     const target: Target = { name: "local", capabilities: new Set(["chain", "stack", "facilitatorApi"]) };
     return {
       target,
-      network,
-      keys,
+      network: chain.network,
+      keys: chain.keys,
       kora,
-      stop: async () => {
-        try {
-          await kora.stop();
-        } finally {
-          network.stop();
-        }
-      },
+      facilitator,
+      facilitatorApiKey,
+      stop: () => stopAll(stops),
     };
   } catch (error) {
-    network.stop();
+    await stopAll(stops);
     throw error;
   }
 }

@@ -179,6 +179,24 @@ importers:
         specifier: 5.0.5
         version: 5.0.5(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15))
 
+  apps/facilitator:
+    dependencies:
+      '@lxfoundry/stint-program-client':
+        specifier: workspace:*
+        version: link:../../packages/program-client
+      '@lxfoundry/stint-x402':
+        specifier: workspace:*
+        version: link:../../packages/x402
+      '@solana-program/system':
+        specifier: 0.16.0
+        version: 0.16.0(@solana/kit@8.5.0(typescript@7.0.2))
+      '@solana-program/token':
+        specifier: 0.18.0
+        version: 0.18.0(@solana/kit@8.5.0(typescript@7.0.2))
+      '@solana/kit':
+        specifier: 8.5.0
+        version: 8.5.0(typescript@7.0.2)
+
   conformance: {}
 
   e2e:
@@ -186,9 +204,15 @@ importers:
       '@lxfoundry/stint-conformance':
         specifier: workspace:*
         version: link:../conformance
+      '@lxfoundry/stint-facilitator':
+        specifier: workspace:*
+        version: link:../apps/facilitator
       '@lxfoundry/stint-program-client':
         specifier: workspace:*
         version: link:../packages/program-client
+      '@lxfoundry/stint-x402':
+        specifier: workspace:*
+        version: link:../packages/x402
       '@solana-program/system':
         specifier: 0.16.0
         version: 0.16.0(@solana/kit@8.5.0(typescript@7.0.2))
