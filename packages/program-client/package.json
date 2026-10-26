@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@solana/kit": "8.5.0",
-    "@solana/program-client-core": "^8.5.0"
+    "@solana/program-client-core": "8.5.0"
   },
   "devDependencies": {
     "@codama/nodes-from-anchor": "1.5.6",
