@@ -1,5 +1,5 @@
 import type { Address, KeyPairSigner } from "@solana/kit";
-import type { Terms } from "@lxfoundry/stint-x402";
+import type { RetryOptions, Terms } from "@lxfoundry/stint-x402";
 import type { WebSocket } from "ws";
 import type { GateChain } from "./chain.js";
 import type { FacilitatorClient } from "./facilitator.js";
@@ -48,5 +48,10 @@ export interface GateConfig<U = unknown> {
   readonly tokenClock?: () => number;
   /** Milliseconds. Runs the margin (spec §7.3). Default `Date.now`. */
   readonly sessionClock?: () => number;
+  /**
+   * How the session after a settled open, and the `Closed` event after a confirmed close, are
+   * re-read while the node returns nothing yet. Default 5 reads, 200 ms apart.
+   */
+  readonly readRetry?: RetryOptions;
   readonly log?: (entry: Record<string, unknown>) => void;
 }

@@ -24,6 +24,7 @@ import {
   inspectTransaction,
   readElapsedPayload,
   readElapsedRequirements,
+  readUntilFound,
   sendJson,
   sessionMatches,
   verifySessionToken,
@@ -97,6 +98,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   const log = config.log ?? (() => {});
   const menu = config.durations ?? [config.terms.minSeconds];
   const marginMs = (config.marginSeconds ?? 2) * 1000;
+  const readRetry = config.readRetry ?? { attempts: 5, delayMs: 200 };
   const wss = new WebSocketServer({ noServer: true });
   const sessions = new Map<Address, Tracked<U>>();
   /** Sessions being provisioned, so a retried open waits for the first instead of provisioning again. */
@@ -228,7 +230,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       return paymentRequired(response, durations, settled.errorReason ?? "simulation_failed");
     }
 
-    const stored = await upstream(() => config.chain.readSession(session));
+    // The node may not return the account yet right after the open confirmed.
+    const stored = await readUntilFound(() => upstream(() => config.chain.readSession(session)), readRetry);
     if (!stored) return sendJson(response, 404, { error: "unknown_session" });
     let tracked = sessions.get(session);
     if (!tracked) {
@@ -322,7 +325,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     // the Closed event can be read, because the session is over on chain.
     let event: ClosedEvent | undefined;
     try {
-      event = await upstream(() => config.chain.closedEvent(settled.transaction));
+      event = await readUntilFound(() => upstream(() => config.chain.closedEvent(settled.transaction)), readRetry);
     } catch (error) {
       log({ event: "error", error: error instanceof Error ? error.message : String(error) });
     } finally {

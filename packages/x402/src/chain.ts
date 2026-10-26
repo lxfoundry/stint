@@ -132,9 +132,42 @@ export async function tokenBalanceChanges(rpc: Rpc<SolanaRpcApi>, signature: str
 
 export type Confirmation = "confirmed" | "expired" | "pending";
 
+/** The transaction landed with an error: its signature status carries `err`. */
+export class TransactionFailedError extends Error {
+  constructor(
+    readonly signature: string,
+    readonly err: unknown,
+  ) {
+    super(`Transaction ${signature} failed: ${json(err)}`);
+    this.name = "TransactionFailedError";
+  }
+}
+
+export interface RetryOptions {
+  /** Reads in all, the first included. */
+  readonly attempts: number;
+  /** Milliseconds between reads. */
+  readonly delayMs: number;
+}
+
 /**
- * Waits for `confirmed`. Throws if the transaction failed. Returns `expired` once its blockhash is
- * no longer valid and one last status read finds nothing (spec §7.1), and `pending` at the timeout.
+ * Reads until the result is defined, at most `attempts` times: a node can answer `null` for a
+ * transaction or an account just after reporting it `confirmed`. Undefined if every read found
+ * nothing. A read that throws ends the retries with its error.
+ */
+export async function readUntilFound<T>(read: () => Promise<T | null | undefined>, options: RetryOptions): Promise<T | undefined> {
+  for (let attempt = 1; ; attempt++) {
+    const value = await read();
+    if (value != null) return value;
+    if (attempt >= options.attempts) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+  }
+}
+
+/**
+ * Waits for `confirmed`. Throws `TransactionFailedError` if the transaction failed, and the RPC's
+ * error if a read fails. Returns `expired` once its blockhash is no longer valid and one last
+ * status read finds nothing (spec §7.1), and `pending` at the timeout.
  */
 export async function waitForConfirmation(
   rpc: Rpc<SolanaRpcApi>,
@@ -145,7 +178,7 @@ export async function waitForConfirmation(
   const read = async () => {
     const { value } = await rpc.getSignatureStatuses([toSignature(signature)]).send();
     const status = value[0];
-    if (status?.err) throw new Error(`Transaction ${signature} failed: ${json(status.err)}`);
+    if (status?.err) throw new TransactionFailedError(signature, status.err);
     return status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized";
   };
   const deadline = Date.now() + timeoutMs;

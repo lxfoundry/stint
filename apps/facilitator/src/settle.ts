@@ -4,11 +4,24 @@ import {
   getSignatureFromTransaction,
   getTransactionDecoder,
   partiallySignTransaction,
+  type Address,
+  type Base64EncodedWireTransaction,
 } from "@solana/kit";
-import { fetchClosedEvent, waitForConfirmation, type Network, type SettleResponse } from "@lxfoundry/stint-x402";
+import {
+  TransactionFailedError,
+  fetchClosedEvent,
+  readUntilFound,
+  waitForConfirmation,
+  type Network,
+  type RetryOptions,
+  type SettleResponse,
+} from "@lxfoundry/stint-x402";
 import { verifyPayment, type FacilitatorContext } from "./verify.js";
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/** How `/settle` re-reads a confirmed close whose transaction the node does not return yet. */
+export const DEFAULT_READ_RETRY: RetryOptions = { attempts: 5, delayMs: 400 };
 
 /**
  * Spec §5.5, without settlement records (a later stage adds them): re-verify, the rent payer signs
@@ -36,24 +49,66 @@ export async function settlePayment(
     return { success: false, errorReason: "simulation_failed", errorMessage: `Kora: ${message(error)}`, transaction: "", network, payer };
   }
   const signature = getSignatureFromTransaction(getTransactionDecoder().decode(getBase64Encoder().encode(wire)));
+  return submitSettlement(ctx, {
+    type: verified.type,
+    wire,
+    signature,
+    blockhash: verified.tx.blockhash,
+    payer,
+    amount: String(requirements.amount),
+  });
+}
+
+/** A verified transaction, signed by every party, ready to submit. */
+export interface SignedSettlement {
+  readonly type: "open" | "close";
+  /** The fully signed transaction, base64. */
+  readonly wire: string;
+  /** Its ID: the fee payer's signature. */
+  readonly signature: string;
+  readonly blockhash: string;
+  /** The session authority. */
+  readonly payer: Address;
+  /** The amount an open deposits; a close reports what its `Closed` event says it paid. */
+  readonly amount: string;
+}
+
+/**
+ * Submits and waits for `confirmed`. A refusal at submission (the node's preflight) is final. Once
+ * the node has accepted the transaction, only a status carrying an error is a final failure: any
+ * other error leaves the outcome unknown, so it is `settlement_pending` with the signature. A
+ * confirmed transaction is always a success, even when its `Closed` event cannot be read yet: the
+ * amount is then left out.
+ */
+export async function submitSettlement(
+  ctx: Pick<FacilitatorContext, "rpc" | "network" | "confirmTimeoutMs" | "readRetry">,
+  signed: SignedSettlement,
+): Promise<SettleResponse> {
+  const network = ctx.network as Network;
+  const { signature, payer } = signed;
+  try {
+    await ctx.rpc.sendTransaction(signed.wire as Base64EncodedWireTransaction, { encoding: "base64", preflightCommitment: "confirmed" }).send();
+  } catch (error) {
+    return { success: false, errorReason: "simulation_failed", errorMessage: message(error), transaction: signature, network, payer };
+  }
 
   try {
-    await ctx.rpc.sendTransaction(wire, { encoding: "base64", preflightCommitment: "confirmed" }).send();
-    const outcome = await waitForConfirmation(ctx.rpc, signature, verified.tx.blockhash, ctx.confirmTimeoutMs);
+    const outcome = await waitForConfirmation(ctx.rpc, signature, signed.blockhash, ctx.confirmTimeoutMs);
     if (outcome !== "confirmed") {
       const errorReason = outcome === "pending" ? "settlement_pending" : "blockhash_expired";
       return { success: false, errorReason, transaction: signature, network, payer };
     }
   } catch (error) {
-    return { success: false, errorReason: "simulation_failed", errorMessage: message(error), transaction: signature, network, payer };
+    const errorReason = error instanceof TransactionFailedError ? "simulation_failed" : "settlement_pending";
+    return { success: false, errorReason, errorMessage: message(error), transaction: signature, network, payer };
   }
 
-  let amount = String(requirements.amount);
-  if (verified.type === "close") {
-    // What this transaction paid the receiver; earlier claims are the gate's to add (spec §5.5).
-    const event = await fetchClosedEvent(ctx.rpc, signature);
-    if (!event) throw new Error(`Close ${signature} confirmed without a Closed event`);
-    amount = (event.owed + event.redirected).toString();
-  }
-  return { success: true, transaction: signature, network, payer, amount };
+  if (signed.type === "open") return { success: true, transaction: signature, network, payer, amount: signed.amount };
+  // What this transaction paid the receiver; earlier claims are the gate's to add (spec §5.5).
+  const event = await readUntilFound(
+    () => fetchClosedEvent(ctx.rpc, signature).catch(() => undefined),
+    ctx.readRetry ?? DEFAULT_READ_RETRY,
+  );
+  if (!event) return { success: true, transaction: signature, network, payer };
+  return { success: true, transaction: signature, network, payer, amount: (event.owed + event.redirected).toString() };
 }

@@ -34,6 +34,9 @@ interface Harness {
   /** Faults and pauses a test switches on. */
   fail: { supported: boolean; settleClose: boolean; closedEvent: boolean; provision: boolean };
   hold: { provision?: Promise<void>; settleClose?: Promise<void> };
+  /** How many reads the fake chain answers with nothing before the real answer, and the reads made. */
+  missing: { session: number; closedEvent: number };
+  reads: { session: number; closedEvent: number };
   /** Rejections that escaped `handleRequest`: the gate must contain its own errors. */
   escaped: unknown[];
 }
@@ -59,14 +62,17 @@ async function startHarness(): Promise<Harness> {
     sessions: new Map<Address, Session>(),
     fail: { supported: false, settleClose: false, closedEvent: false, provision: false },
     hold: {},
+    missing: { session: 0, closedEvent: 0 },
+    reads: { session: 0, closedEvent: 0 },
     escaped: [],
   } as unknown as Harness;
 
   const chain: GateChain = {
     latestBlockhash: async () => ({ blockhash: "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N", lastValidBlockHeight: 100n }),
-    readSession: async (session) => harness.sessions.get(session),
+    readSession: async (session) => (harness.reads.session++ < harness.missing.session ? undefined : harness.sessions.get(session)),
     closedEvent: async () => {
       if (harness.fail.closedEvent) throw new Error("rpc down");
+      if (harness.reads.closedEvent++ < harness.missing.closedEvent) return undefined;
       return { claimed: 0n, owed: 8_000n, refunded: 22_000n, redirected: 0n, kind: CloseKind.Standard } as ClosedEvent;
     },
   };
@@ -120,6 +126,7 @@ async function startHarness(): Promise<Harness> {
     },
     tokenClock: () => NOW_MS,
     sessionClock: () => NOW_MS,
+    readRetry: { attempts: 3, delayMs: 5 },
   });
   server.on("request", (req, res) => {
     gate.handleRequest(req, res).then(
@@ -360,6 +367,49 @@ describe("gate", () => {
       expect(await closed).toBe(4410);
       expect(h.calls.teardown).toEqual(["closed"]);
       expect((await connect(session, await token(session, "connect"))).status).toBe(404);
+    });
+
+    it("re-reads the session after a settled open while the node does not return it yet", async () => {
+      h.missing.session = 2;
+      const { status } = await open();
+      expect(status).toBe(201);
+      expect(h.reads.session).toBe(3);
+      expect(h.calls.provision).toHaveLength(1);
+    });
+
+    it("answers 404 when the session is still not there after the re-reads, and provisions nothing", async () => {
+      h.missing.session = Number.POSITIVE_INFINITY;
+      const { status, body } = await open();
+      expect(status).toBe(404);
+      expect(body).toEqual({ error: "unknown_session" });
+      expect(h.reads.session).toBe(3);
+      expect(h.calls.provision).toHaveLength(0);
+    });
+
+    it("answers 202 with the session and the transaction when the open's settlement is pending", async () => {
+      h.settleAnswer = () => ({ success: false, errorReason: "settlement_pending", transaction: "sig", network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" });
+      const { session, status, body } = await open();
+      expect(status).toBe(202);
+      expect(body).toEqual({ session, transaction: "sig" });
+      expect(h.calls.provision).toHaveLength(0);
+    });
+
+    it("re-reads the Closed event after a confirmed close while the node does not return it yet", async () => {
+      const { session } = await open();
+      h.missing.closedEvent = 2;
+      const response = await closeWith(session);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ paid: "8000", refunded: "22000", transaction: "sig" });
+      expect(h.reads.closedEvent).toBe(3);
+    });
+
+    it("ends the session when the Closed event is still missing after the re-reads", async () => {
+      const { session } = await open();
+      h.missing.closedEvent = Number.POSITIVE_INFINITY;
+      const response = await closeWith(session);
+      expect(response.status).toBe(502);
+      expect(await response.json()).toEqual({ error: "no_closed_event", transaction: "sig" });
+      expect(h.calls.teardown).toEqual(["closed"]);
     });
 
     it("provisions once when an open is retried while provisioning", async () => {

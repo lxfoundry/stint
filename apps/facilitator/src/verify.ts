@@ -25,6 +25,7 @@ import {
   type FacilitatorKeys,
   type InspectedTransaction,
   type InvalidReason,
+  type RetryOptions,
 } from "@lxfoundry/stint-x402";
 import type { KoraClient } from "./kora.js";
 import { checkPayerFunding, executedInstructions, type Funding } from "./payers.js";
@@ -37,6 +38,8 @@ export interface FacilitatorContext {
   readonly kora: KoraClient;
   /** How long `/settle` waits for `confirmed` before answering `settlement_pending`. */
   readonly confirmTimeoutMs: number;
+  /** How a confirmed close's transaction is re-read while the node returns nothing. Default 5 reads, 400 ms apart. */
+  readonly readRetry?: RetryOptions;
 }
 
 export type Verified =
