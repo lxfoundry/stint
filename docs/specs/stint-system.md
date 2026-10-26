@@ -184,9 +184,9 @@ For readers who know EVM chains, the main differences:
 ### 2.3 Tooling facts the design relies on
 
 The facilitator (section 6) and the end-to-end harness (section 12) depend on how their tools
-behave. These facts were read in each tool's source or documentation, at the version named. They
-are re-checked whenever the implementation plan pins another version, and the sections that depend
-on them cite them as (T1) to (T9).
+behave. These facts were read in each tool's source or documentation, or observed at run time, at
+the version named. They are re-checked whenever the implementation plan pins another version, and
+the sections that depend on them cite them as (T1) to (T9).
 
 - **T1. On Windows, Solana programs are built inside WSL.** The Solana and Anchor installation
   guides require it, and the official installer supports macOS, Linux and WSL. *Used in 3.5.*
@@ -216,7 +216,7 @@ on them cite them as (T1) to (T9).
   *Used in 6.2.*
 - **T9. Surfpool truncates a transaction's `preTokenBalances`** (v1.6.1). It keeps the lowest
   account indices, up to the length of `postTokenBalances`, so a transaction that closes a token
-  account loses one pre balance. Inner instructions are reported completely. *Used in 12.2.*
+  account loses one pre balance. Inner instructions are reported completely. *Used in 12.2, 12.5.*
 
 ## 3. Architecture
 
@@ -1438,7 +1438,7 @@ its own traffic. There the harness caps how many scenarios run at once, with a c
 
 **Measuring money.** Shared scenarios pay the same receiver at the same time, so no scenario
 measures an account's balance over a period. It computes the changes from the token transfer
-instructions recorded in its own sessions' transactions, not from the transaction's balance
+instructions recorded in its own sessions' transactions, not from the transactions' balance
 metadata (T9).
 
 **Timing.**
