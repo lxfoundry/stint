@@ -83,6 +83,8 @@ describe("facilitator HTTP interface (spec §6.1)", () => {
     for (const path of ["/verify", "/settle"]) {
       expect((await post(path, {})).status).toBe(401);
       expect((await post(path, {}, "wrong")).status).toBe(401);
+      expect((await post(path, {}, "seller")).status).toBe(401);
+      expect((await post(path, {}, "seller-key-2")).status).toBe(401);
     }
   });
 

@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { address, createKeyPairSignerFromBytes, createSolanaRpc, type Address } from "@solana/kit";
@@ -30,11 +31,25 @@ export interface RunningFacilitator {
   stop(): Promise<void>;
 }
 
+const digest = (key: string) => createHash("sha256").update(key, "utf8").digest();
+
+/**
+ * Whether `presented` is one of the configured keys. Compared in constant time over SHA-256
+ * digests, which have one length whatever the keys', and against every key without stopping early.
+ */
+function isKnownKey(presented: string, configured: readonly Buffer[]): boolean {
+  const candidate = digest(presented);
+  let found = false;
+  for (const key of configured) found = timingSafeEqual(candidate, key) || found;
+  return found;
+}
+
 export async function startFacilitator(config: FacilitatorConfig): Promise<RunningFacilitator> {
   const kora = createKoraClient(config.kora.url, config.kora.apiKey);
   const feePayer = address((await kora.getPayerSigner()).signer_address);
   const rentPayer = await createKeyPairSignerFromBytes(config.rentPayerSecretKey);
   const log = config.log ?? (() => {});
+  const apiKeys = config.apiKeys.map(digest);
   const ctx: FacilitatorContext = {
     rpc: createSolanaRpc(config.rpcUrl),
     network: config.network,
@@ -65,7 +80,7 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
     if (request.method === "GET" && path === "/supported") return sendJson(response, 200, supported());
     if (request.method === "POST" && (path === "/verify" || path === "/settle")) {
       const key = request.headers.authorization?.replace(/^Bearer /, "");
-      if (!key || !config.apiKeys.includes(key)) return sendJson(response, 401, { error: "unauthorized" });
+      if (!key || !isKnownKey(key, apiKeys)) return sendJson(response, 401, { error: "unauthorized" });
       const body = await readJson(request);
       const { paymentPayload, paymentRequirements } = (body ?? {}) as Record<string, unknown>;
       if (path === "/verify") {
