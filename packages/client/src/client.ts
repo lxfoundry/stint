@@ -139,23 +139,37 @@ export function createStintClient(options: ClientOptions): StintClient {
       const check = checkOffer(options.policy, offer, seconds ?? offer.extra.seconds, locked());
       if (!check.ok) throw new StintError(`Policy refuses the offer: ${check.reason}`);
 
-      const built = await buildOpenTransaction({ requirements: offer, authority: options.signer, decimals: check.decimals });
-      const payload: PaymentPayload = {
-        x402Version: X402_VERSION,
-        resource: required.resource,
-        accepted: offer,
-        payload: { type: "open", transaction: built.transaction, session: built.session },
-      };
-      // Counted before sending: once signed, the payment may land whatever the answer.
+      // Reserved in the same synchronous step as the check, so that concurrent opens cannot
+      // both pass against the same locked amount. Once signed, the payment may land whatever
+      // the answer, so the entry stays unless the gate refused it before settlement.
       const entry = { at: now(), amount: check.amount };
       ledger.push(entry);
+      const release = () => {
+        const index = ledger.indexOf(entry);
+        if (index >= 0) ledger.splice(index, 1);
+      };
+      let built: Awaited<ReturnType<typeof buildOpenTransaction>>;
+      let signature: string;
+      try {
+        built = await buildOpenTransaction({ requirements: offer, authority: options.signer, decimals: check.decimals });
+        const payload: PaymentPayload = {
+          x402Version: X402_VERSION,
+          resource: required.resource,
+          accepted: offer,
+          payload: { type: "open", transaction: built.transaction, session: built.session },
+        };
+        signature = encodePaymentSignatureHeader(payload);
+      } catch (error) {
+        release(); // nothing was sent
+        throw error;
+      }
       const second = await fetch(endpoint, {
         method: "POST",
-        headers: { [HEADERS.paymentSignature]: encodePaymentSignatureHeader(payload) },
+        headers: { [HEADERS.paymentSignature]: signature },
       });
       const body = await readBody(second);
       if (second.status === 402 || second.status === 400) {
-        ledger.splice(ledger.indexOf(entry), 1); // refused before settlement: nothing was charged
+        release(); // refused before settlement: nothing was charged
         throw new StintError(`The gate refused the payment: ${describeBody(body)}`, second.status, body);
       }
       if (second.status !== 201) {

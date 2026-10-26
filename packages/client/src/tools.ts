@@ -60,6 +60,8 @@ export interface SessionTools {
 interface Live {
   readonly session: StintSession;
   socket?: WebSocket;
+  /** The connection in progress, shared by concurrent callers. */
+  connecting?: Promise<WebSocket>;
   readonly inbox: unknown[];
   readonly waiters: Set<() => void>;
   closeCode?: number;
@@ -89,9 +91,7 @@ export function createSessionTools(client: StintClient): SessionTools {
     state.waiters.clear();
   };
 
-  async function connected(state: Live): Promise<WebSocket> {
-    if (state.socket && state.socket.readyState === state.socket.OPEN) return state.socket;
-    if (state.closed) throw new ToolError("The session is closed");
+  async function connect(state: Live): Promise<WebSocket> {
     const socket = await state.session.connect();
     socket.on("message", (data) => {
       const text = String(data);
@@ -110,6 +110,20 @@ export function createSessionTools(client: StintClient): SessionTools {
     });
     state.socket = socket;
     return socket;
+  }
+
+  function connected(state: Live): Promise<WebSocket> {
+    if (state.socket && state.socket.readyState === state.socket.OPEN) return Promise.resolve(state.socket);
+    if (state.closed) return Promise.reject(new ToolError("The session is closed"));
+    if (state.connecting) return state.connecting;
+    const attempt = connect(state);
+    state.connecting = attempt;
+    // Cleared once settled, so that a failed attempt can be retried.
+    const clear = () => {
+      if (state.connecting === attempt) state.connecting = undefined;
+    };
+    attempt.then(clear, clear);
+    return attempt;
   }
 
   const matches = (message: unknown, match: Record<string, unknown> | undefined) =>

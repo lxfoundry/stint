@@ -1,4 +1,5 @@
 import { generateKeyPairSigner } from "@solana/kit";
+import type { WebSocket } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { createSessionTools, createStintClient } from "../src/index.js";
 import { startTestGate, type TestGate } from "./gate.js";
@@ -43,6 +44,35 @@ describe("session tools (spec §9.5)", () => {
       transaction: "sig",
     });
     await expect.poll(() => closeCode(opened.sessionId)).toBe(4410);
+  });
+
+  it("shares one connection between concurrent first sends", async () => {
+    const buyer = await generateKeyPairSigner();
+    const attached: WebSocket[] = [];
+    gate = await startTestGate(buyer.address, (socket) => {
+      attached.push(socket);
+      // Every message is broadcast to every attached connection, so a second connection would double the replies.
+      socket.on("message", (data) => {
+        for (const peer of attached) peer.send(JSON.stringify({ type: "echo", text: String(data) }));
+      });
+    });
+    const client = createStintClient({
+      signer: buyer,
+      policy: { maxRate: 1_000n, maxPerSession: 100_000n, budget: { amount: 100_000n, periodSeconds: 3_600 } },
+    });
+    const { tools } = createSessionTools(client);
+    const opened = await tools.stint_open_session.run({ url: gate.url, seconds: 30, reason: "test" });
+
+    await Promise.all([
+      tools.stint_send.run({ sessionId: opened.sessionId, message: "a" }),
+      tools.stint_send.run({ sessionId: opened.sessionId, message: "b" }),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const { messages } = await tools.stint_receive.run({ sessionId: opened.sessionId, timeoutSeconds: 0, max: 10 });
+
+    expect(attached).toHaveLength(1);
+    expect(messages).toHaveLength(2);
+    expect(messages.map((message) => (message as { text: string }).text).sort()).toEqual(["a", "b"]);
   });
 
   it("answers an unknown session with a readable error", async () => {

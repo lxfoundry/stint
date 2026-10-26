@@ -44,6 +44,17 @@ describe("session client (spec §9.3, §9.4)", () => {
     await expect(client.open(gate.url, { seconds: 30 })).rejects.toThrow(/budget/);
   });
 
+  it("reserves the budget before it awaits, so concurrent opens cannot overspend", async () => {
+    const client = createStintClient({ signer: buyer, policy });
+    const results = await Promise.allSettled([client.open(gate.url, { seconds: 30 }), client.open(gate.url, { seconds: 30 })]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const refused = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    expect(refused).toHaveLength(1);
+    expect(String(refused[0]?.reason)).toMatch(/budget/);
+    expect(gate.payments).toHaveLength(1);
+    expect(client.remainingBudget()).toBe(10_000n);
+  });
+
   it("connects with a connect token, and closes with a close token", async () => {
     const client = createStintClient({ signer: buyer, policy });
     const session = await client.open(gate.url, { seconds: 30 });
