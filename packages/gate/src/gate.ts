@@ -1,12 +1,13 @@
 import { STATUS_CODES, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
-import { address, type Address } from "@solana/kit";
+import { address, isAddress, type Address } from "@solana/kit";
 import {
   STINT_PROGRAM_ADDRESS,
   StintInstruction,
   identifyStintInstruction,
   paidUntil,
   parseOpenInstruction,
+  type ClosedEvent,
   type Session,
 } from "@lxfoundry/stint-program-client";
 import {
@@ -50,10 +51,44 @@ interface Tracked<U> {
   readonly stored: Session;
   readonly upstream: U;
   readonly connections: Set<WebSocket>;
+  /** The close in flight, or finished with the session ended: concurrent closes share it. */
+  closing?: Promise<CloseOutcome>;
+  ended: boolean;
 }
 
+interface CloseOutcome {
+  readonly status: number;
+  readonly body: unknown;
+  /** True once the session is over; false when the buyer may retry. */
+  readonly ended: boolean;
+}
+
+/** A failure of something the gate calls: the facilitator or the chain. Answered 502; any other error is 500. */
+class UpstreamError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
+async function upstream<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    throw error instanceof UpstreamError ? error : new UpstreamError(error);
+  }
+}
+
+/** The shape of a route; the id still has to be a real address (32 bytes), which the regex cannot say. */
 const SESSION_PATH = /^\/sessions\/([1-9A-HJ-NP-Za-km-z]{32,44})\/(ws|close)$/;
 const TOKEN_SKEW_MS = 30_000;
+
+function parseUrl(request: IncomingMessage, origin: string): URL | undefined {
+  try {
+    return new URL(request.url ?? "/", origin);
+  } catch {
+    return undefined;
+  }
+}
 
 /** The gate (spec §7), as middleware: it hands the resource a verified `SessionInfo` (spec §7.6). */
 export function createGate<U>(config: GateConfig<U>): Gate {
@@ -64,6 +99,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   const marginMs = (config.marginSeconds ?? 2) * 1000;
   const wss = new WebSocketServer({ noServer: true });
   const sessions = new Map<Address, Tracked<U>>();
+  /** Sessions being provisioned, so a retried open waits for the first instead of provisioning again. */
+  const provisioning = new Map<Address, Promise<Tracked<U>>>();
   /** `jti` → when it may be forgotten (ms on the token clock). */
   const seenTokens = new Map<string, number>();
   let facilitatorExtra: FacilitatorExtra | undefined;
@@ -78,7 +115,9 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   const wsUrl = (session: Address) => `${config.origin.replace(/^http/, "ws")}/sessions/${session}/ws`;
 
   /** `feePayer`, `rentPayer`, `programId` and `closeUrl` are copied from `/supported` (spec §5.1). */
-  async function fromFacilitator(): Promise<FacilitatorExtra> {
+  const fromFacilitator = (): Promise<FacilitatorExtra> => upstream(loadFacilitatorExtra);
+
+  async function loadFacilitatorExtra(): Promise<FacilitatorExtra> {
     if (facilitatorExtra) return facilitatorExtra;
     const supported = await config.facilitator.supported();
     const kind = supported.kinds.find(
@@ -101,7 +140,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       receiverAuthorizer: config.receiverAuthorizer.address,
       terms: config.terms,
       facilitator: await fromFacilitator(),
-      lifetime: lifetime ?? (await config.chain.latestBlockhash()),
+      lifetime: lifetime ?? (await upstream(() => config.chain.latestBlockhash())),
       maxTimeoutSeconds: config.maxTimeoutSeconds ?? 60,
       idleCloseSeconds: config.idleCloseSeconds ?? 60,
       closeOnOutage: config.closeOnOutage ?? true,
@@ -133,6 +172,14 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       }
     }
     return undefined;
+  }
+
+  async function provision(session: Address, stored: Session): Promise<Tracked<U>> {
+    const info: SessionInfo = { session, authority: stored.authority, paidUntil: paidUntil(stored) };
+    const resource = await config.adapter.provision(info);
+    const tracked: Tracked<U> = { info, stored, upstream: resource, connections: new Set(), ended: false };
+    sessions.set(session, tracked);
+    return tracked;
   }
 
   async function open(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
@@ -169,9 +216,9 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       seconds: accepted.extra.seconds,
     });
 
-    const verified = await config.facilitator.verify(payload, requirements);
+    const verified = await upstream(() => config.facilitator.verify(payload, requirements));
     if (!verified.isValid) return paymentRequired(response, durations, verified.invalidReason ?? "invalid_payload");
-    const settled = await config.facilitator.settle(payload, requirements);
+    const settled = await upstream(() => config.facilitator.settle(payload, requirements));
     const paymentResponse = { [HEADERS.paymentResponse]: encodePaymentResponseHeader(settled) };
     log({ event: "open", session, success: settled.success, reason: settled.errorReason });
     if (!settled.success) {
@@ -181,13 +228,19 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       return paymentRequired(response, durations, settled.errorReason ?? "simulation_failed");
     }
 
-    const stored = await config.chain.readSession(session);
+    const stored = await upstream(() => config.chain.readSession(session));
     if (!stored) return sendJson(response, 404, { error: "unknown_session" });
     let tracked = sessions.get(session);
     if (!tracked) {
-      const info: SessionInfo = { session, authority: stored.authority, paidUntil: paidUntil(stored) };
-      tracked = { info, stored, upstream: await config.adapter.provision(info), connections: new Set() };
-      sessions.set(session, tracked);
+      // No `await` between the lookup and the registration: a retried open joins this provisioning.
+      let pending = provisioning.get(session);
+      if (!pending) {
+        pending = provision(session, stored);
+        provisioning.set(session, pending);
+        const done = () => void provisioning.delete(session);
+        pending.then(done, done);
+      }
+      tracked = await pending;
     }
     sendJson(response, 201, { session, paidUntil: Number(tracked.info.paidUntil), wsUrl: wsUrl(session) }, paymentResponse);
   }
@@ -215,7 +268,10 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     return value?.startsWith("Bearer ") ? value.slice("Bearer ".length) : undefined;
   };
 
+  /** Ends a session once: its `teardown` runs at most one time, whatever ends it. */
   async function end(tracked: Tracked<U>, reason: EndReason, code: number): Promise<void> {
+    if (tracked.ended) return;
+    tracked.ended = true;
     sessions.delete(tracked.info.session);
     for (const socket of tracked.connections) socket.close(code, "session closed");
     await config.adapter.teardown(tracked.info, reason);
@@ -225,7 +281,21 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     const tracked = sessions.get(session);
     if (!tracked) return sendJson(response, 404, { error: "unknown_session" });
     if (!(await authenticate(bearer(request), tracked, "close"))) return sendJson(response, 401, { error: "unauthorized" });
+    // Overlapping closes share one settlement and one outcome (the first assignment is synchronous).
+    const outcome = await (tracked.closing ??= startClose(tracked));
+    sendJson(response, outcome.status, outcome.body);
+  }
 
+  function startClose(tracked: Tracked<U>): Promise<CloseOutcome> {
+    const run = performClose(tracked);
+    // A failed close leaves the session open, and the buyer may try again.
+    const reopen = () => void (tracked.closing = undefined);
+    run.then((outcome) => outcome.ended || reopen(), reopen);
+    return run;
+  }
+
+  async function performClose(tracked: Tracked<U>): Promise<CloseOutcome> {
+    const session = tracked.info.session;
     const base = await offerBase();
     const transaction = await buildCloseTransaction({
       session,
@@ -241,21 +311,30 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       accepted: requirements,
       payload: { type: "close", transaction },
     };
-    const settled = await config.facilitator.settle(payload, requirements);
+    const settled = await upstream(() => config.facilitator.settle(payload, requirements));
     log({ event: "close", session, success: settled.success, reason: settled.errorReason });
     if (!settled.success) {
-      if (settled.errorReason === "settlement_pending") return sendJson(response, 202, { transaction: settled.transaction });
-      return sendJson(response, 502, { error: settled.errorReason ?? "settlement_failed", message: settled.errorMessage });
+      if (settled.errorReason === "settlement_pending") return { status: 202, body: { transaction: settled.transaction }, ended: false };
+      const body = { error: settled.errorReason ?? "settlement_failed", message: settled.errorMessage };
+      return { status: 502, body, ended: false };
     }
-    const event = await config.chain.closedEvent(settled.transaction);
-    // The close is confirmed: connections are dropped only now (spec §7.3).
-    await end(tracked, "closed", 4410);
-    if (!event) return sendJson(response, 502, { error: "no_closed_event", transaction: settled.transaction });
-    sendJson(response, 200, {
+    // The close is confirmed: connections are dropped only now (spec §7.3), and whether or not
+    // the Closed event can be read, because the session is over on chain.
+    let event: ClosedEvent | undefined;
+    try {
+      event = await upstream(() => config.chain.closedEvent(settled.transaction));
+    } catch (error) {
+      log({ event: "error", error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      await end(tracked, "closed", 4410);
+    }
+    if (!event) return { status: 502, body: { error: "no_closed_event", transaction: settled.transaction }, ended: true };
+    const body = {
       paid: (event.claimed + event.owed + event.redirected).toString(),
       refunded: event.refunded.toString(),
       transaction: settled.transaction,
-    });
+    };
+    return { status: 200, body, ended: true };
   }
 
   function refuseUpgrade(socket: Duplex, status: number): void {
@@ -267,6 +346,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     if (!tracked) return refuseUpgrade(socket, 404);
     const token = bearer(request) ?? url.searchParams.get("token") ?? undefined;
     if (!(await authenticate(token, tracked, "connect"))) return refuseUpgrade(socket, 401);
+    // The session may have ended while the token was checked.
+    if (tracked.ended) return refuseUpgrade(socket, 404);
     if (!sessionMatches(tracked.stored, seller)) return refuseUpgrade(socket, 403);
     if (Number(tracked.info.paidUntil) * 1000 - sessionClock() <= marginMs) return refuseUpgrade(socket, 402);
     wss.handleUpgrade(request, socket, head, (ws) => {
@@ -277,24 +358,47 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   }
 
   return {
+    /** Never rejects: a failure is logged and answered, 502 for the facilitator or the chain, 500 otherwise. */
     async handleRequest(request, response) {
-      const url = new URL(request.url ?? "/", config.origin);
-      if (request.method === "POST" && url.pathname === "/sessions") {
-        await open(request, response, url);
+      const url = parseUrl(request, config.origin);
+      if (!url) return false;
+      try {
+        if (request.method === "POST" && url.pathname === "/sessions") {
+          await open(request, response, url);
+          return true;
+        }
+        const match = SESSION_PATH.exec(url.pathname);
+        if (request.method === "POST" && match?.[2] === "close") {
+          const id = match[1]!;
+          if (!isAddress(id)) sendJson(response, 404, { error: "unknown_session" });
+          else await closeSession(request, response, id);
+          return true;
+        }
+        return false;
+      } catch (error) {
+        log({ event: "error", error: error instanceof Error ? error.message : String(error) });
+        if (response.headersSent) response.end();
+        else if (error instanceof UpstreamError) sendJson(response, 502, { error: "upstream_error", message: error.message });
+        else sendJson(response, 500, { error: "internal" });
         return true;
       }
-      const match = SESSION_PATH.exec(url.pathname);
-      if (request.method === "POST" && match?.[2] === "close") {
-        await closeSession(request, response, address(match[1]!));
-        return true;
-      }
-      return false;
     },
     handleUpgrade(request, socket, head) {
-      const url = new URL(request.url ?? "/", config.origin);
-      const match = SESSION_PATH.exec(url.pathname);
-      if (match?.[2] !== "ws") return false;
-      connect(request, socket, head, url, address(match[1]!)).catch((error: unknown) => {
+      const url = parseUrl(request, config.origin);
+      const match = url && SESSION_PATH.exec(url.pathname);
+      if (!url || match?.[2] !== "ws") return false;
+      // Node removes its own `error` listener from an upgrade socket, so a reset while the token
+      // is checked would otherwise be an unhandled `error` event.
+      socket.on("error", (error) => {
+        log({ event: "socket_error", error: error.message });
+        socket.destroy();
+      });
+      const id = match[1]!;
+      if (!isAddress(id)) {
+        refuseUpgrade(socket, 404);
+        return true;
+      }
+      connect(request, socket, head, url, id).catch((error: unknown) => {
         log({ event: "error", error: error instanceof Error ? error.message : String(error) });
         refuseUpgrade(socket, 500);
       });
