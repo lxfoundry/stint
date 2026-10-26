@@ -3,3 +3,7 @@ export * from "./types.js";
 export * from "./offer.js";
 export * from "./wire.js";
 export * from "./token.js";
+export * from "./transactions.js";
+export * from "./inspect.js";
+export * from "./checks.js";
+export * from "./chain.js";
