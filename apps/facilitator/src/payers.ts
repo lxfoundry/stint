@@ -49,10 +49,14 @@ function systemCall(ix: ExecutedInstruction): SystemCall {
   if ("parsed" in ix) {
     const { type, info } = ix.parsed;
     const lamports = lamportsOf(info.lamports);
-    const destination = type === "createAccount" ? info.newAccount : type === "transfer" ? info.destination : undefined;
-    if (lamports !== undefined && typeof info.source === "string" && typeof destination === "string") {
-      // The source and destination first, then anything else the instruction names.
-      const rest = stringsIn(info).filter((value) => value !== info.source && value !== destination);
+    const destinationKey = type === "createAccount" ? "newAccount" : type === "transfer" ? "destination" : undefined;
+    const destination = destinationKey && info[destinationKey];
+    if (destinationKey && lamports !== undefined && typeof info.source === "string" && typeof destination === "string") {
+      // The source and destination first, then every other field, so that a payer named again
+      // elsewhere (as the new account's owner, say) still counts as appearing out of place.
+      const rest = Object.entries(info)
+        .filter(([key]) => key !== "source" && key !== destinationKey)
+        .flatMap(([, value]) => stringsIn(value));
       return { kind: "fund", accounts: [info.source, destination, ...rest] as Address[], lamports };
     }
     return { kind: "other", accounts: stringsIn(info) as Address[] };

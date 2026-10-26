@@ -56,13 +56,94 @@ describe("checkPayerFunding (spec §5.4)", () => {
     expect(checkPayerFunding(honestOpen(), keys, funding)).toEqual({ ok: true, value: null });
   });
 
+  /** A System Program instruction in the node's jsonParsed form, as Surfpool returns inner ones. */
+  const parsed = (type: string, info: Record<string, unknown>): ExecutedInstruction => ({
+    programAddress: "11111111111111111111111111111111" as Address,
+    parsed: { type, info },
+  });
+  const parsedCreate = (newAccount: Address, lamports: bigint | number, space: number, owner: Address) =>
+    parsed("createAccount", { source: keys.rentPayer, newAccount, lamports, space, owner });
+
   it("passes the same open in the node's jsonParsed form", () => {
-    const parsed = (newAccount: Address, lamports: bigint, space: number, owner: Address): ExecutedInstruction => ({
-      programAddress: "11111111111111111111111111111111" as Address,
-      parsed: { type: "createAccount", info: { source: keys.rentPayer, newAccount, lamports, space, owner } },
-    });
-    const instructions = [parsed(vault, VAULT_RENT, 165, TOKEN_PROGRAM_ADDRESS), parsed(session, SESSION_RENT, 250, STINT_PROGRAM_ADDRESS)];
+    const instructions = [
+      parsedCreate(vault, VAULT_RENT, 165, TOKEN_PROGRAM_ADDRESS),
+      parsedCreate(session, SESSION_RENT, 250, STINT_PROGRAM_ADDRESS),
+    ];
     expect(checkPayerFunding(instructions, keys, funding)).toEqual({ ok: true, value: null });
+  });
+
+  it("reads jsonParsed lamports given as a number: accepted within the budget, refused above it", () => {
+    const within = [
+      parsedCreate(vault, Number(VAULT_RENT), 165, TOKEN_PROGRAM_ADDRESS),
+      parsedCreate(session, Number(SESSION_RENT), 250, STINT_PROGRAM_ADDRESS),
+    ];
+    expect(checkPayerFunding(within, keys, funding)).toEqual({ ok: true, value: null });
+    const above = [...within, parsed("transfer", { source: keys.rentPayer, destination: session, lamports: 1 })];
+    expect(checkPayerFunding(above, keys, funding)).toMatchObject({
+      ok: false,
+      reason: "payer_misuse",
+      message: "the rent payer would fund more than the session's accounts",
+    });
+  });
+
+  describe("in the node's jsonParsed form", () => {
+    it("refuses a parsed transfer whose source is the fee payer", async () => {
+      const transfer = parsed("transfer", { source: keys.feePayer, destination: await newAddress(), lamports: 1n });
+      expect(checkPayerFunding([transfer], keys, funding)).toMatchObject({
+        ok: false,
+        reason: "payer_misuse",
+        message: "the fee payer would pay more than the fee",
+      });
+    });
+
+    it("refuses a parsed transfer from the rent payer to an unrelated account", async () => {
+      const transfer = parsed("transfer", { source: keys.rentPayer, destination: await newAddress(), lamports: 1n });
+      expect(checkPayerFunding([transfer], keys, funding)).toMatchObject({
+        ok: false,
+        reason: "payer_misuse",
+        message: "the rent payer would fund an account other than the session's",
+      });
+    });
+
+    it("refuses a parsed createAccountWithSeed or transferWithSeed from the rent payer, even towards the session", async () => {
+      // A base other than the rent payer, so that only the instruction's kind is at fault.
+      const base = await newAddress();
+      const createWithSeed = parsed("createAccountWithSeed", {
+        source: keys.rentPayer,
+        newAccount: session,
+        base,
+        seed: "s",
+        lamports: 1n,
+        space: 0,
+        owner: STINT_PROGRAM_ADDRESS,
+      });
+      const transferWithSeed = parsed("transferWithSeed", {
+        source: keys.rentPayer,
+        sourceBase: base,
+        destination: session,
+        lamports: 1n,
+        sourceSeed: "s",
+        sourceOwner: STINT_PROGRAM_ADDRESS,
+      });
+      for (const instruction of [createWithSeed, transferWithSeed]) {
+        expect(checkPayerFunding([instruction], keys, funding)).toMatchObject({ ok: false, reason: "payer_misuse" });
+      }
+    });
+
+    it("refuses a parsed assign naming the rent payer", () => {
+      const assign = parsed("assign", { account: keys.rentPayer, owner: STINT_PROGRAM_ADDRESS });
+      expect(checkPayerFunding([assign], keys, funding)).toMatchObject({ ok: false, reason: "payer_misuse" });
+    });
+
+    it("refuses a parsed transfer to the rent payer", () => {
+      const transfer = parsed("transfer", { source: session, destination: keys.rentPayer, lamports: 1n });
+      expect(checkPayerFunding([transfer], keys, funding)).toMatchObject({ ok: false, reason: "payer_misuse" });
+    });
+
+    it("refuses a parsed funding instruction that names the rent payer in any other field", () => {
+      const create = parsedCreate(session, SESSION_RENT, 250, keys.rentPayer);
+      expect(checkPayerFunding([create], keys, funding)).toMatchObject({ ok: false, reason: "payer_misuse" });
+    });
   });
 
   it("refuses the fee payer as a transfer source", async () => {
@@ -147,6 +228,36 @@ describe("executedInstructions", () => {
     expect(checkPayerFunding(instructions, { feePayer: await newAddress(), rentPayer }, { destinations: [session], budget: 19n })).toEqual({
       ok: true,
       value: null,
+    });
+  });
+
+  describe("refuses to guess at an inner instruction it cannot read", () => {
+    const tx = { instructions: [], accounts: [system] } as unknown as InspectedTransaction;
+    const read = (ix: unknown) => () => executedInstructions(tx, [{ index: 0, instructions: [ix] }]);
+    const unreadable = "The node's simulation returned an unreadable inner instruction";
+
+    it("without a programId or a programIdIndex", () => {
+      expect(read({ accounts: [], data: "1" })).toThrow(unreadable);
+    });
+
+    it("with a System parsed field that is not {type, info}", () => {
+      expect(read({ programId: system, parsed: "transfer" })).toThrow(unreadable);
+      expect(read({ programId: system, parsed: { type: "transfer" } })).toThrow(unreadable);
+    });
+
+    it("with System data that is not a string", () => {
+      expect(read({ programId: system, accounts: [], data: [2, 0, 0, 0] })).toThrow(unreadable);
+    });
+
+    it("with an index outside the static keys", () => {
+      expect(read({ programIdIndex: 0n, accounts: [5n], data: "1" })).toThrow(unreadable);
+      expect(read({ programIdIndex: 5n, accounts: [], data: "1" })).toThrow(unreadable);
+    });
+
+    it("in a group without instructions", () => {
+      expect(() => executedInstructions(tx, [{ index: 0 }])).toThrow(
+        "The node's simulation returned an unreadable inner instruction group",
+      );
     });
   });
 
