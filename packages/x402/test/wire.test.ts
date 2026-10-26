@@ -27,4 +27,11 @@ describe("wire format", () => {
     expect(readElapsedPayload({ ...base, payload: { type: "open", transaction: 1 } })).toBeUndefined();
     expect(readElapsedPayload({ ...base, payload: { type: "topUp", transaction: "AQ==" } })).toBeUndefined();
   });
+
+  it("returns undefined, rather than throwing, for a payment payload of the wrong shape", () => {
+    expect(readElapsedPayload({ x402Version: 2 })).toBeUndefined();
+    expect(readElapsedPayload({ x402Version: 2, payload: null })).toBeUndefined();
+    expect(readElapsedPayload({ x402Version: 2, payload: "open" })).toBeUndefined();
+    expect(readElapsedPayload(null)).toBeUndefined();
+  });
 });

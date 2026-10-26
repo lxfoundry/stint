@@ -1,5 +1,6 @@
 import { address, type Address } from "@solana/kit";
 import { SCHEME } from "./constants.js";
+import { isRecord } from "./guards.js";
 import type { ElapsedExtra, ElapsedRequirements, FacilitatorExtra, Network, SellerTerms, Terms } from "./types.js";
 
 export interface OfferInput {
@@ -71,8 +72,6 @@ export function checkOpenDuration(terms: Terms, seconds: number): DurationCheck 
     : { ok: false, minSeconds: terms.minSeconds, maxSeconds: terms.maxSeconds };
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 const isU64String = (value: unknown) => typeof value === "string" && /^(0|[1-9][0-9]{0,19})$/.test(value);
 const isU32 = (value: unknown) => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffff_ffff;
 const isText = (value: unknown) => typeof value === "string" && value.length > 0;
