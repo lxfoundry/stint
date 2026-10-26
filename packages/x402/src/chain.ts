@@ -58,6 +58,8 @@ export interface RecordedInstruction {
 export interface RecordedTransaction {
   /** Every account key, in index order. */
   readonly accountKeys: readonly Address[];
+  /** `meta.err`: non-null when the transaction failed. */
+  readonly err?: unknown;
   readonly instructions: readonly RecordedInstruction[];
   readonly innerInstructions?: readonly { readonly instructions: readonly RecordedInstruction[] }[];
 }
@@ -76,10 +78,12 @@ const UNSUMMED: ReadonlySet<TokenInstruction> = new Set([
 /**
  * Each token account's change in a transaction, summed from its SPL Token `Transfer` and
  * `TransferChecked` instructions, top-level and inner: minus for the source, plus for the
- * destination. Throws on a token instruction it cannot decode, and on one that changes a balance
- * without a transfer.
+ * destination. An account that no transfer moved is absent. Throws on a failed transaction, whose
+ * recorded instructions moved nothing; on a token instruction it cannot decode; and on one that
+ * changes a balance without a transfer.
  */
 export function tokenTransferChanges(transaction: RecordedTransaction): Map<Address, bigint> {
+  if (transaction.err != null) throw new Error(`The transaction failed (${json(transaction.err)}): it moved no tokens`);
   const base58 = getBase58Encoder();
   const keyAt = (index: number): Address => {
     const key = transaction.accountKeys[index];
@@ -112,24 +116,18 @@ export function tokenTransferChanges(transaction: RecordedTransaction): Map<Addr
  * Token balance changes in a confirmed transaction, by token account (spec §12.2). They are summed
  * from the transaction's token transfer instructions, not read from its `preTokenBalances` and
  * `postTokenBalances`: Surfpool truncates `preTokenBalances` to the length of `postTokenBalances`,
- * so a transaction that closes a token account loses one pre balance (T9). A token account the
- * balance metadata names but no transfer moved reads 0.
+ * so a transaction that closes a token account loses one pre balance (T9). A token account that no
+ * transfer moved is absent from the map. Throws if the transaction failed.
  */
 export async function tokenBalanceChanges(rpc: Rpc<SolanaRpcApi>, signature: string): Promise<Map<Address, bigint>> {
   const transaction = await fetchConfirmed(rpc, signature);
   if (!transaction?.meta) throw new Error(`Transaction ${signature} not found at confirmed`);
-  const accountKeys = accountKeysOf(transaction);
-  const changes = new Map<Address, bigint>();
-  for (const balance of [...(transaction.meta.preTokenBalances ?? []), ...(transaction.meta.postTokenBalances ?? [])]) {
-    changes.set(accountKeys[balance.accountIndex]!, 0n);
-  }
-  const transfers = tokenTransferChanges({
-    accountKeys,
+  return tokenTransferChanges({
+    accountKeys: accountKeysOf(transaction),
+    err: transaction.meta.err,
     instructions: transaction.transaction.message.instructions,
     innerInstructions: transaction.meta.innerInstructions ?? [],
   });
-  for (const [account, amount] of transfers) changes.set(account, amount);
-  return changes;
 }
 
 export type Confirmation = "confirmed" | "expired" | "pending";

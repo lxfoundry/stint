@@ -119,6 +119,32 @@ describe("tokenTransferChanges (spec §12.2, T9)", () => {
     );
   });
 
+  it("throws on a failed transaction, whose recorded transfers never took effect", () => {
+    const { accountKeys, compile } = compiler();
+    const transaction: RecordedTransaction = {
+      accountKeys,
+      err: { InstructionError: [0, { Custom: 6004 }] },
+      instructions: [compile({ programAddress: STINT_PROGRAM_ADDRESS })],
+      innerInstructions: [{ instructions: [compile(transfer(vault, receiver, 5_000n))] }],
+    };
+    expect(() => tokenTransferChanges(transaction)).toThrow(/failed.*InstructionError/);
+  });
+
+  it("accepts a transaction whose error is null", () => {
+    const { accountKeys, compile } = compiler();
+    const changes = tokenTransferChanges({ accountKeys, err: null, instructions: [compile(transfer(buyer, vault, 1n))] });
+    expect(changes.get(vault)).toBe(1n);
+  });
+
+  it("names no account that no transfer moved, closeAccount's included", () => {
+    const { accountKeys, compile } = compiler();
+    const changes = tokenTransferChanges({
+      accountKeys,
+      instructions: [compile(getCloseAccountInstruction({ account: vault, destination: other, owner }))],
+    });
+    expect(changes.size).toBe(0);
+  });
+
   it("throws on a token instruction it cannot decode", () => {
     const { accountKeys, compile } = compiler();
     const garbage = compile({ programAddress: TOKEN_PROGRAM_ADDRESS, data: new Uint8Array([250, 1, 2]) });
