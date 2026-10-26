@@ -1,4 +1,12 @@
 import {
+  TOKEN_PROGRAM_ADDRESS,
+  TokenInstruction,
+  identifyTokenInstruction,
+  parseTransferCheckedInstruction,
+  parseTransferInstruction,
+} from "@solana-program/token";
+import {
+  AccountRole,
   blockhash as toBlockhash,
   getBase58Encoder,
   signature as toSignature,
@@ -39,18 +47,88 @@ export async function fetchClosedEvent(rpc: Rpc<SolanaRpcApi>, signature: string
   return instructions && findClosedEvent(instructions);
 }
 
-/** Token balance changes recorded in a confirmed transaction, by token account (spec §12.2). */
+/** An instruction as `getTransaction` records it with `json` encoding: account indices and base58 data. */
+export interface RecordedInstruction {
+  readonly programIdIndex: number;
+  readonly accounts: readonly number[];
+  readonly data: string;
+}
+
+/** The parts of a fetched transaction that token transfers are read from. */
+export interface RecordedTransaction {
+  /** Every account key, in index order. */
+  readonly accountKeys: readonly Address[];
+  readonly instructions: readonly RecordedInstruction[];
+  readonly innerInstructions?: readonly { readonly instructions: readonly RecordedInstruction[] }[];
+}
+
+/** Token instructions that change a balance other than by a transfer, which the sum cannot account for. */
+const UNSUMMED: ReadonlySet<TokenInstruction> = new Set([
+  TokenInstruction.MintTo,
+  TokenInstruction.MintToChecked,
+  TokenInstruction.Burn,
+  TokenInstruction.BurnChecked,
+  TokenInstruction.SyncNative,
+  TokenInstruction.UnwrapLamports,
+  TokenInstruction.Batch,
+]);
+
+/**
+ * Each token account's change in a transaction, summed from its SPL Token `Transfer` and
+ * `TransferChecked` instructions, top-level and inner: minus for the source, plus for the
+ * destination. Throws on a token instruction it cannot decode, and on one that changes a balance
+ * without a transfer.
+ */
+export function tokenTransferChanges(transaction: RecordedTransaction): Map<Address, bigint> {
+  const base58 = getBase58Encoder();
+  const keyAt = (index: number): Address => {
+    const key = transaction.accountKeys[index];
+    if (key === undefined) throw new Error(`Account index ${index} is outside the transaction's ${transaction.accountKeys.length} keys`);
+    return key;
+  };
+  const changes = new Map<Address, bigint>();
+  const add = (account: Address, amount: bigint) => changes.set(account, (changes.get(account) ?? 0n) + amount);
+  const recorded = [...transaction.instructions, ...(transaction.innerInstructions ?? []).flatMap((group) => group.instructions)];
+  for (const entry of recorded) {
+    if (keyAt(entry.programIdIndex) !== TOKEN_PROGRAM_ADDRESS) continue;
+    const instruction = {
+      programAddress: TOKEN_PROGRAM_ADDRESS,
+      accounts: entry.accounts.map((index) => ({ address: keyAt(index), role: AccountRole.READONLY })),
+      data: base58.encode(entry.data),
+    };
+    const type = identifyTokenInstruction(instruction);
+    if (type === TokenInstruction.Transfer || type === TokenInstruction.TransferChecked) {
+      const parsed = type === TokenInstruction.Transfer ? parseTransferInstruction(instruction) : parseTransferCheckedInstruction(instruction);
+      add(parsed.accounts.source.address, -parsed.data.amount);
+      add(parsed.accounts.destination.address, parsed.data.amount);
+    } else if (UNSUMMED.has(type)) {
+      throw new Error(`Token instruction ${TokenInstruction[type]} changes a balance without a transfer`);
+    }
+  }
+  return changes;
+}
+
+/**
+ * Token balance changes in a confirmed transaction, by token account (spec §12.2). They are summed
+ * from the transaction's token transfer instructions, not read from its `preTokenBalances` and
+ * `postTokenBalances`: Surfpool truncates `preTokenBalances` to the length of `postTokenBalances`,
+ * so a transaction that closes a token account loses one pre balance (T9). A token account the
+ * balance metadata names but no transfer moved reads 0.
+ */
 export async function tokenBalanceChanges(rpc: Rpc<SolanaRpcApi>, signature: string): Promise<Map<Address, bigint>> {
   const transaction = await fetchConfirmed(rpc, signature);
   if (!transaction?.meta) throw new Error(`Transaction ${signature} not found at confirmed`);
-  const keys = accountKeysOf(transaction);
+  const accountKeys = accountKeysOf(transaction);
   const changes = new Map<Address, bigint>();
-  const add = (index: number, amount: bigint) => {
-    const key = keys[index]!;
-    changes.set(key, (changes.get(key) ?? 0n) + amount);
-  };
-  for (const balance of transaction.meta.preTokenBalances ?? []) add(balance.accountIndex, -BigInt(balance.uiTokenAmount.amount));
-  for (const balance of transaction.meta.postTokenBalances ?? []) add(balance.accountIndex, BigInt(balance.uiTokenAmount.amount));
+  for (const balance of [...(transaction.meta.preTokenBalances ?? []), ...(transaction.meta.postTokenBalances ?? [])]) {
+    changes.set(accountKeys[balance.accountIndex]!, 0n);
+  }
+  const transfers = tokenTransferChanges({
+    accountKeys,
+    instructions: transaction.transaction.message.instructions,
+    innerInstructions: transaction.meta.innerInstructions ?? [],
+  });
+  for (const [account, amount] of transfers) changes.set(account, amount);
   return changes;
 }
 
