@@ -230,6 +230,24 @@ importers:
         specifier: 1.6.1
         version: 1.6.1(typescript@7.0.2)
 
+  packages/x402:
+    dependencies:
+      '@lxfoundry/stint-program-client':
+        specifier: workspace:*
+        version: link:../program-client
+      '@solana-program/compute-budget':
+        specifier: 0.20.0
+        version: 0.20.0(@solana/kit@8.5.0(typescript@7.0.2))
+      '@solana-program/token':
+        specifier: 0.18.0
+        version: 0.18.0(@solana/kit@8.5.0(typescript@7.0.2))
+      '@solana/kit':
+        specifier: 8.5.0
+        version: 8.5.0(typescript@7.0.2)
+      '@x402/core':
+        specifier: 2.28.0
+        version: 2.28.0
+
 packages:
 
   '@codama/cli@1.6.3':
@@ -539,6 +557,11 @@ packages:
 
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
+
+  '@solana-program/compute-budget@0.20.0':
+    resolution: {integrity: sha512-7SrwpFVNX6R5sjmPnqHUohCwZ3167TsWtE1Htg5wVrnsSoKfS8o1JxH033S/mYE56jGLwusYgNAwJn+Md1JmTQ==}
+    peerDependencies:
+      '@solana/kit': ^8.5.0
 
   '@solana-program/system@0.14.1':
     resolution: {integrity: sha512-K6ZiIrAKoJAfcwfUdsoFvfSAxeRJaRrV7BPFTJvUVRS4m3zszN+nLcdaNMMe2F1/zTriZqC+xh+Kgw6ziGUqpQ==}
@@ -1131,6 +1154,9 @@ packages:
   '@vitest/spy@5.0.5':
     resolution: {integrity: sha512-lwJRExuH417257Q5wv9QYugN9IMJkoxcrKrYxGPQkBzl7wlNpTUxD/5yNX4ESKVUIShKPgkGchYPFMWOOk0wzw==}
 
+  '@x402/core@2.28.0':
+    resolution: {integrity: sha512-Da/7zKxCKqpBoB4Msc9tFgkAv7tJTD8nG+DSSm+QdXAyJS4PQsmgVSKe17rDJTtlu0pwNbLcOje6MyQ6kaDkig==}
+
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
     engines: {node: '>=12'}
@@ -1567,6 +1593,9 @@ packages:
       utf-8-validate:
         optional: true
 
+  zod@3.25.76:
+    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+
 snapshots:
 
   '@codama/cli@1.6.3':
@@ -1781,6 +1810,10 @@ snapshots:
     optional: true
 
   '@rolldown/pluginutils@1.0.1': {}
+
+  '@solana-program/compute-budget@0.20.0(@solana/kit@8.5.0(typescript@7.0.2))':
+    dependencies:
+      '@solana/kit': 8.5.0(typescript@7.0.2)
 
   '@solana-program/system@0.14.1(@solana/kit@8.5.0(typescript@7.0.2))':
     dependencies:
@@ -2392,6 +2425,10 @@ snapshots:
 
   '@vitest/spy@5.0.5': {}
 
+  '@x402/core@2.28.0':
+    dependencies:
+      zod: 3.25.76
+
   assertion-error@2.0.1: {}
 
   call-bind-apply-helpers@1.0.2:
@@ -2768,3 +2805,5 @@ snapshots:
   why-is-node-running@3.2.1: {}
 
   ws@8.22.0: {}
+
+  zod@3.25.76: {}
