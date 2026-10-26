@@ -7,5 +7,11 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run"
+  },
+  "dependencies": {
+    "@lxfoundry/stint-client": "workspace:*",
+    "@lxfoundry/stint-program-client": "workspace:*",
+    "@lxfoundry/stint-x402": "workspace:*",
+    "@solana/kit": "8.5.0"
   }
 }

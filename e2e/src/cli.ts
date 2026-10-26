@@ -14,7 +14,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 try {
-  const outcomes = await runScenarios(catalogue, stack.target, () => ({ target: stack.target }));
+  const outcomes = await runScenarios(catalogue, stack.target, () => stack.context());
   writeReport(REPORT_DIR, outcomes);
   process.stdout.write(renderReport(outcomes));
   process.exitCode = exitCodeFor(outcomes);

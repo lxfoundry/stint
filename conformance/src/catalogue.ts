@@ -1,3 +1,4 @@
+import { openConnectCloseEarly } from "./scenarios/01-open-connect-close.js";
 import type { Capability, IsolationGroup, Scenario } from "./types.js";
 
 /** The scenarios of spec section 12.7. Each is pending until a stage builds it. */
@@ -10,8 +11,18 @@ function pending(
   return { id, title, needs, group, status: "pending" };
 }
 
+function required(
+  id: number,
+  title: string,
+  run: Scenario["run"],
+  needs: readonly Capability[] = [],
+  group: IsolationGroup = "shared",
+): Scenario {
+  return { id, title, needs, group, status: "required", run };
+}
+
 export const catalogue: readonly Scenario[] = [
-  pending(1, "Open, connect, close early"),
+  required(1, "Open, connect, close early", openConnectCloseEarly),
   pending(2, "Close before minSeconds"),
   pending(3, "Expiry"),
   pending(4, "Top-up before and after expiry"),

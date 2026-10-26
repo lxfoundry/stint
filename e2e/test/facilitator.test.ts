@@ -1,3 +1,4 @@
+import type { Buyer } from "@lxfoundry/stint-conformance";
 import { fetchMaybeSession, fetchSession } from "@lxfoundry/stint-program-client";
 import {
   SOLANA_DEVNET,
@@ -16,7 +17,7 @@ import {
   type SupportedResponse,
 } from "@lxfoundry/stint-x402";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { newBuyer, type Buyer } from "../src/fixtures/buyers.js";
+import { newBuyer } from "../src/fixtures/buyers.js";
 import { startLocalStack, type LocalStack } from "../src/targets/local.js";
 
 describe("facilitator on the local network, through Kora", () => {

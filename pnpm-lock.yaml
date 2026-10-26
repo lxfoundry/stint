@@ -197,16 +197,35 @@ importers:
         specifier: 8.5.0
         version: 8.5.0(typescript@7.0.2)
 
-  conformance: {}
+  conformance:
+    dependencies:
+      '@lxfoundry/stint-client':
+        specifier: workspace:*
+        version: link:../packages/client
+      '@lxfoundry/stint-program-client':
+        specifier: workspace:*
+        version: link:../packages/program-client
+      '@lxfoundry/stint-x402':
+        specifier: workspace:*
+        version: link:../packages/x402
+      '@solana/kit':
+        specifier: 8.5.0
+        version: 8.5.0(typescript@7.0.2)
 
   e2e:
     dependencies:
       '@lxfoundry/stint-conformance':
         specifier: workspace:*
         version: link:../conformance
+      '@lxfoundry/stint-example-stream':
+        specifier: workspace:*
+        version: link:../examples/solana-stream
       '@lxfoundry/stint-facilitator':
         specifier: workspace:*
         version: link:../apps/facilitator
+      '@lxfoundry/stint-gate':
+        specifier: workspace:*
+        version: link:../packages/gate
       '@lxfoundry/stint-program-client':
         specifier: workspace:*
         version: link:../packages/program-client

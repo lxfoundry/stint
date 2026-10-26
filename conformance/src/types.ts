@@ -1,3 +1,5 @@
+import type { Address, KeyPairSigner, Rpc, SolanaRpcApi } from "@solana/kit";
+
 /**
  * What a target offers a scenario (spec section 12.2). `facilitatorApi` is the ability to call
  * the facilitator's `/verify` with an API key: always on `local` and `devnet`, and on `external`
@@ -17,9 +19,20 @@ export interface Target {
   readonly capabilities: ReadonlySet<Capability>;
 }
 
-/** What a scenario receives when it runs. Later stages add the services it drives. */
+/** A fresh buyer key: USDC in its associated token account, and no SOL (spec §9.1, §12.2). */
+export interface Buyer {
+  readonly signer: KeyPairSigner;
+  readonly usdcAccount: Address;
+}
+
+/** What a scenario receives when it runs. */
 export interface ScenarioContext {
   readonly target: Target;
+  /** The gate's URL, which the session client opens sessions on. */
+  readonly gateUrl: string;
+  /** The network's RPC, for reading what the scenario's own transactions did (spec §12.2). */
+  readonly rpc: Rpc<SolanaRpcApi>;
+  newBuyer(usdc: bigint): Promise<Buyer>;
 }
 
 export interface Scenario {

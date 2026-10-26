@@ -1,10 +1,18 @@
+import { createSolanaRpc } from "@solana/kit";
 import { describe, expect, it } from "vitest";
 import { describeError, exitCodeFor, runScenarios } from "../src/runner.js";
 import type { Scenario, ScenarioContext, Target } from "../src/types.js";
 
 const local: Target = { name: "local", capabilities: new Set(["chain", "stack", "facilitatorApi"]) };
 const external: Target = { name: "external", capabilities: new Set() };
-const context = (target: Target) => () => ({ target });
+const context = (target: Target) => (): ScenarioContext => ({
+  target,
+  gateUrl: "http://127.0.0.1:9",
+  rpc: createSolanaRpc("http://127.0.0.1:9"),
+  newBuyer: async () => {
+    throw new Error("no buyers in unit tests");
+  },
+});
 
 function scenario(overrides: Partial<Scenario>): Scenario {
   return { id: 1, title: "A scenario", needs: [], group: "shared", status: "pending", ...overrides };
