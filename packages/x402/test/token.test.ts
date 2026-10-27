@@ -62,7 +62,7 @@ describe("session tokens (spec §7.2)", () => {
     expect(await verifySessionToken(tampered, expected({ purpose: "close" }))).toEqual({ ok: false, reason: "bad signature" });
   });
 
-  it.each(["none", "HS256", "ES256", "ed25519", ""])("refuses the algorithm %j, even with a valid signature", async (alg) => {
+  it.each(["none", "HS256", "ES256", "ed25519", ""])("refuses the algorithm %j", async (alg) => {
     const token = await createSessionToken(authority, { session, audience, purpose: "connect" }, { nowMs: now });
     const [, payload, signature] = segments(token);
     expect(await verifySessionToken(`${encode({ alg, typ: "JWT" })}.${payload}.${signature}`, expected())).toEqual({

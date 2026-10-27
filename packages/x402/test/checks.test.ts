@@ -196,10 +196,21 @@ describe("open transactions (spec §5.3, §5.4)", () => {
     expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason: "invalid_terms" });
   });
 
-  it("refuses a mint other than the asset", async () => {
-    const wire = await withAccount("open", 3, (await generateKeyPairSigner()).address);
-    const check = await checkOpenTransaction(inspectTransaction(wire)!, offer, keys());
-    expect(check.ok).toBe(false);
+  it("refuses a mint other than the asset, even when the vault creation follows it", async () => {
+    const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
+    const otherMint = (await generateKeyPairSigner()).address;
+    const otherVault = await associatedTokenAddress(built.session, otherMint);
+    const at = (ix: Instruction, replacements: Record<number, Address>): Instruction => ({
+      ...ix,
+      accounts: ix.accounts!.map((meta, index) => (replacements[index] ? { ...meta, address: replacements[index]! } : meta)),
+    });
+    // The vault creation and the open agree on the other mint, so only the comparison with the asset can refuse them.
+    const wire = await rebuild(built.transaction, buyer, ([create, transfer, open]) => [
+      at(create!, { 1: otherVault, 3: otherMint }),
+      transfer!,
+      at(open!, { 3: otherMint, 4: otherVault }),
+    ]);
+    expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason: "invalid_terms" });
   });
 
   it("refuses an open whose offer is for another program", async () => {

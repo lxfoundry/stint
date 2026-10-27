@@ -77,6 +77,7 @@ describe("verifyPayment (spec §5.4)", () => {
   let buyer: KeyPairSigner;
   let feePayer: Address;
   let rentPayer: KeyPairSigner;
+  let authorizer: KeyPairSigner;
   let offer: ElapsedRequirements;
   let node: Node;
   let ctx: FacilitatorContext;
@@ -92,7 +93,8 @@ describe("verifyPayment (spec §5.4)", () => {
     rentPayer = await generateKeyPairSigner();
     feePayer = (await generateKeyPairSigner()).address;
     const seller = (await generateKeyPairSigner()).address;
-    const receiverAuthorizer = (await generateKeyPairSigner()).address;
+    authorizer = await generateKeyPairSigner();
+    const receiverAuthorizer = authorizer.address;
     offer = buildOpenOffer({
       network: NETWORK,
       asset: MINT,
@@ -152,6 +154,7 @@ describe("verifyPayment (spec §5.4)", () => {
       await resetNode();
       const built = await openPayload();
       const other = (await generateKeyPairSigner()).address;
+      // Each variant is echoed as `accepted`, so only the comparison with the facilitator's own keys can refuse it.
       const variants: ElapsedRequirements[] = [
         { ...offer, network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" },
         { ...offer, extra: { ...offer.extra, programId: other } },
@@ -159,7 +162,9 @@ describe("verifyPayment (spec §5.4)", () => {
         { ...offer, extra: { ...offer.extra, rentPayer: other } },
       ];
       for (const requirements of variants) {
-        expect(await verifyPayment(ctx, built, requirements)).toMatchObject({ ok: false, reason: "invalid_payment_requirements" });
+        const verified = await verifyPayment(ctx, { ...built, accepted: requirements }, requirements);
+        expect(verified).toMatchObject({ ok: false, reason: "invalid_payment_requirements" });
+        expect(verified.ok ? "" : verified.message).toContain("another network, program or facilitator");
       }
       expect(node.simulated).toBe(0);
     });
@@ -167,14 +172,11 @@ describe("verifyPayment (spec §5.4)", () => {
     it("refuses requirements with a malformed address as invalid, without throwing", async () => {
       await resetNode();
       const built = await openPayload();
-      expect(await verifyPayment(ctx, built, { ...offer, asset: "0OIl" })).toMatchObject({
-        ok: false,
-        reason: "invalid_payment_requirements",
-      });
-      expect(await verifyPayment(ctx, built, { ...offer, extra: { ...offer.extra, session: "0OIl" } })).toMatchObject({
-        ok: false,
-        reason: "invalid_payment_requirements",
-      });
+      // Echoed as `accepted` too, so that the read of the requirements is the only thing that can refuse them.
+      for (const requirements of [{ ...offer, asset: "0OIl" }, { ...offer, extra: { ...offer.extra, session: "0OIl" } }]) {
+        const verified = await verifyPayment(ctx, { ...built, accepted: requirements }, requirements);
+        expect(verified).toMatchObject({ ok: false, reason: "invalid_payment_requirements", message: "not elapsed requirements" });
+      }
     });
 
     it("refuses an accepted entry that differs from the issued requirements", async () => {
@@ -247,7 +249,7 @@ describe("verifyPayment (spec §5.4)", () => {
           seed: 1n,
           mint: MINT,
           receiver: offer.payTo as Address,
-          receiverAuthorizer: offer.extra.receiverAuthorizer as Address,
+          receiverAuthorizer: authorizer.address,
           refundOwner: buyer.address,
           rentPayer: rentPayer.address,
           rate: overrides.rate ?? 1_000n,
@@ -286,7 +288,7 @@ describe("verifyPayment (spec §5.4)", () => {
         closeOnOutage: true,
         session,
       });
-      closer = await generateKeyPairSigner();
+      closer = authorizer;
     });
 
     it("refuses a session that does not exist", async () => {
@@ -301,11 +303,24 @@ describe("verifyPayment (spec §5.4)", () => {
       expect(node.simulated).toBe(0);
     });
 
-    it("refuses a close that the receiver authorizer has not signed", async () => {
+    it("accepts a close signed by the session's receiver authorizer, and simulates it", async () => {
       await resetNode();
       node.accounts.set(session, storedSession());
-      // The closer here is not the session's receiver authorizer.
-      expect(await verifyPayment(ctx, await closePayload(), closeRequirements)).toMatchObject({ ok: false, reason: "invalid_payload" });
+      expect(await verifyPayment(ctx, await closePayload(), closeRequirements)).toMatchObject({
+        ok: true,
+        type: "close",
+        payer: buyer.address,
+        session,
+      });
+      expect(node.simulated).toBe(1);
+    });
+
+    it("refuses a close that names a closer other than the session's receiver authorizer", async () => {
+      await resetNode();
+      node.accounts.set(session, storedSession());
+      const verified = await verifyPayment(ctx, await closePayload(await generateKeyPairSigner()), closeRequirements);
+      expect(verified).toMatchObject({ ok: false, reason: "invalid_payload", message: "the closer is not the expected one" });
+      expect(node.simulated).toBe(0);
     });
   });
 });
