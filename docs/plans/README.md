@@ -26,14 +26,14 @@ the earlier stages confirmed (spec §14) and the versions they pinned, instead o
 |---|---|---|---|---|
 | 0 | Toolchain, workspace, program skeleton, the local harness (embedded Surfpool with its fixtures, Kora), the scenario catalogue, continuous integration | None: a harness self-test | 6 | [00-toolchain-and-harness.md](00-toolchain-and-harness.md) |
 | 1 | Walking skeleton: `open` and a `Standard` close in the program; the scheme, facilitator, gate, client and example resource in their minimal form, all through Kora | 1 | 1, 2, 4, 5, 7 | [01-walking-skeleton.md](01-walking-skeleton.md) |
-| 2 | The example agent's task, scripted; the MCP server; the first devnet deployment and a `devnet` run of scenarios 1 and 22 | 22 | — | After stage 1 |
+| 2 | The redirect of a residual owed to a closed refund account; the session status; the example agent's task, scripted; the MCP server; the first devnet deployment, the `devnet` target and a run of scenarios 1 and 22 on it; the example agent | 22 | — | [02-agent-tools-and-devnet.md](02-agent-tools-and-devnet.md) |
 | 3 | Payment refusals and settlement records | 5, 6, 13, 14, 17, 18, 19, 32 | — | |
 | 4 | End of session: `claim`, `AtExpiry`, the gate's timers, the sweeper | 2, 3, 9, 16, 26 | — | |
 | 5 | Top-up | 4, 34 | — | |
 | 6 | Session tokens and adoption | 8, 20, 35 | — | |
 | 7 | Fallback closes: unilateral, sponsored, without the gate or the facilitator | 7, 15, 24, 25 | — | |
 | 8 | Closes that protect the buyer: outage and admin, `WaiveMinimum` | 10, 30 | — | |
-| 9 | Account edge cases: a closed refund or receiver account, frozen accounts | 21, 27, 28 | — | |
+| 9 | Account edge cases: `409 refund_account_closed`, a closed `receiver_token` recreated by a close, frozen accounts | 21, 27, 28 | — | |
 | 10 | Resilience: several gate instances, gate restarts, client restarts, lost settlement replies | 11, 23, 29, 33 | — | |
 | 11 | Allowance funding | 12 | 3 | |
 | 12 | Long horizon: moving the network's time forward | 31 | — | |
@@ -49,10 +49,11 @@ instruction gets its tests in the stage that adds it:
 | Stage | Instructions and paths added |
 |---|---|
 | 1 | `open`; `close` (`Standard`); `Opened` and `Closed` events; the account checks of §4.1 |
+| 2 | `close` (`Standard`): from `paid_until` on, a residual owed to a missing refund account goes to the receiver |
 | 4 | `claim`; `close` (`AtExpiry`); the complete maths of §4.2 with its property tests |
 | 5 | `top_up` |
 | 8 | `close` (`WaiveMinimum`) |
-| 9 | Zero transfers skipped; the residual redirected from a missing refund account; frozen accounts |
+| 9 | Zero transfers skipped; frozen accounts |
 
 The spec gives `claim` no off-chain caller. Stage 4 adds the instruction and its program-client
 function, and no automatic caller.
