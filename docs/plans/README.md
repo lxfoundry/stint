@@ -25,7 +25,7 @@ the earlier stages confirmed (spec §14) and the versions they pinned, instead o
 | Stage | Delivers | Scenarios made `required` | Spec §14 questions answered | Plan |
 |---|---|---|---|---|
 | 0 | Toolchain, workspace, program skeleton, the local harness (embedded Surfpool with its fixtures, Kora), the scenario catalogue, continuous integration | None: a harness self-test | 6 | [00-toolchain-and-harness.md](00-toolchain-and-harness.md) |
-| 1 | Walking skeleton: `open` and a `Standard` close in the program; the scheme, facilitator, gate, client and example resource in their minimal form, all through Kora | 1 | 1, 2, 4, 5, 7 | After stage 0 |
+| 1 | Walking skeleton: `open` and a `Standard` close in the program; the scheme, facilitator, gate, client and example resource in their minimal form, all through Kora | 1 | 1, 2, 4, 5, 7 | [01-walking-skeleton.md](01-walking-skeleton.md) |
 | 2 | The example agent's task, scripted; the MCP server; the first devnet deployment and a `devnet` run of scenarios 1 and 22 | 22 | — | After stage 1 |
 | 3 | Payment refusals and settlement records | 5, 6, 13, 14, 17, 18, 19, 32 | — | |
 | 4 | End of session: `claim`, `AtExpiry`, the gate's timers, the sweeper | 2, 3, 9, 16, 26 | — | |

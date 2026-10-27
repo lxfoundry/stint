@@ -184,9 +184,9 @@ For readers who know EVM chains, the main differences:
 ### 2.3 Tooling facts the design relies on
 
 The facilitator (section 6) and the end-to-end harness (section 12) depend on how their tools
-behave. These facts were read in each tool's source or documentation, at the version named. They
-are re-checked whenever the implementation plan pins another version, and the sections that depend
-on them cite them as (T1) to (T8).
+behave. These facts were read in each tool's source or documentation, or observed at run time, at
+the version named. They are re-checked whenever the implementation plan pins another version, and
+the sections that depend on them cite them as (T1) to (T9).
 
 - **T1. On Windows, Solana programs are built inside WSL.** The Solana and Anchor installation
   guides require it, and the official installer supports macOS, Linux and WSL. *Used in 3.5.*
@@ -214,6 +214,9 @@ on them cite them as (T1) to (T8).
   enabled = true` (off by default; present in v2.2.0-beta.8, absent from v2.0.5), Kora appends an
   instruction that checks the fee payer's balance to a transaction it signs without sending.
   *Used in 6.2.*
+- **T9. Surfpool truncates a transaction's `preTokenBalances`** (v1.6.1). It keeps the lowest
+  account indices, up to the length of `postTokenBalances`, so a transaction that closes a token
+  account loses one pre balance. Inner instructions are reported completely. *Used in 12.2, 12.5.*
 
 ## 3. Architecture
 
@@ -756,6 +759,8 @@ Servers MUST derive the payer from the signed transaction, not from the response
 
 The gate takes `paid` and `refunded` from the `Closed` event in the confirmed transaction:
 `paid` is `claimed + owed + redirected`, and `refunded` is `refunded`.
+If the event cannot be read after the retries, the close is still a success: the gate ends the
+session and answers with the transaction alone, and the client reports a close without amounts.
 
 **Payment flow.** `elapsed` declares `escrow`: open is the first settlement (the deposit), close is
 the second (the final charge and the refund). Unlike a single-request escrow flow, the second
@@ -910,7 +915,7 @@ sessions it opens with itself. The API key and the limits per key bound that.
 |---|---|---|
 | `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `202 {session, transaction}` while the settlement is pending; `400 invalid_duration` |
 | `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration` |
-| `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`; `202 {transaction}` while the settlement is pending (the client polls the status until `404`, for at most `closeWaitSeconds`: section 9.3); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
+| `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`, or `200 {transaction}` when the close is confirmed but its `Closed` event cannot be read; `202 {transaction}` while the settlement is pending (the client polls the status until `404`, for at most `closeWaitSeconds`: section 9.3); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
 | `GET /sessions/:id` | Status from the chain: `paidUntil`, deposited and a fresh blockhash. Earned so far and time left are estimates at the gate's session clock (section 7.3); the chain's clock decides the amounts (section 4.2) | `200`; `404` |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
 | `GET /.well-known/jwks.json` | The gate's assertion keys (section 7.7) | `200` |
@@ -1434,8 +1439,9 @@ its own traffic. There the harness caps how many scenarios run at once, with a c
 `local` has no cap.
 
 **Measuring money.** Shared scenarios pay the same receiver at the same time, so no scenario
-measures an account's balance over a period. It reads the token balance changes recorded in its own
-sessions' transactions.
+measures an account's balance over a period. It computes the changes from the token transfer
+instructions recorded in its own sessions' transactions, not from the transactions' balance
+metadata (T9).
 
 **Timing.**
 - Scenarios run in real time, on a network whose clock follows the wall clock (section 12.3), with
@@ -1513,6 +1519,7 @@ upgrade.
 | Account notifications carry the slot at which the subscription was made (T6) | The `slot` of the example stream's `account` messages (section 8) is not meaningful locally; no scenario asserts on it | The `devnet` target |
 | One node, no network latency, no other traffic | Expired blockhashes, retries and rate limits are rare | The `devnet` target |
 | The USDC mint's authorities are harness keys | Freeze scenarios run locally only: on `devnet`, the mint's freeze authority (S10) is a key the harness does not hold | — |
+| A transaction's `preTokenBalances` is truncated to the length of its `postTokenBalances` (T9) | Balance metadata is not used: token balance changes are computed from the transfer instructions | The `devnet` target |
 | The feature gate `disable_sbpf_v0_v1_v2_deployment` is disabled, so programs built for older SBPF versions can be deployed | The Subscriptions program copy deploys and runs locally (section 14, question 6), but a program devnet would refuse to deploy could still deploy locally | The `devnet` target |
 
 ### 12.6 Conformance suite

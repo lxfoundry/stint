@@ -2,7 +2,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ScenarioOutcome } from "./types.js";
 
-const escapeCell = (text: string) => text.replaceAll("|", "\\|");
+const oneLine = (text: string) => text.replaceAll(/\s*\r?\n\s*/g, " ");
+const escapeCell = (text: string) => oneLine(text).replaceAll("|", "\\|");
 const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
 
 /** The run report of spec section 12.2: one row per scenario, then the counts. */
@@ -25,7 +26,7 @@ export function renderReport(outcomes: readonly ScenarioOutcome[]): string {
   const flagged = count((o) => o.passesWhilePending);
   const failures = outcomes
     .filter((o) => o.error !== undefined)
-    .map((o) => `- ${o.id}. ${o.title}: ${o.error}`);
+    .map((o) => `- ${o.id}. ${escapeCell(o.title)}: ${escapeCell(o.error ?? "")}`);
 
   return [
     "| Scenario | Target | Status | Result | Duration |",

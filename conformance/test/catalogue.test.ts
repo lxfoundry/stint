@@ -15,10 +15,15 @@ describe("scenario catalogue", () => {
     );
   });
 
-  it("starts every scenario as pending, with no implementation", () => {
+  it("has scenario 1 required with its implementation, and every other scenario pending without one", () => {
     for (const scenario of catalogue) {
-      expect(scenario.status).toBe("pending");
-      expect(scenario.run).toBeUndefined();
+      if (scenario.id === 1) {
+        expect(scenario.status).toBe("required");
+        expect(scenario.run).toBeDefined();
+      } else {
+        expect(scenario.status).toBe("pending");
+        expect(scenario.run).toBeUndefined();
+      }
     }
   });
 

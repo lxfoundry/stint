@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getTransferSolInstruction } from "@solana-program/system";
 import { fetchToken, getTransferCheckedInstruction } from "@solana-program/token";
+import { createKoraClient } from "@lxfoundry/stint-facilitator";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import {
   appendTransactionMessageInstructions,
@@ -22,7 +23,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fundSol, newHarnessKey, type HarnessKey } from "../src/fixtures/keys.js";
 import { SUBSCRIPTIONS_PROGRAM_ADDRESS, deployStintProgram } from "../src/fixtures/programs.js";
 import { USDC_DECIMALS, USDC_DEVNET_MINT, createUsdcAccount, mintUsdc, writeUsdcMint } from "../src/fixtures/usdc.js";
-import { createKoraClient } from "../src/kora/client.js";
 import { KORA_ALLOWED_PROGRAMS, renderKoraConfig, renderSignersConfig } from "../src/kora/config.js";
 import { startKora, type KoraProcess } from "../src/kora/process.js";
 import { startLocalNetwork, waitForNewSlot, type LocalNetwork } from "../src/network/surfnet.js";
@@ -151,6 +151,37 @@ describe("Kora on the local network", () => {
     const partiallySigned = await partiallySignTransactionMessageWithSigners(message);
     const client = createKoraClient(kora.url, kora.apiKey);
     await expect(client.signTransaction(getBase64EncodedWireTransaction(partiallySigned))).rejects.toThrow(/Fee payer cannot be used for 'System Transfer'/);
+  });
+
+  it("refuses a transaction in which its fee payer is an SPL transfer authority", async () => {
+    const recipient = await newHarnessKey();
+    const source = await mintUsdc(network.rpc, mintAuthority.signer, feePayer.signer.address, 1_000_000n);
+    const destination = await createUsdcAccount(network.rpc, mintAuthority.signer, recipient.signer.address);
+    const { value: latestBlockhash } = await network.rpc.getLatestBlockhash({ commitment: "confirmed" }).send();
+    const message = pipe(
+      createTransactionMessage({ version: 0 }),
+      (m) => setTransactionMessageFeePayer(feePayer.signer.address, m),
+      (m) => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, m),
+      (m) =>
+        appendTransactionMessageInstructions(
+          [
+            getTransferCheckedInstruction({
+              source,
+              mint: USDC_DEVNET_MINT,
+              destination,
+              authority: createNoopSigner(feePayer.signer.address),
+              amount: 1n,
+              decimals: USDC_DECIMALS,
+            }),
+          ],
+          m,
+        ),
+    );
+    const partiallySigned = await partiallySignTransactionMessageWithSigners(message);
+    const client = createKoraClient(kora.url, kora.apiKey);
+    await expect(client.signTransaction(getBase64EncodedWireTransaction(partiallySigned))).rejects.toThrow(
+      /Fee payer cannot be used for 'SPL Token Transfer'/,
+    );
   });
 
   it("refuses a request with a wrong API key", async () => {

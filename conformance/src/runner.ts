@@ -10,6 +10,12 @@ export async function runScenarios(
   makeContext: (scenario: Scenario) => ScenarioContext | Promise<ScenarioContext>,
   now: () => number = () => performance.now(),
 ): Promise<ScenarioOutcome[]> {
+  const ids = new Set<number>();
+  for (const scenario of scenarios) {
+    if (ids.has(scenario.id)) throw new Error(`Duplicate scenario id ${scenario.id}`);
+    ids.add(scenario.id);
+  }
+
   const outcomes: ScenarioOutcome[] = [];
   for (const scenario of [...scenarios].sort((a, b) => a.id - b.id)) {
     const base = { id: scenario.id, title: scenario.title, target: target.name, status: scenario.status };
@@ -46,11 +52,25 @@ export async function runScenarios(
         result: scenario.status === "required" ? "fail" : "pending",
         durationMs: now() - started,
         passesWhilePending: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: describeError(error),
       });
     }
   }
   return outcomes;
+}
+
+/** One line describing anything thrown: an error's message with its causes, or the value itself. */
+export function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = error.cause === undefined ? "" : ` (cause: ${describeError(error.cause)})`;
+    return `${error.message || error.name}${cause}`;
+  }
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error, (_, value) => (typeof value === "bigint" ? value.toString() : value)) ?? String(error);
+  } catch {
+    return String(error);
+  }
 }
 
 /** A run fails when any required scenario fails (spec section 12.2, "Status"). */

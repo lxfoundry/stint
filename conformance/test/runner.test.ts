@@ -1,10 +1,18 @@
+import { createSolanaRpc } from "@solana/kit";
 import { describe, expect, it } from "vitest";
-import { exitCodeFor, runScenarios } from "../src/runner.js";
-import type { Scenario, Target } from "../src/types.js";
+import { describeError, exitCodeFor, runScenarios } from "../src/runner.js";
+import type { Scenario, ScenarioContext, Target } from "../src/types.js";
 
 const local: Target = { name: "local", capabilities: new Set(["chain", "stack", "facilitatorApi"]) };
 const external: Target = { name: "external", capabilities: new Set() };
-const context = (target: Target) => () => ({ target });
+const context = (target: Target) => (): ScenarioContext => ({
+  target,
+  gateUrl: "http://127.0.0.1:9",
+  rpc: createSolanaRpc("http://127.0.0.1:9"),
+  newBuyer: async () => {
+    throw new Error("no buyers in unit tests");
+  },
+});
 
 function scenario(overrides: Partial<Scenario>): Scenario {
   return { id: 1, title: "A scenario", needs: [], group: "shared", status: "pending", ...overrides };
@@ -61,5 +69,47 @@ describe("exitCodeFor", () => {
     const pendingOnly = await runScenarios([scenario({ run: fails })], local, context(local));
     expect(exitCodeFor(failing)).toBe(1);
     expect(exitCodeFor(pendingOnly)).toBe(0);
+  });
+});
+
+describe("runScenarios, with implemented scenarios", () => {
+  it("refuses duplicate scenario ids before running any", async () => {
+    let ran = false;
+    const run = async () => {
+      ran = true;
+    };
+    await expect(runScenarios([scenario({ run }), scenario({ run })], local, context(local))).rejects.toThrow(
+      "Duplicate scenario id 1",
+    );
+    expect(ran).toBe(false);
+  });
+
+  it("measures each scenario's duration with the injected clock", async () => {
+    const ticks = [100, 350];
+    const [outcome] = await runScenarios([scenario({ run: passes })], local, context(local), () => ticks.shift()!);
+    expect(outcome?.durationMs).toBe(250);
+  });
+
+  it("passes each scenario the context made for it", async () => {
+    const seen: string[] = [];
+    const makeContext = (s: Scenario) => ({ ...context(local)(), target: s.id === 1 ? local : external });
+    const run = async (ctx: ScenarioContext) => {
+      seen.push(ctx.target.name);
+    };
+    await runScenarios([scenario({ id: 2, run }), scenario({ id: 1, run })], local, makeContext);
+    expect(seen).toEqual(["local", "external"]);
+  });
+});
+
+describe("describeError", () => {
+  it("gives an error's message and its causes", () => {
+    const error = new Error("settle failed", { cause: new Error("connection refused") });
+    expect(describeError(error)).toBe("settle failed (cause: connection refused)");
+  });
+
+  it("describes thrown values that are not errors", () => {
+    expect(describeError("plain")).toBe("plain");
+    expect(describeError({ code: 7, amount: 5n })).toBe('{"code":7,"amount":"5"}');
+    expect(describeError(undefined)).toBe("undefined");
   });
 });

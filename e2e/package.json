@@ -13,7 +13,11 @@
   },
   "dependencies": {
     "@lxfoundry/stint-conformance": "workspace:*",
+    "@lxfoundry/stint-example-stream": "workspace:*",
+    "@lxfoundry/stint-facilitator": "workspace:*",
+    "@lxfoundry/stint-gate": "workspace:*",
     "@lxfoundry/stint-program-client": "workspace:*",
+    "@lxfoundry/stint-x402": "workspace:*",
     "@solana-program/system": "0.16.0",
     "@solana-program/token": "0.18.0",
     "@solana/kit": "8.5.0",
