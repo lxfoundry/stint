@@ -159,6 +159,92 @@ describe("open transactions (spec §5.3, §5.4)", () => {
     expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason: "unexpected_instruction" });
   });
 
+  /** The built open with one account of one instruction replaced; `open` is [create, transfer, open]. */
+  async function withAccount(which: "create" | "transfer" | "open", index: number, replacement: Address): Promise<string> {
+    const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
+    return rebuild(built.transaction, buyer, (ixs) =>
+      ixs.map((ix, i) =>
+        ["create", "transfer", "open"][i] !== which
+          ? ix
+          : { ...ix, accounts: ix.accounts!.map((meta, at) => (at === index ? { ...meta, address: replacement } : meta)) },
+      ),
+    );
+  }
+
+  // TransferChecked accounts: source 0, mint 1, destination 2, authority 3.
+  // `open` accounts: authority 0, rent payer 1, session 2, mint 3, vault 4, receiver 5, receiver authorizer 6, refund owner 7.
+  it.each([
+    ["a funding source that is not the refund owner's associated token account", "transfer", 0],
+    ["a funding mint other than the asset", "transfer", 1],
+    ["a funding destination that is not the vault", "transfer", 2],
+    ["a receiver other than the offer's", "open", 5],
+    ["a receiver authorizer other than the offer's", "open", 6],
+    ["a refund owner whose account is not the funding source", "open", 7],
+  ] as const)("refuses %s", async (_, which, index) => {
+    const other = (await generateKeyPairSigner()).address;
+    const wire = await withAccount(which, index, other);
+    expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason: "invalid_terms" });
+  });
+
+  it("refuses a session that is not the one derived from the authority and seed", async () => {
+    const wire = await withAccount("open", 2, (await generateKeyPairSigner()).address);
+    expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason: "invalid_terms" });
+  });
+
+  it("refuses a vault that is not the session's associated token account for the asset", async () => {
+    const wire = await withAccount("open", 4, (await generateKeyPairSigner()).address);
+    expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason: "invalid_terms" });
+  });
+
+  it("refuses a mint other than the asset", async () => {
+    const wire = await withAccount("open", 3, (await generateKeyPairSigner()).address);
+    const check = await checkOpenTransaction(inspectTransaction(wire)!, offer, keys());
+    expect(check.ok).toBe(false);
+  });
+
+  it("refuses an open whose offer is for another program", async () => {
+    const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
+    const other = { ...offer, extra: { ...offer.extra, programId: feePayer } };
+    expect(await checkOpenTransaction(inspectTransaction(built.transaction)!, other, keys())).toMatchObject({
+      ok: false,
+      reason: "invalid_payment_requirements",
+    });
+  });
+
+  it("accepts a funding transfer authorised by another key, as long as that key has signed", async () => {
+    const funder = await generateKeyPairSigner();
+    const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
+    const wire = await rebuild(built.transaction, buyer, ([create, transfer, open]) => [
+      create!,
+      {
+        ...transfer!,
+        accounts: transfer!.accounts!.map((meta, at) =>
+          at === 3 ? { address: funder.address, role: AccountRole.READONLY_SIGNER, signer: funder } : meta,
+        ),
+      } as Instruction,
+      open!,
+    ]);
+    const tx = inspectTransaction(wire)!;
+    expect(tx.signed).toEqual(new Set([buyer.address, funder.address]));
+    expect(await checkOpenTransaction(tx, offer, keys())).toMatchObject({ ok: true });
+  });
+
+  it("refuses a funding authority that has not signed", async () => {
+    const funder = await generateKeyPairSigner();
+    const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
+    const wire = await rebuild(built.transaction, buyer, ([create, transfer, open]) => [
+      create!,
+      {
+        ...transfer!,
+        accounts: transfer!.accounts!.map((meta, at) =>
+          at === 3 ? { address: funder.address, role: AccountRole.READONLY_SIGNER, signer: createNoopSigner(funder.address) } : meta,
+        ),
+      } as Instruction,
+      open!,
+    ]);
+    expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason: "invalid_payload" });
+  });
+
   it("returns undefined for bytes that are not a version 0 transaction", () => {
     expect(inspectTransaction("AQ==")).toBeUndefined();
   });
