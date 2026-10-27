@@ -274,6 +274,14 @@ describe("gate", () => {
     viaQuery.socket!.close();
   });
 
+  it("closes a connection whose message is larger than the limit with 1009", async () => {
+    const { session } = await open();
+    const { socket } = await connect(session, await token(session, "connect"));
+    const closed = new Promise<number>((resolve) => socket!.once("close", (code) => resolve(code)));
+    socket!.send("x".repeat(64 * 1024 + 1));
+    expect(await closed).toBe(1009);
+  });
+
   it("refuses connections before the upgrade: 401 without, with a wrong or a replayed token; 404 unknown", async () => {
     const { session } = await open();
     expect((await connect(session)).status).toBe(401);

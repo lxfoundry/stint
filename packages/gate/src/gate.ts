@@ -99,7 +99,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   const menu = config.durations ?? [config.terms.minSeconds];
   const marginMs = (config.marginSeconds ?? 2) * 1000;
   const readRetry = config.readRetry ?? { attempts: 5, delayMs: 200 };
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: config.maxMessageBytes ?? 64 * 1024 });
   const sessions = new Map<Address, Tracked<U>>();
   /** Sessions being provisioned, so a retried open waits for the first instead of provisioning again. */
   const provisioning = new Map<Address, Promise<Tracked<U>>>();

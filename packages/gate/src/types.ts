@@ -53,5 +53,7 @@ export interface GateConfig<U = unknown> {
    * re-read while the node returns nothing yet. Default 5 reads, 200 ms apart.
    */
   readonly readRetry?: RetryOptions;
+  /** The largest WebSocket message a buyer may send; a bigger one closes the connection with 1009. Default 65536. */
+  readonly maxMessageBytes?: number;
   readonly log?: (entry: Record<string, unknown>) => void;
 }
