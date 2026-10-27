@@ -177,6 +177,7 @@ describe("verifyPayment (spec §5.4)", () => {
         const verified = await verifyPayment(ctx, { ...built, accepted: requirements }, requirements);
         expect(verified).toMatchObject({ ok: false, reason: "invalid_payment_requirements", message: "not elapsed requirements" });
       }
+      expect(node.simulated).toBe(0);
     });
 
     it("refuses an accepted entry that differs from the issued requirements", async () => {

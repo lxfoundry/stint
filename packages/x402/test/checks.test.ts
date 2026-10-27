@@ -204,7 +204,7 @@ describe("open transactions (spec §5.3, §5.4)", () => {
       ...ix,
       accounts: ix.accounts!.map((meta, index) => (replacements[index] ? { ...meta, address: replacements[index]! } : meta)),
     });
-    // The vault creation and the open agree on the other mint, so only the comparison with the asset can refuse them.
+    // The vault creation and the open agree on the other mint, so the position check passes and the terms checks refuse it.
     const wire = await rebuild(built.transaction, buyer, ([create, transfer, open]) => [
       at(create!, { 1: otherVault, 3: otherMint }),
       transfer!,
