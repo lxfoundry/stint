@@ -23,7 +23,7 @@ export interface InspectedTransaction {
   readonly signed: ReadonlySet<Address>;
   readonly blockhash: string;
   readonly instructions: readonly Instruction[];
-  /** SHA-256 of the message bytes, hex: the key a later stage's settlement records use (spec §5.5). */
+  /** SHA-256 of the message bytes, hex: the key settlement records are keyed by (spec §5.5). */
   readonly messageHash: string;
 }
 

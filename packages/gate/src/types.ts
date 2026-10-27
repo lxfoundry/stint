@@ -33,9 +33,9 @@ export interface GateConfig<U = unknown> {
   readonly terms: Terms;
   /** Durations offered when a request names none (spec §5.2). Default: `[terms.minSeconds]`. */
   readonly durations?: readonly number[];
-  /** Default 60 (spec §7.5). Announced in offers; enforced by a later stage. */
+  /** Default 60 (spec §7.5). Announced in offers; not yet enforced by the gate. */
   readonly idleCloseSeconds?: number;
-  /** Default true (spec §7.5). Announced in offers; enforced by a later stage. */
+  /** Default true (spec §7.5). Announced in offers; not yet enforced by the gate. */
   readonly closeOnOutage?: boolean;
   /** Default 60. At most the time an offer's blockhash has left (spec §5.1). */
   readonly maxTimeoutSeconds?: number;

@@ -24,7 +24,7 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
 export const DEFAULT_READ_RETRY: RetryOptions = { attempts: 5, delayMs: 400 };
 
 /**
- * Spec §5.5, without settlement records (a later stage adds them): re-verify, the rent payer signs
+ * Spec §5.5, without settlement records (not yet kept): re-verify, the rent payer signs
  * an open, Kora signs as fee payer, then submit and wait for `confirmed`.
  */
 export async function settlePayment(
