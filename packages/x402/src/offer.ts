@@ -1,4 +1,4 @@
-import { address, type Address } from "@solana/kit";
+import { address, isAddress, type Address } from "@solana/kit";
 import { SCHEME } from "./constants.js";
 import { isRecord } from "./guards.js";
 import type { ElapsedExtra, ElapsedRequirements, FacilitatorExtra, Network, SellerTerms, Terms } from "./types.js";
@@ -75,6 +75,7 @@ export function checkOpenDuration(terms: Terms, seconds: number): DurationCheck 
 const isU64String = (value: unknown) => typeof value === "string" && /^(0|[1-9][0-9]{0,19})$/.test(value);
 const isU32 = (value: unknown) => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffff_ffff;
 const isText = (value: unknown) => typeof value === "string" && value.length > 0;
+const isAddr = (value: unknown) => typeof value === "string" && isAddress(value);
 
 /** Returns the value as an `elapsed` entry if it has every field of spec §5.1 with its encoding. */
 export function readElapsedRequirements(value: unknown): ElapsedRequirements | undefined {
@@ -83,20 +84,20 @@ export function readElapsedRequirements(value: unknown): ElapsedRequirements | u
   const valid =
     isText(value.network) &&
     isU64String(value.amount) &&
-    isText(value.asset) &&
-    isText(value.payTo) &&
+    isAddr(value.asset) &&
+    isAddr(value.payTo) &&
     Number.isInteger(value.maxTimeoutSeconds) &&
     extra.paymentFlow === "escrow" &&
     (extra.action === "open" || extra.action === "topUp" || extra.action === "close") &&
-    (extra.session === undefined || isText(extra.session)) &&
-    isText(extra.programId) &&
+    (extra.session === undefined || isAddr(extra.session)) &&
+    isAddr(extra.programId) &&
     isU64String(extra.rate) &&
     isU32(extra.seconds) &&
     isU32(extra.minSeconds) &&
     isU32(extra.maxSeconds) &&
-    isText(extra.receiverAuthorizer) &&
-    isText(extra.feePayer) &&
-    isText(extra.rentPayer) &&
+    isAddr(extra.receiverAuthorizer) &&
+    isAddr(extra.feePayer) &&
+    isAddr(extra.rentPayer) &&
     isText(extra.closeUrl) &&
     isText(extra.recentBlockhash) &&
     isU64String(extra.lastValidBlockHeight) &&

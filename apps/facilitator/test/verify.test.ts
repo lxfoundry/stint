@@ -164,6 +164,19 @@ describe("verifyPayment (spec §5.4)", () => {
       expect(node.simulated).toBe(0);
     });
 
+    it("refuses requirements with a malformed address as invalid, without throwing", async () => {
+      await resetNode();
+      const built = await openPayload();
+      expect(await verifyPayment(ctx, built, { ...offer, asset: "0OIl" })).toMatchObject({
+        ok: false,
+        reason: "invalid_payment_requirements",
+      });
+      expect(await verifyPayment(ctx, built, { ...offer, extra: { ...offer.extra, session: "0OIl" } })).toMatchObject({
+        ok: false,
+        reason: "invalid_payment_requirements",
+      });
+    });
+
     it("refuses an accepted entry that differs from the issued requirements", async () => {
       await resetNode();
       const built = await openPayload();

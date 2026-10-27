@@ -68,6 +68,15 @@ describe("offers", () => {
     expect(readElapsedRequirements({ ...offer, extra: { ...offer.extra, paymentFlow: "upfront" } })).toBeUndefined();
   });
 
+  it("rejects an entry whose address fields are not addresses, instead of throwing later", () => {
+    const offer = buildOpenOffer(input);
+    expect(readElapsedRequirements({ ...offer, asset: "not base58 0OIl" })).toBeUndefined();
+    expect(readElapsedRequirements({ ...offer, payTo: "short" })).toBeUndefined();
+    for (const field of ["programId", "receiverAuthorizer", "feePayer", "rentPayer", "session"] as const) {
+      expect(readElapsedRequirements({ ...offer, extra: { ...offer.extra, [field]: "0OIl" } })).toBeUndefined();
+    }
+  });
+
   it("compares requirements by value, whatever the key order", () => {
     const offer = buildOpenOffer(input);
     const reordered = JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(offer).reverse())));
