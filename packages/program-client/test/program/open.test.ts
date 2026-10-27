@@ -1,4 +1,5 @@
 import { generateKeyPairSigner } from "@solana/kit";
+import { TOKEN_PROGRAM_ADDRESS, findAssociatedTokenPda } from "@solana-program/token";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   STINT_ERROR__ACCOUNT_MISMATCH,
@@ -93,6 +94,22 @@ describe("open", () => {
     const impostor = (await generateKeyPairSigner()).address;
     fixture.writeTokenAccount(impostor, session, 0n);
     const { sent } = await fixture.open({ authority: buyer, deposit: 30_000n, seed: 12n, vault: impostor });
+    expect(sent.errorCode).toBe(STINT_ERROR__ACCOUNT_MISMATCH);
+  });
+
+  it("refuses the session's associated token account for another mint (S7)", async () => {
+    const [session] = await findSessionPda(buyer.signer.address, 14n);
+    const otherMint = (await generateKeyPairSigner()).address;
+    const [otherVault] = await findAssociatedTokenPda({ owner: session, mint: otherMint, tokenProgram: TOKEN_PROGRAM_ADDRESS });
+    fixture.writeTokenAccount(otherVault, session, 30_000n, otherMint);
+    const canonicalVault = await fixture.ata(session);
+    const { sent } = await fixture.open({
+      authority: buyer,
+      deposit: 30_000n,
+      seed: 14n,
+      vault: otherVault,
+      fundedAccount: canonicalVault,
+    });
     expect(sent.errorCode).toBe(STINT_ERROR__ACCOUNT_MISMATCH);
   });
 
