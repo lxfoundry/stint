@@ -77,6 +77,11 @@ pub fn close_handler(ctx: Context<Close>, kind: CloseKind) -> Result<()> {
     let token_program = ctx.accounts.token_program.key();
 
     // A transfer of zero is skipped: its destination need not exist (spec section 4.3).
+    //
+    // Limit: a missing `refund_to` or `receiver_token` fails the close whenever an amount is owed to
+    // it. Spec section 4.3 redirects a residual owed to a closed refund account to the receiver once
+    // `paid_until` has passed; that is not implemented yet, so until it is, the refund account's owner
+    // can keep a session open by closing that account and sending the vault one base unit.
     for (amount, destination) in [
         (owed, ctx.accounts.receiver_token.to_account_info()),
         (refunded, ctx.accounts.refund_to.to_account_info()),

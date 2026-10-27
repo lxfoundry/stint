@@ -107,6 +107,67 @@ describe("close (Standard)", () => {
     expect(findClosedEvent(sent.inner)).toMatchObject({ owed: 8_000n, refunded: 22_500n });
   });
 
+  it("sends the remainder of a deposit that is not a multiple of the rate to the refund", async () => {
+    const opened = await fixture.open({ authority: buyer, deposit: 30_500n });
+    expect(opened.sent.ok, opened.sent.logs.join("\n")).toBe(true);
+    fixture.setNow(startedAt + 60n);
+    const sent = await fixture.close({ session: opened.session, closer: buyer.signer });
+    expect(findClosedEvent(sent.inner)).toMatchObject({ owed: 30_000n, refunded: 500n, paidUntil: startedAt + 30n });
+  });
+
+  describe("payout accounts that are closed (S12)", () => {
+    it("skips a transfer of zero: a closed refund account does not matter when nothing is refunded", async () => {
+      const { session } = await openAndWait(30n);
+      fixture.removeAccount(buyer.token);
+      const sent = await fixture.close({ session, closer: buyer.signer });
+      expect(sent.ok, sent.logs.join("\n")).toBe(true);
+      expect(findClosedEvent(sent.inner)).toMatchObject({ owed: 30_000n, refunded: 0n });
+      expect(fixture.tokenAmount(fixture.seller.token)).toBe(30_000n);
+    });
+
+    it("fails when a refund is due and the refund account is closed, and changes nothing", async () => {
+      const { session, vault } = await openAndWait(8n);
+      fixture.removeAccount(buyer.token);
+      const sent = await fixture.close({ session, closer: buyer.signer });
+      expect(sent.ok).toBe(false);
+      expect(fixture.exists(session)).toBe(true);
+      expect(fixture.tokenAmount(vault)).toBe(30_000n);
+      expect(fixture.tokenAmount(fixture.seller.token)).toBe(0n);
+    });
+
+    it("fails when the receiver's account is closed and an amount is owed", async () => {
+      const { session, vault } = await openAndWait(8n);
+      fixture.removeAccount(fixture.seller.token);
+      const sent = await fixture.close({ session, closer: buyer.signer });
+      expect(sent.ok).toBe(false);
+      expect(fixture.exists(session)).toBe(true);
+      expect(fixture.tokenAmount(vault)).toBe(30_000n);
+    });
+
+    // A known limit, pinned so that it cannot change unnoticed: spec section 4.3 sends a residual owed
+    // to a closed refund account to the receiver once the paid time has passed, and `close` does not do
+    // that yet. Until it does, the owner of the refund account can leave a session unclosable after
+    // expiry by closing that account and sending one base unit to the vault.
+    it("cannot yet redirect a residual owed to a closed refund account, even after paid_until", async () => {
+      const { session, vault } = await openAndWait(60n);
+      await fixture.send([
+        getTransferCheckedInstruction({
+          source: buyer.token,
+          mint: fixture.mint,
+          destination: vault,
+          authority: buyer.signer,
+          amount: 1n,
+          decimals: DECIMALS,
+        }),
+      ]);
+      fixture.removeAccount(buyer.token);
+      const sent = await fixture.close({ session, closer: await generateKeyPairSigner() });
+      expect(sent.ok).toBe(false);
+      expect(fixture.exists(session)).toBe(true);
+      expect(fixture.tokenAmount(vault)).toBe(30_001n);
+    });
+  });
+
   it.each(["vault", "receiverToken", "refundTo", "rentPayer"] as const)(
     "refuses a substituted %s with AccountMismatch (S2)",
     async (field) => {

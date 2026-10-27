@@ -42,6 +42,7 @@ import {
 
 const STINT_SO = fileURLToPath(new URL("../../../../target/deploy/stint.so", import.meta.url));
 export const DECIMALS = 6;
+const SYSTEM_PROGRAM = "11111111111111111111111111111111" as Address;
 
 export interface Wallet {
   readonly signer: KeyPairSigner;
@@ -67,7 +68,10 @@ export interface OpenOptions {
   readonly seed?: bigint;
   readonly receiver?: Address;
   readonly refundOwner?: Address;
+  /** The vault account passed to `open`. */
   readonly vault?: Address;
+  /** Where the funding transfer goes, when it differs from `vault`. */
+  readonly fundedAccount?: Address;
 }
 
 export interface CloseOptions {
@@ -159,8 +163,20 @@ export class Fixture {
     return newWallet(this.svm, this.mint, amount);
   }
 
-  writeTokenAccount(address: Address, owner: Address, amount: bigint): void {
-    writeTokenAccount(this.svm, this.mint, address, owner, amount);
+  writeTokenAccount(address: Address, owner: Address, amount: bigint, mint: Address = this.mint): void {
+    writeTokenAccount(this.svm, mint, address, owner, amount);
+  }
+
+  /** Removes an account as closing it does: it then reads as an empty System-owned one (spec S12). */
+  removeAccount(address: Address): void {
+    this.svm.setAccount({
+      address,
+      lamports: lamports(0n),
+      data: new Uint8Array(),
+      programAddress: SYSTEM_PROGRAM,
+      executable: false,
+      space: 0n,
+    });
   }
 
   /** The token amount at an address, or undefined when no token account is there. */
@@ -237,7 +253,7 @@ export class Fixture {
       getTransferCheckedInstruction({
         source: options.authority.token,
         mint: this.mint,
-        destination: vault,
+        destination: options.fundedAccount ?? vault,
         authority: options.authority.signer,
         amount: options.deposit,
         decimals: DECIMALS,
