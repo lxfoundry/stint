@@ -357,6 +357,9 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     wss.handleUpgrade(request, socket, head, (ws) => {
       tracked.connections.add(ws);
       ws.once("close", () => tracked.connections.delete(ws));
+      // A protocol violation, such as a message over the limit, is emitted as an error before the close.
+      // Without a listener it would be an uncaught exception.
+      ws.on("error", (error) => log({ event: "error", error: error.message }));
       config.adapter.attach(tracked.info, ws, tracked.upstream);
     });
   }
