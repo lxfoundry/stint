@@ -331,7 +331,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     } finally {
       await end(tracked, "closed", 4410);
     }
-    if (!event) return { status: 502, body: { error: "no_closed_event", transaction: settled.transaction }, ended: true };
+    // A confirmed close is a success. Without the event the amounts are unknown, so only the transaction is returned.
+    if (!event) return { status: 200, body: { transaction: settled.transaction }, ended: true };
     const body = {
       paid: (event.claimed + event.owed + event.redirected).toString(),
       refunded: event.refunded.toString(),

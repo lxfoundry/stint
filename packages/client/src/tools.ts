@@ -40,9 +40,10 @@ export interface ReceiveOutput {
 export interface CloseInput {
   readonly sessionId: string;
 }
+/** `paid` and `refunded` are absent when the close is confirmed but its amounts could not be read. */
 export interface CloseOutput {
-  readonly paid: string;
-  readonly refunded: string;
+  readonly paid?: string;
+  readonly refunded?: string;
   readonly transaction: string;
 }
 
@@ -213,7 +214,11 @@ export function createSessionTools(client: StintClient): SessionTools {
           const state = get(input.sessionId);
           const receipt = await state.session.close();
           state.closed = true;
-          return { paid: receipt.paid.toString(), refunded: receipt.refunded.toString(), transaction: receipt.transaction };
+          return {
+            ...(receipt.paid === undefined ? {} : { paid: receipt.paid.toString() }),
+            ...(receipt.refunded === undefined ? {} : { refunded: receipt.refunded.toString() }),
+            transaction: receipt.transaction,
+          };
         },
       },
     },

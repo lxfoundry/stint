@@ -25,9 +25,10 @@ export class StintError extends Error {
   }
 }
 
+/** `paid` and `refunded` are absent when the gate could not read the `Closed` event of a confirmed close. */
 export interface CloseReceipt {
-  readonly paid: bigint;
-  readonly refunded: bigint;
+  readonly paid?: bigint;
+  readonly refunded?: bigint;
   readonly transaction: string;
 }
 
@@ -106,8 +107,12 @@ export function createStintClient(options: ClientOptions): StintClient {
         const body = await readBody(response);
         if (response.status !== 200) throw new StintError(`Close failed (HTTP ${response.status}): ${describeBody(body)}`, response.status, body);
         closed = true;
-        const receipt = body as { paid: string; refunded: string; transaction: string };
-        return { paid: BigInt(receipt.paid), refunded: BigInt(receipt.refunded), transaction: receipt.transaction };
+        const receipt = body as { paid?: string; refunded?: string; transaction: string };
+        return {
+          ...(receipt.paid === undefined ? {} : { paid: BigInt(receipt.paid) }),
+          ...(receipt.refunded === undefined ? {} : { refunded: BigInt(receipt.refunded) }),
+          transaction: receipt.transaction,
+        };
       },
       async [Symbol.asyncDispose]() {
         if (!closed) await session.close();

@@ -362,8 +362,8 @@ describe("gate", () => {
       const closed = new Promise<number>((resolve) => socket!.once("close", (code) => resolve(code)));
       h.fail.closedEvent = true;
       const response = await closeWith(session);
-      expect(response.status).toBe(502);
-      expect(await response.json()).toEqual({ error: "no_closed_event", transaction: "sig" });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ transaction: "sig" });
       expect(await closed).toBe(4410);
       expect(h.calls.teardown).toEqual(["closed"]);
       expect((await connect(session, await token(session, "connect"))).status).toBe(404);
@@ -407,8 +407,8 @@ describe("gate", () => {
       const { session } = await open();
       h.missing.closedEvent = Number.POSITIVE_INFINITY;
       const response = await closeWith(session);
-      expect(response.status).toBe(502);
-      expect(await response.json()).toEqual({ error: "no_closed_event", transaction: "sig" });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ transaction: "sig" });
       expect(h.calls.teardown).toEqual(["closed"]);
     });
 

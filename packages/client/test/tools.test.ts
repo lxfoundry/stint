@@ -75,6 +75,19 @@ describe("session tools (spec §9.5)", () => {
     expect(messages.map((message) => (message as { text: string }).text).sort()).toEqual(["a", "b"]);
   });
 
+  it("closes a session whose amounts the gate could not read, without an error", async () => {
+    const buyer = await generateKeyPairSigner();
+    gate = await startTestGate(buyer.address);
+    const client = createStintClient({
+      signer: buyer,
+      policy: { maxRate: 1_000n, maxPerSession: 100_000n, budget: { amount: 100_000n, periodSeconds: 3_600 } },
+    });
+    const { tools } = createSessionTools(client);
+    const opened = await tools.stint_open_session.run({ url: gate.url, seconds: 30, reason: "test" });
+    gate.hideClosedEvent = true;
+    expect(await tools.stint_close_session.run({ sessionId: opened.sessionId })).toEqual({ transaction: "sig" });
+  });
+
   it("answers an unknown session with a readable error", async () => {
     const client = createStintClient({
       signer: await generateKeyPairSigner(),

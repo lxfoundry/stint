@@ -63,4 +63,13 @@ describe("session client (spec §9.3, §9.4)", () => {
     expect(await session.close()).toEqual({ paid: 8_000n, refunded: 22_000n, transaction: "sig" });
     expect(await dropped).toBe(4410);
   });
+
+  it("treats a confirmed close as closed when the gate could not read its amounts", async () => {
+    const client = createStintClient({ signer: buyer, policy });
+    const session = await client.open(gate.url, { seconds: 30 });
+    gate.hideClosedEvent = true;
+    expect(await session.close()).toEqual({ transaction: "sig" });
+    // Disposing a closed session must not close it again.
+    await session[Symbol.asyncDispose]();
+  });
 });

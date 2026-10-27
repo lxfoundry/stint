@@ -759,6 +759,8 @@ Servers MUST derive the payer from the signed transaction, not from the response
 
 The gate takes `paid` and `refunded` from the `Closed` event in the confirmed transaction:
 `paid` is `claimed + owed + redirected`, and `refunded` is `refunded`.
+If the event cannot be read after the retries, the close is still a success: the gate ends the
+session and answers with the transaction alone, and the client reports a close without amounts.
 
 **Payment flow.** `elapsed` declares `escrow`: open is the first settlement (the deposit), close is
 the second (the final charge and the refund). Unlike a single-request escrow flow, the second
@@ -913,7 +915,7 @@ sessions it opens with itself. The API key and the limits per key bound that.
 |---|---|---|
 | `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `202 {session, transaction}` while the settlement is pending; `400 invalid_duration` |
 | `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration` |
-| `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`; `202 {transaction}` while the settlement is pending (the client polls the status until `404`, for at most `closeWaitSeconds`: section 9.3); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
+| `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`, or `200 {transaction}` when the close is confirmed but its `Closed` event cannot be read; `202 {transaction}` while the settlement is pending (the client polls the status until `404`, for at most `closeWaitSeconds`: section 9.3); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
 | `GET /sessions/:id` | Status from the chain: `paidUntil`, deposited and a fresh blockhash. Earned so far and time left are estimates at the gate's session clock (section 7.3); the chain's clock decides the amounts (section 4.2) | `200`; `404` |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
 | `GET /.well-known/jwks.json` | The gate's assertion keys (section 7.7) | `200` |

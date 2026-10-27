@@ -11,6 +11,8 @@ export interface TestGate {
   readonly payments: PaymentPayload[];
   /** Rejections that escaped `handleRequest`: the gate must contain its own errors. */
   readonly escaped: unknown[];
+  /** While set, the chain cannot return the `Closed` event of a confirmed close. */
+  hideClosedEvent: boolean;
   stop(): Promise<void>;
 }
 
@@ -34,6 +36,7 @@ export async function startTestGate(buyer: Address, onAttach: (socket: WebSocket
     receiverAuthorizer: authorizer,
     terms: { rate: 1_000n, minSeconds: 5, maxSeconds: 120 },
     durations: [30, 60],
+    readRetry: { attempts: 2, delayMs: 1 },
     facilitator: {
       supported: async () => ({
         kinds: [
@@ -70,7 +73,10 @@ export async function startTestGate(buyer: Address, onAttach: (socket: WebSocket
           deposited: 30_000n,
           claimed: 0n,
         }) as Session,
-      closedEvent: async () => ({ claimed: 0n, owed: 8_000n, refunded: 22_000n, redirected: 0n, kind: CloseKind.Standard }) as ClosedEvent,
+      closedEvent: async () =>
+        testGate.hideClosedEvent
+          ? undefined
+          : ({ claimed: 0n, owed: 8_000n, refunded: 22_000n, redirected: 0n, kind: CloseKind.Standard } as ClosedEvent),
     },
     adapter: {
       provision: async () => null,
@@ -92,14 +98,16 @@ export async function startTestGate(buyer: Address, onAttach: (socket: WebSocket
   server.on("upgrade", (req, socket, head) => {
     if (!gate.handleUpgrade(req, socket, head)) socket.destroy();
   });
-  return {
+  const testGate: TestGate = {
     url,
     payments,
     escaped,
+    hideClosedEvent: false,
     stop: async () => {
       await gate.close();
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     },
   };
+  return testGate;
 }

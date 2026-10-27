@@ -40,8 +40,10 @@ export async function openConnectCloseEarly(context: ScenarioContext): Promise<v
   const used = elapsed < 0n ? 0n : elapsed > covered ? covered : elapsed;
   const charged = used > BigInt(stored.minSeconds) ? used : BigInt(stored.minSeconds);
   const due = stored.rate * charged;
-  expectEqual(BigInt(receipt.paid), due, "paid = due");
-  expectEqual(BigInt(receipt.refunded), deposit - due, "refunded = deposit − due");
+  const { paid, refunded } = receipt;
+  expectTrue(paid !== undefined && refunded !== undefined, "the gate reported the close's amounts");
+  expectEqual(BigInt(paid), due, "paid = due");
+  expectEqual(BigInt(refunded), deposit - due, "refunded = deposit − due");
 
   const changes = await tokenBalanceChanges(context.rpc, receipt.transaction);
   const receiverToken = await associatedTokenAddress(stored.receiver, stored.mint);
