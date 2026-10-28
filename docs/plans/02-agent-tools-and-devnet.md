@@ -792,6 +792,20 @@ In `packages/client/test/tools.test.ts`, add inside `describe("session tools (sp
 
     expect(outcome).toEqual({ closed: [(await opening).sessionId], failed: [] });
   });
+
+  it("refuses to open a session once closeAll has run", async () => {
+    const buyer = await generateKeyPairSigner();
+    gate = await startTestGate(buyer.address);
+    const client = createStintClient({
+      signer: buyer,
+      policy: { maxRate: 1_000n, maxPerSession: 100_000n, budget: { amount: 100_000n, periodSeconds: 3_600 } },
+    });
+    const { tools, closeAll } = createSessionTools(client);
+
+    await closeAll();
+
+    await expect(tools.stint_open_session.run({ url: gate.url, seconds: 30, reason: "test" })).rejects.toThrow(/shutting down/);
+  });
 ```
 
 `startTestGate` serves one session per buyer whatever the address, so two opens by one buyer give two sessions at the gate.
@@ -867,7 +881,8 @@ export interface SessionTools {
 ```ts
     async closeAll() {
       const outcome: { closed: string[]; failed: { sessionId: string; error: string }[] } = { closed: [], failed: [] };
-      // An open still in flight registers its session when it ends: wait for it, or its deposit is orphaned.
+      // No open starts from here on; one still in flight registers its session when it ends: wait for it, or its deposit is orphaned.
+      closing = true;
       await Promise.allSettled([...opens]);
       const open = [...live.entries()].filter(([, state]) => !state.closed);
       await Promise.all(
@@ -907,11 +922,12 @@ export interface SessionTools {
 
 In `packages/client/src/index.ts`, add `type CloseAllOutput`, `type StatusInput` and `type StatusOutput` to the export list from `./tools.js`.
 
-4. In `createSessionTools`, declare `const opens = new Set<Promise<unknown>>();` after `const live = new Map<string, Live>();`,
-and replace the whole `run` of `stint_open_session` with:
+Still in `packages/client/src/tools.ts`, in `createSessionTools`, declare `const opens = new Set<Promise<unknown>>();` and
+`let closing = false;` after `const live = new Map<string, Live>();`, and replace the whole `run` of `stint_open_session` with:
 
 ```ts
-        run(input) {
+        async run(input) {
+          if (closing) throw new ToolError("The session runtime is shutting down: no new session can be opened");
           // Tracked until its session is registered, so that `closeAll` can wait for an open that is in flight.
           const work = (async () => {
             const session = await client.open(input.url, input.seconds === undefined ? {} : { seconds: input.seconds });
@@ -2046,7 +2062,7 @@ import { afterEach, describe, expect, it } from "vitest";
 const tsx = fileURLToPath(new URL("../../../node_modules/.bin/tsx", import.meta.url));
 const entry = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const cwd = fileURLToPath(new URL("..", import.meta.url));
-// Under the package, in a git-ignored directory: `/tmp` can be emptied within seconds in the development environment.
+// Under the package, in a git-ignored directory: `/tmp` can be emptied at any time.
 const scratch = fileURLToPath(new URL("../.cache/", import.meta.url));
 
 describe("the stdio entry point", () => {
@@ -2214,7 +2230,7 @@ import { startLocalStack, type LocalStack } from "../src/targets/local.js";
 
 const entry = fileURLToPath(new URL("../../packages/mcp/src/cli.ts", import.meta.url));
 const cwd = fileURLToPath(new URL("../../packages/mcp", import.meta.url));
-// In a git-ignored directory of the package under test: `/tmp` can be emptied within seconds in the development environment.
+// In e2e's git-ignored `.cache/` directory: `/tmp` can be emptied at any time.
 const scratch = fileURLToPath(new URL("../.cache/", import.meta.url));
 
 /** The stdio transport is one JSON-RPC message per line: enough to talk to the server without the SDK's client. */
@@ -2577,13 +2593,13 @@ expected_id="$(sed -n '/^\[programs\.devnet\]/,/^\[/s/^stint *= *"\(.*\)"/\1/p' 
 program_id="$(solana-keygen pubkey "$program_keypair")"
 [[ -n "$expected_id" && "$expected_id" == "$program_id" ]] || die "$program_keypair is $program_id, but Anchor.toml names '$expected_id' for devnet"
 
-host="$(printf '%s' "$url" | sed -E 's#^([a-z]+://[^/?]+).*#\1#')"  # scheme and host only: a URL may carry an API key
+host="$(printf '%s' "$url" | sed -E 's#^([a-z]+://)([^/@?]*@)?([^/?]+).*#\1\3#')"  # scheme and host only: a URL may carry an API key
 # The cluster: nothing below runs unless the RPC is devnet.
 genesis="$(solana genesis-hash --url "$url" 2>/dev/null)" || die "cannot read the genesis hash from $host"
 [[ "$genesis" == "$DEVNET_GENESIS" ]] || die "the RPC at $host reports genesis hash $genesis, which is not devnet's"
 
 payer_address="$(solana-keygen pubkey "$payer")"
-balance_output="$(solana balance "$payer_address" --url "$url" --lamports)" || die "cannot read the balance of $payer_address from $host"
+balance_output="$(solana balance "$payer_address" --url "$url" --lamports 2>/dev/null)" || die "cannot read the balance of $payer_address from $host"
 balance="${balance_output%% *}"
 [[ "$balance" =~ ^[0-9]+$ ]] || die "cannot read the balance of $payer_address from $host (got '$balance_output')"
 authority_address="$(solana-keygen pubkey "$authority")"
@@ -2639,7 +2655,7 @@ die() {
 
 [[ -f "$artifact" ]] || die "$artifact is missing"
 [[ -n "$program_id" ]] || die "no program id: Anchor.toml names none for devnet"
-host="$(printf '%s' "$url" | sed -E 's#^([a-z]+://[^/?]+).*#\1#')"  # scheme and host only: a URL may carry an API key
+host="$(printf '%s' "$url" | sed -E 's#^([a-z]+://)([^/@?]*@)?([^/?]+).*#\1\3#')"  # scheme and host only: a URL may carry an API key
 genesis="$(solana genesis-hash --url "$url" 2>/dev/null)" || die "cannot read the genesis hash from $host"
 [[ "$genesis" == "$DEVNET_GENESIS" ]] || die "the RPC at $host reports genesis hash $genesis, which is not devnet's"
 
@@ -2830,7 +2846,7 @@ in fees does not come back.
     USDC and SOL to the funding key. Idempotent; returns what went wrong and throws nothing.
   - `startDevnetStack(options): Promise<DevnetStack>` with `target` (name `devnet`, capabilities
     `stack` and `facilitatorApi`), `context()` and an idempotent `stop()` that never throws. It cleans up
-    before it starts anything, and does not start when that fails.
+    before it starts anything, and does not start when that fails, unless `force` is set (`--force`).
   - `cleanDevnet(options): Promise<string[]>` and `devnetFunds(options): Promise<string>`: the clean-up on
     its own, and the funding key's address and balances.
   - `pnpm e2e:devnet`, `pnpm e2e:devnet clean`, `pnpm e2e:devnet funds` and `pnpm e2e:local`, through
@@ -3432,6 +3448,7 @@ import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import type { Address } from "@solana/kit";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { cleanUp, returnUsdc } from "../src/devnet/funds.js";
 import { deriveKeys } from "../src/devnet/keys.js";
 import { newBuyer } from "../src/fixtures/buyers.js";
 import { fundSol } from "../src/fixtures/keys.js";
@@ -3480,6 +3497,7 @@ describe("the devnet target, run against the local network", () => {
       }),
     );
     await tools.stint_open_session.run({ url: context.gateUrl, seconds: 30, reason });
+    return buyer;
   };
 
   beforeAll(async () => {
@@ -3598,8 +3616,66 @@ describe("the devnet target, run against the local network", () => {
     expect(refunded).toBeGreaterThanOrEqual(970_000n);
     expect(refunded).toBeLessThan(1_000_000n);
     await next.stop();
+    // The outsider was not funded from the funding key, but its session paid the seller, and the clean-up returns the
+    // seller's USDC to the funding key: the funding key ends with what it lent, plus what that session cost.
+    expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC + (1_000_000n - refunded));
+  }, 120_000);
+
+  it("closes a session whose buyer's USDC account is gone, by recreating the account in the same transaction", async () => {
+    const { seed, fundingUsdc } = await fundedSeed();
+    const dying = await start(seed);
+    const buyer = await openSession(dying, "left open, with its refund account closed");
+    await dying.services.stop();
+    // The buyer's account is emptied and closed: the refund would now have nowhere to go (spec §4.3).
+    const keys = await deriveKeys(seed, 0);
+    const funding = { signer: keys.funding.signer, usdcAccount: fundingUsdc };
+    await returnUsdc(chain.network.rpc, funding, buyer.signer, buyer.usdcAccount, await usdcOf(buyer.usdcAccount), { pollMs: 100 });
+    expect((await chain.network.rpc.getAccountInfo(buyer.usdcAccount, { commitment: "confirmed", encoding: "base64" }).send()).value).toBeNull();
+
+    const next = await start(seed);
+
+    expect(await sessionsOnChain()).toBe(0);
+    await next.stop();
     expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC);
   }, 120_000);
+
+  it("reports a session that no held key may close yet, then closes it once its paid time has passed", async () => {
+    const { seed } = await fundedSeed();
+    const running = await start(seed);
+    const outsider = await newBuyer(chain.network.rpc, chain.keys.mintAuthority.signer, 1_000_000n);
+    const { tools } = createSessionTools(
+      createStintClient({
+        signer: outsider.signer,
+        policy: { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } },
+      }),
+    );
+    await tools.stint_open_session.run({ url: running.context().gateUrl, seconds: 30, reason: "no held key may close it yet" });
+    await running.services.stop();
+    // Only the rent payer is held, which is how the session is found: neither its authority nor its receiver authorizer is.
+    const keys = await deriveKeys(seed, 0);
+    const held = new Map([[keys.stack.rentPayer.signer.address, keys.stack.rentPayer.signer]]);
+    const funding = {
+      signer: keys.funding.signer,
+      usdcAccount: await associatedTokenAddress(keys.funding.signer.address, USDC_DEVNET_MINT),
+    };
+
+    // Before paid_until the program refuses: the clean-up reports it, and throws nothing.
+    const early = await cleanUp(chain.network.rpc, funding, held, { pollMs: 100 });
+    expect(early).toHaveLength(1);
+    expect(early[0]).toMatch(/closing session[\s\S]*paid time/);
+    expect(await sessionsOnChain()).toBe(1);
+
+    // From paid_until anyone may close it (spec §4.3): the same call succeeds once the cause is gone.
+    await expect.poll(() => cleanUp(chain.network.rpc, funding, held, { pollMs: 100 }), { timeout: 60_000, interval: 3_000 }).toEqual([]);
+    expect(await sessionsOnChain()).toBe(0);
+  }, 120_000);
+
+  it("does not start when the start-up clean-up cannot read the chain", async () => {
+    const seed = crypto.getRandomValues(new Uint8Array(32));
+    await expect(
+      startDevnetStack({ rpcUrl: "http://127.0.0.1:9", wsUrl: "ws://127.0.0.1:9", seed, preflight: false, pollMs: 100 }),
+    ).rejects.toThrow(/does not start/);
+  }, 60_000);
 
   it("stops handing out buyers when the pool is used", async () => {
     const { seed } = await fundedSeed();
@@ -3725,14 +3801,23 @@ export async function scanHolders(rpc: Rpc<SolanaRpcApi>, owners: readonly Addre
   const wallets = await readAll(rpc, owners);
   const tokens = await readAll(rpc, usdcAccounts);
   const decoder = getTokenDecoder();
+  // An address that only received lamports after its account was closed is System-owned and holds no token data (S12):
+  // it is not a USDC account, and must not stop the scan of the others.
+  const balanceOf = (account: (typeof tokens)[number]): bigint | undefined => {
+    if (!account.exists || account.programAddress !== TOKEN_PROGRAM_ADDRESS) return undefined;
+    try {
+      return decoder.decode(account.data).amount;
+    } catch {
+      return undefined;
+    }
+  };
   return owners.map((owner, position) => {
     const wallet = wallets[position]!;
-    const token = tokens[position]!;
     return {
       owner,
       lamports: wallet.exists ? wallet.lamports : 0n,
       usdcAccount: usdcAccounts[position]!,
-      usdc: token.exists ? decoder.decode(token.data).amount : undefined,
+      usdc: balanceOf(tokens[position]!),
     };
   });
 }
@@ -3795,9 +3880,12 @@ export interface CloseOutcome {
 /**
  * Closes each session that is still open with a `Standard` close (spec §4.3). The signer is the session's
  * authority when `signers` holds that key, and otherwise its `receiver_authorizer`: before `paid_until`
- * the program accepts either, and from `paid_until` anyone. The funding key pays the fee: a buyer holds no
- * SOL. The two accounts the close pays are created first, in the same transaction, if they are gone
- * (spec §12.6; S7): a transaction is atomic (S13), so nothing is half done.
+ * the program accepts either, and from `paid_until` anyone. When the harness holds neither, the funding key
+ * tries, which succeeds only from `paid_until` on; before that the session is reported. The funding key pays
+ * the fee: a buyer holds no SOL. The two accounts the close pays are created first, in the same transaction,
+ * if they are gone (spec §12.6; S7): a transaction is atomic (S13), so nothing is half done. The refund account
+ * is created even when nothing is owed to it; for an owner outside the pool (the example agent) whose account
+ * had been closed, that donates its rent, about 0.002 SOL.
  */
 export async function closeSessions(
   rpc: Rpc<SolanaRpcApi>,
@@ -3808,12 +3896,14 @@ export async function closeSessions(
 ): Promise<CloseOutcome> {
   const outcome: { closed: Address[]; failed: { session: Address; error: string }[] } = { closed: [], failed: [] };
   for (const session of new Set(sessions)) {
+    let held = true;
     try {
       const account = await fetchMaybeSession(rpc, session, { commitment: "confirmed" });
       if (!account.exists) continue;
       const stored = account.data;
-      const closer = signers.get(stored.authority) ?? signers.get(stored.receiverAuthorizer);
-      if (!closer) throw new Error(`the harness holds neither the authority ${stored.authority} nor the receiver authorizer ${stored.receiverAuthorizer}`);
+      const heldCloser = signers.get(stored.authority) ?? signers.get(stored.receiverAuthorizer);
+      held = heldCloser !== undefined;
+      const closer = heldCloser ?? funding.signer;
       const instructions: Instruction[] = [
         await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: funding.signer, owner: stored.receiver, mint: stored.mint }),
         await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: funding.signer, owner: stored.refundOwner, mint: stored.mint }),
@@ -3831,7 +3921,8 @@ export async function closeSessions(
       await sendInstructions(rpc, funding.signer, instructions, options);
       outcome.closed.push(session);
     } catch (error) {
-      outcome.failed.push({ session, error: describeError(error) });
+      const hint = held ? "" : " (the harness holds neither the authority nor the receiver authorizer, so the session can only be closed from its paid time on)";
+      outcome.failed.push({ session, error: `${describeError(error)}${hint}` });
     }
   }
   return outcome;
@@ -3917,6 +4008,8 @@ export interface DevnetStackOptions {
   readonly pollMs?: number;
   /** How many buyer keys the run may hand out. Default `BUYER_POOL`. */
   readonly buyerPool?: number;
+  /** Go on when the start-up clean-up fails, after reporting it: for a session that cannot be closed yet. Default false. */
+  readonly force?: boolean;
 }
 
 export interface DevnetStack {
@@ -3982,7 +4075,11 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
   }
   const left = await cleanUp(rpc, funding, keys.holders, send);
   if (left.length > 0) {
-    throw new Error(`Cleaning up what earlier runs left failed, so this run does not start:\n- ${left.join("\n- ")}\nFix the cause, or wait for the session's paid time, and run again.`);
+    const problems = `Cleaning up what earlier runs left failed:\n- ${left.join("\n- ")}`;
+    if (!options.force) {
+      throw new Error(`${problems}\nThis run does not start. Anyone may close a session from its paid time on, so fix the cause or wait, and run again; or run again with --force to go on regardless.`);
+    }
+    console.error(`${problems}\n--force: going on regardless`);
   }
   if (options.preflight !== false) {
     await assertFunds(rpc, funding);
@@ -4133,17 +4230,23 @@ async function start(name: string): Promise<Running> {
   }
   if (name === "devnet") {
     const config = devnetSettings();
-    const stack = await startDevnetStack({ rpcUrl: config.rpcUrl, wsUrl: config.wsUrl, seed: config.seed });
+    const stack = await startDevnetStack({ rpcUrl: config.rpcUrl, wsUrl: config.wsUrl, seed: config.seed, force });
     return { target: stack.target, context: () => stack.context(), stop: () => stack.stop(), logs: () => stack.services.kora.logs() };
   }
   throw new Error(`Unknown target "${name}": use local or devnet`);
 }
 
 const targetName = process.argv[2] ?? "local";
+// `pnpm e2e:devnet --force` goes on when the start-up clean-up fails (see `startDevnetStack`).
+const force = process.argv.includes("--force");
 
 // `pnpm e2e:devnet funds` prints the funding key's address and balances; `pnpm e2e:devnet clean` does the
 // clean-up alone. Neither starts a service.
-if (targetName === "devnet" && (process.argv[3] === "funds" || process.argv[3] === "clean")) {
+if (process.argv[3] === "funds" || process.argv[3] === "clean") {
+  if (targetName !== "devnet") {
+    console.error(`"${process.argv[3]}" exists only for the devnet target`);
+    process.exit(2);
+  }
   const config = devnetSettings();
   if (process.argv[3] === "funds") {
     console.error(await devnetFunds(config));
@@ -4263,7 +4366,8 @@ every session that the seed's keys have open and returns what they hold to the f
 run there is nothing to do; after a run that was killed it repairs what that run left. Then it funds the
 keys it needs from the funding key, runs the scenarios, and cleans up again. `pnpm e2e:devnet clean`
 does the clean-up alone. Run one at a time per seed: the clean-up closes every session that the seed's
-keys have open, whichever run opened it. The report is written to `e2e/report/`. Kora is started with the RPC
+keys have open, whichever run opened it. If the start-up clean-up fails, the run does not start; `pnpm e2e:devnet --force` goes
+on regardless. The report is written to `e2e/report/`. Kora is started with the RPC
 URL on its command line and writes it to its log, so a URL that carries an API key is visible to other users of the
 machine (`ps`) and in `e2e/report/kora.log` (git-ignored).
 ````
@@ -4368,7 +4472,7 @@ If it fails, the report names the scenario and the check, and `e2e/report/kora.l
 | Scenario 22: `No message about … carried …` | The subscription was not live when the payment landed, or the WebSocket does not deliver | Raise `SUBSCRIPTION_SETTLE_MS` in `e2e/src/targets/devnet.ts` first; then check `STINT_DEVNET_WS_URL` (a provider's WebSocket URL may differ from the HTTP one) and the provider's subscription limits; look at the stream's `error` messages in the run's output |
 | Scenario 22: the slot check fails | The node reports another slot than the transaction's | Stop and report: print `message.slot` and the transaction's `slot`, and do not weaken the check |
 | Kora's log shows a balance or fee error | The fee payer ran out of SOL | Raise `STACK_LAMPORTS` |
-| `Cleaning up what earlier runs left failed`, or `clean-up problems` on stderr | A session or account was not closed or returned: a rate limit, a slow node, or a session that only its authority may close before its `paid_until` | Nothing is lost: every key derives from the seed, and the next run's start-up repeats the clean-up. Run `pnpm e2e:devnet clean` to do it now. If it names a session that cannot be closed yet, wait for that session's paid time (at most 120 s at the test offer) and run it again |
+| `Cleaning up what earlier runs left failed`, or `clean-up problems` on stderr | A session or account was not closed or returned: a rate limit, a slow node, or a session that only its authority may close before its `paid_until` | Nothing is lost: every key derives from the seed, and the next run's start-up repeats the clean-up. Run `pnpm e2e:devnet clean` to do it now. If it names a session that the harness cannot close yet (it holds neither its authority nor the stack's receiver authorizer), the same command succeeds once that session's paid time has passed, at most 120 s at the test offer; `pnpm e2e:devnet --force` starts a run regardless |
 
 After any change: `pnpm typecheck && pnpm test && pnpm e2e:devnet`.
 
@@ -4382,11 +4486,13 @@ differ by less than 1,000,000 (fees only: a run sends some 30 to 40 transactions
 so a few hundred thousand is normal). Then check that no session is left open on the program:
 
 ```bash
-url="$(grep '^STINT_DEVNET_RPC_URL=' .env.devnet | cut -d= -f2-)"   # read from the file: typed in, the URL (which may carry an API key) would stay in the shell history
+url="$(grep '^STINT_DEVNET_RPC_URL=' .env.devnet | cut -d= -f2- | tr -d "'\"")"   # read from the file: typed in, the URL (which may carry an API key) would stay in the shell history
 curl -s "$url" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getProgramAccounts","params":["5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr",{"commitment":"confirmed","dataSlice":{"offset":0,"length":0},"filters":[{"dataSize":250}]}]}'
 ```
 
-Expected: `"result":[]`. A run that leaves sessions behind is a failure of the clean-up, not a pass.
+Expected: `"result":[]`. If a session is listed, run `pnpm e2e:devnet clean` once and look again: an open still in flight when
+the run ended can land after the final clean-up has read the chain, and the next start-up would close it too. A
+session that is still there after that is a failure of the clean-up, not a pass.
 
 Then check the start-up clean-up once, because it is the only protection against a killed run:
 
