@@ -46,7 +46,7 @@ async function start(name: string, forced: boolean): Promise<Running> {
 const args = process.argv.slice(2);
 const force = args.includes("--force");
 const [targetName = "local", mode = "run"] = args.filter((arg) => !arg.startsWith("--"));
-const MODES = ["run", "funds", "clean"];
+const MODES = ["run", "serve", "funds", "clean"];
 if (!MODES.includes(mode)) {
   console.error(`Unknown mode "${mode}": use ${MODES.join(", ")}`);
   process.exit(2);
@@ -88,14 +88,48 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 }
 const stack = (running = await start(targetName, force));
 
-// `pnpm e2e:local` and `pnpm e2e:devnet`: runs every scenario on the target, writes the report, and
-// exits 1 when a required scenario fails (spec section 12.2). Kora's logs are kept with a failing run's report.
-try {
-  const outcomes = await runScenarios(catalogue, stack.target, () => stack.context(), undefined, { timeoutMs: SCENARIO_TIMEOUT_MS });
-  writeReport(REPORT_DIR, outcomes);
-  process.stdout.write(renderReport(outcomes));
-  process.exitCode = exitCodeFor(outcomes);
-  if (process.exitCode !== 0) writeFileSync(join(REPORT_DIR, "kora.log"), stack.logs());
-} finally {
-  await stack.stop();
+if (mode === "serve") {
+  // Leaves the stack running for a person's agent or MCP host: the gate's URL, and a token account that
+  // someone pays every 30 s, to watch. The timer keeps the process alive; the signal handler installed
+  // above stops the stack (sessions closed, everything returned to the funding key, as after a run) and exits.
+  let timer: NodeJS.Timeout | undefined;
+  // The handler stops `running`: the timer is cleared first, so that a payment does not race the clean-up.
+  running = {
+    ...stack,
+    stop: async () => {
+      clearInterval(timer);
+      await stack.stop();
+    },
+  };
+  try {
+    const context = stack.context();
+    // 1 USDC pays 100 times, about 50 minutes: raise it for a longer session.
+    const payer = await context.newBuyer(1_000_000n);
+    const watched = await context.newBuyer(0n);
+    process.stdout.write(`${JSON.stringify({ gateUrl: context.gateUrl, watchedAccount: watched.usdcAccount }, null, 2)}
+`);
+    timer = setInterval(() => {
+      context.sendUsdc(payer, watched.usdcAccount, 10_000n).then(
+        (signature) => console.error(`paid ${watched.usdcAccount}: ${signature}`),
+        (error: unknown) => console.error(`payment failed: ${error instanceof Error ? error.message : String(error)}`),
+      );
+    }, 30_000);
+  } catch (error) {
+    // Nothing else would stop the stack: its services are up and its keys are funded.
+    await stack.stop();
+    throw error;
+  }
+} else {
+  // `pnpm e2e:local` and `pnpm e2e:devnet`: runs every scenario on the target, writes the report, and
+  // exits 1 when a required scenario fails (spec section 12.2). Kora's logs are kept with a failing
+  // run's report.
+  try {
+    const outcomes = await runScenarios(catalogue, stack.target, () => stack.context(), undefined, { timeoutMs: SCENARIO_TIMEOUT_MS });
+    writeReport(REPORT_DIR, outcomes);
+    process.stdout.write(renderReport(outcomes));
+    process.exitCode = exitCodeFor(outcomes);
+    if (process.exitCode !== 0) writeFileSync(join(REPORT_DIR, "kora.log"), stack.logs());
+  } finally {
+    await stack.stop();
+  }
 }

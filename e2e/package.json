@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "local": "tsx src/cli.ts local",
-    "devnet": "tsx src/cli.ts devnet"
+    "devnet": "tsx src/cli.ts devnet",
+    "serve:devnet": "tsx src/cli.ts devnet serve"
   },
   "dependencies": {
     "@lxfoundry/stint-client": "workspace:*",
