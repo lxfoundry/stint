@@ -118,7 +118,7 @@ half-build them:
 | `e2e/src/targets/{services,local,devnet}.ts` | The shared services; the two targets |
 | `e2e/src/devnet/{config,keys,funds}.ts` | The devnet configuration and guards; the keys derived from one seed; funding, the clean-up (closing sessions, returning funds) |
 | `e2e/src/fixtures/transfers.ts` | `sendUsdc` |
-| `e2e/src/cli.ts` | Target selection; the `serve`, `clean` and `funds` modes |
+| `e2e/src/cli.ts` | Target selection; the `serve`, `clean` and `funds` modes; the `--force` flag |
 | `examples/agent/src/*` | `@lxfoundry/stint-example-agent` |
 | `.env.example` | The variable names the devnet target (`.env.devnet`), the MCP server and the agent read |
 
@@ -871,7 +871,7 @@ export interface SessionTools {
   };
   /** The close code of the session's connection, once it has closed. */
   closeCode(sessionId: string): number | undefined;
-  /** Closes every session still open, for a runtime that is shutting down. A failure is reported, never thrown. */
+  /** Closes every session still open, for a runtime that is shutting down; none can be opened afterwards. A failure is reported, never thrown. */
   closeAll(): Promise<CloseAllOutput>;
 }
 ```
@@ -977,7 +977,7 @@ and add a bullet after "Policy refusals are returned as readable tool errors.":
 
 ```
 - The runtime that holds the tools can close every session still open at once (`closeAll`), for a
-  process that is shutting down.
+  process that is shutting down. No session can be opened after it.
 ```
 
 - [ ] **Step 11: Run everything and commit**
@@ -2192,15 +2192,16 @@ describe("the MCP server on the local stack", () => {
     const sent = await call("stint_send", { sessionId, message: { op: "subscribe", accounts: [buyer.usdcAccount] } });
     expect(sent.json).toEqual({ ok: true });
 
-    const closed = await call("stint_close_session", { sessionId });
-    expect(closed.isError, closed.text).toBe(false);
-    expect(BigInt(closed.json.paid) + BigInt(closed.json.refunded)).toBe(30_000n);
-    expect(await closeAll()).toEqual({ closed: [], failed: [] });
-
     // A duration the seller does not sell is refused by the gate: the model reads why.
     const refused = await call("stint_open_session", { url: stack.stream.url, seconds: 100_000, reason: "too long" });
     expect(refused.isError).toBe(true);
     expect(refused.text).toMatch(/invalid_duration/);
+    // (Before `closeAll`: once it has run, no session can be opened.)
+
+    const closed = await call("stint_close_session", { sessionId });
+    expect(closed.isError, closed.text).toBe(false);
+    expect(BigInt(closed.json.paid) + BigInt(closed.json.refunded)).toBe(30_000n);
+    expect(await closeAll()).toEqual({ closed: [], failed: [] });
     await client.close();
   });
 });
@@ -2593,6 +2594,7 @@ expected_id="$(sed -n '/^\[programs\.devnet\]/,/^\[/s/^stint *= *"\(.*\)"/\1/p' 
 program_id="$(solana-keygen pubkey "$program_keypair")"
 [[ -n "$expected_id" && "$expected_id" == "$program_id" ]] || die "$program_keypair is $program_id, but Anchor.toml names '$expected_id' for devnet"
 
+[[ "$url" =~ ^https?:// ]] || die "the RPC URL must start with http:// or https://"
 host="$(printf '%s' "$url" | sed -E 's#^([a-z]+://)([^/@?]*@)?([^/?]+).*#\1\3#')"  # scheme and host only: a URL may carry an API key
 # The cluster: nothing below runs unless the RPC is devnet.
 genesis="$(solana genesis-hash --url "$url" 2>/dev/null)" || die "cannot read the genesis hash from $host"
@@ -2617,8 +2619,7 @@ if [[ $dry_run -eq 1 ]]; then
   for part in "${command[@]}"; do
     if [[ "$part" == "$url" ]]; then shown+=("<the RPC at $host>"); else shown+=("$part"); fi
   done
-  printf '  %q' "${shown[@]}"
-  echo
+  echo "  ${shown[*]}"
   exit 0
 fi
 
@@ -2655,6 +2656,7 @@ die() {
 
 [[ -f "$artifact" ]] || die "$artifact is missing"
 [[ -n "$program_id" ]] || die "no program id: Anchor.toml names none for devnet"
+[[ "$url" =~ ^https?:// ]] || die "the RPC URL must start with http:// or https://"
 host="$(printf '%s' "$url" | sed -E 's#^([a-z]+://)([^/@?]*@)?([^/?]+).*#\1\3#')"  # scheme and host only: a URL may carry an API key
 genesis="$(solana genesis-hash --url "$url" 2>/dev/null)" || die "cannot read the genesis hash from $host"
 [[ "$genesis" == "$DEVNET_GENESIS" ]] || die "the RPC at $host reports genesis hash $genesis, which is not devnet's"
@@ -3649,7 +3651,8 @@ describe("the devnet target, run against the local network", () => {
         policy: { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } },
       }),
     );
-    await tools.stint_open_session.run({ url: running.context().gateUrl, seconds: 30, reason: "no held key may close it yet" });
+    // 45 s and not the usual 30: the first attempt below must land before paid_until, whatever the machine is doing.
+    await tools.stint_open_session.run({ url: running.context().gateUrl, seconds: 45, reason: "no held key may close it yet" });
     await running.services.stop();
     // Only the rent payer is held, which is how the session is found: neither its authority nor its receiver authorizer is.
     const keys = await deriveKeys(seed, 0);
@@ -3921,7 +3924,7 @@ export async function closeSessions(
       await sendInstructions(rpc, funding.signer, instructions, options);
       outcome.closed.push(session);
     } catch (error) {
-      const hint = held ? "" : " (the harness holds neither the authority nor the receiver authorizer, so the session can only be closed from its paid time on)";
+      const hint = held ? "" : " (the harness holds neither the authority nor the receiver authorizer, so if the program refused, the session can only be closed from its paid time on)";
       outcome.failed.push({ session, error: `${describeError(error)}${hint}` });
     }
   }
@@ -4061,7 +4064,7 @@ function report(problems: readonly string[]): void {
  * The `devnet` target (spec §12.2): Kora, the facilitator and the example stream with its gate, run
  * against a network that is not ours, with the deployed program. Every key derives from one seed, the
  * funding key included, which is never used in a scenario. The run begins by cleaning up whatever any
- * earlier run, or none, left on the seed's keys, and does not start if that fails; it ends with the same
+ * earlier run, or none, left on the seed's keys, and does not start if that fails, unless `force` is set; it ends with the same
  * clean-up, which the next start repeats if this one fails (spec §12.6).
  */
 export async function startDevnetStack(options: DevnetStackOptions): Promise<DevnetStack> {
@@ -4077,7 +4080,7 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
   if (left.length > 0) {
     const problems = `Cleaning up what earlier runs left failed:\n- ${left.join("\n- ")}`;
     if (!options.force) {
-      throw new Error(`${problems}\nThis run does not start. Anyone may close a session from its paid time on, so fix the cause or wait, and run again; or run again with --force to go on regardless.`);
+      throw new Error(`${problems}\nThis run does not start. Anyone may close a session from its paid time on, so fix the cause or wait, and run again; or go on regardless (`force`; `--force` on the command line).`);
     }
     console.error(`${problems}\n--force: going on regardless`);
   }
@@ -4223,32 +4226,43 @@ function devnetSettings() {
   return loadDevnetConfig(process.env);
 }
 
-async function start(name: string): Promise<Running> {
+async function start(name: string, forced: boolean): Promise<Running> {
   if (name === "local") {
     const stack = await startLocalStack();
     return { target: stack.target, context: () => stack.context(), stop: () => stack.stop(), logs: () => stack.kora.logs() };
   }
   if (name === "devnet") {
     const config = devnetSettings();
-    const stack = await startDevnetStack({ rpcUrl: config.rpcUrl, wsUrl: config.wsUrl, seed: config.seed, force });
+    const stack = await startDevnetStack({ rpcUrl: config.rpcUrl, wsUrl: config.wsUrl, seed: config.seed, force: forced });
     return { target: stack.target, context: () => stack.context(), stop: () => stack.stop(), logs: () => stack.services.kora.logs() };
   }
   throw new Error(`Unknown target "${name}": use local or devnet`);
 }
 
-const targetName = process.argv[2] ?? "local";
-// `pnpm e2e:devnet --force` goes on when the start-up clean-up fails (see `startDevnetStack`).
-const force = process.argv.includes("--force");
+// `pnpm e2e:devnet [mode] [--force]`: the flags are taken out first, so that their position does not matter.
+// `--force` goes on when the start-up clean-up fails (see `startDevnetStack`).
+const args = process.argv.slice(2);
+const force = args.includes("--force");
+const [targetName = "local", mode = "run"] = args.filter((arg) => !arg.startsWith("--"));
+const MODES = ["run", "funds", "clean"];
+if (!MODES.includes(mode)) {
+  console.error(`Unknown mode "${mode}": use ${MODES.join(", ")}`);
+  process.exit(2);
+}
+if (force && targetName !== "devnet") {
+  console.error("--force exists only for the devnet target");
+  process.exit(2);
+}
 
 // `pnpm e2e:devnet funds` prints the funding key's address and balances; `pnpm e2e:devnet clean` does the
 // clean-up alone. Neither starts a service.
-if (process.argv[3] === "funds" || process.argv[3] === "clean") {
+if (mode === "funds" || mode === "clean") {
   if (targetName !== "devnet") {
-    console.error(`"${process.argv[3]}" exists only for the devnet target`);
+    console.error(`"${mode}" exists only for the devnet target`);
     process.exit(2);
   }
   const config = devnetSettings();
-  if (process.argv[3] === "funds") {
+  if (mode === "funds") {
     console.error(await devnetFunds(config));
     process.exit(0);
   }
@@ -4270,7 +4284,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.exit(130);
   });
 }
-const stack = (running = await start(targetName));
+const stack = (running = await start(targetName, force));
 
 // `pnpm e2e:local` and `pnpm e2e:devnet`: runs every scenario on the target, writes the report, and
 // exits 1 when a required scenario fails (spec section 12.2). Kora's logs are kept with a failing run's report.
@@ -4329,6 +4343,10 @@ Expected: it stops at once with the problems listed (`STINT_DEVNET_RPC_URL is re
 
 Run: `pnpm --filter @lxfoundry/stint-e2e exec tsx src/cli.ts elsewhere`
 Expected: it stops with `Unknown target "elsewhere": use local or devnet`.
+
+Run: `pnpm e2e:local --force` and `pnpm e2e:devnet claen`
+Expected: the first stops with `--force exists only for the devnet target` and exit status 2, which also shows that
+pnpm hands a flag through to the script from the root; the second stops with `Unknown mode "claen": use run, funds, clean`.
 
 - [ ] **Step 14: Document the target**
 
@@ -4472,7 +4490,7 @@ If it fails, the report names the scenario and the check, and `e2e/report/kora.l
 | Scenario 22: `No message about … carried …` | The subscription was not live when the payment landed, or the WebSocket does not deliver | Raise `SUBSCRIPTION_SETTLE_MS` in `e2e/src/targets/devnet.ts` first; then check `STINT_DEVNET_WS_URL` (a provider's WebSocket URL may differ from the HTTP one) and the provider's subscription limits; look at the stream's `error` messages in the run's output |
 | Scenario 22: the slot check fails | The node reports another slot than the transaction's | Stop and report: print `message.slot` and the transaction's `slot`, and do not weaken the check |
 | Kora's log shows a balance or fee error | The fee payer ran out of SOL | Raise `STACK_LAMPORTS` |
-| `Cleaning up what earlier runs left failed`, or `clean-up problems` on stderr | A session or account was not closed or returned: a rate limit, a slow node, or a session that only its authority may close before its `paid_until` | Nothing is lost: every key derives from the seed, and the next run's start-up repeats the clean-up. Run `pnpm e2e:devnet clean` to do it now. If it names a session that the harness cannot close yet (it holds neither its authority nor the stack's receiver authorizer), the same command succeeds once that session's paid time has passed, at most 120 s at the test offer; `pnpm e2e:devnet --force` starts a run regardless |
+| `Cleaning up what earlier runs left failed`, or `clean-up problems` on stderr | A session or account was not closed or returned: a rate limit, a slow node, or a session that the harness cannot close before its `paid_until` (only its authority or the stack's receiver authorizer may) | Nothing is lost: every key derives from the seed, and the next run's start-up repeats the clean-up. Run `pnpm e2e:devnet clean` to do it now. If it names a session that the harness cannot close yet (it holds neither its authority nor the stack's receiver authorizer), the same command succeeds once that session's paid time has passed, at most 120 s at the test offer; `pnpm e2e:devnet --force` starts a run regardless |
 
 After any change: `pnpm typecheck && pnpm test && pnpm e2e:devnet`.
 
@@ -4486,7 +4504,8 @@ differ by less than 1,000,000 (fees only: a run sends some 30 to 40 transactions
 so a few hundred thousand is normal). Then check that no session is left open on the program:
 
 ```bash
-url="$(grep '^STINT_DEVNET_RPC_URL=' .env.devnet | cut -d= -f2- | tr -d "'\"")"   # read from the file: typed in, the URL (which may carry an API key) would stay in the shell history
+url="$(grep '^STINT_DEVNET_RPC_URL=' .env.devnet | cut -d= -f2- | sed 's/[[:space:]]#.*$//' | tr -d "'\"")"   # read from the file: typed in, the URL (which may carry an API key) would stay in the shell history
+: "${url:?STINT_DEVNET_RPC_URL is not set in .env.devnet}"
 curl -s "$url" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getProgramAccounts","params":["5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr",{"commitment":"confirmed","dataSlice":{"offset":0,"length":0},"filters":[{"dataSize":250}]}]}'
 ```
 
@@ -4595,11 +4614,9 @@ live API: Step 7 is the first run, and Step 4's test uses a mocked `fetch`):
 - [ ] **Step 1: Let the harness serve a target**
 
 In `e2e/src/cli.ts`, replace the part from `// \`pnpm e2e:local\` and \`pnpm e2e:devnet\`` to the end
-of the file with the following (the helpers above it are unchanged):
+of the file with the following (the helpers above it are unchanged), and add `"serve"` to the `MODES` list above it (`["run", "serve", "funds", "clean"]`):
 
 ```ts
-const mode = process.argv[3] ?? "run";
-
 if (mode === "serve") {
   // Leaves the stack running for a person's agent or MCP host: the gate's URL, and a token account that
   // someone pays every 30 s, to watch. The timer keeps the process alive; the signal handler installed
