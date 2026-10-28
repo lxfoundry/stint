@@ -59,6 +59,20 @@ Register it with an MCP host as a command, from the repository root. For Claude 
 stdout carries the protocol, so the entry point writes nothing else to it. Run the host inside WSL on
 Windows, where the toolchain lives.
 
+## Example agent
+
+`examples/agent` gives the session tools to a Claude model through the Anthropic SDK's tool runner, at low
+effort, with server-side fallback, and lets it watch a token account on the example stream until a
+payment arrives. It takes the same `STINT_*` variables as the MCP server, plus `ANTHROPIC_API_KEY`,
+`STINT_GATE_URL` and `STINT_WATCH_ACCOUNT`:
+
+    pnpm e2e:serve:devnet    # starts a stack on devnet, prints the gate's URL and a watched account, pays it every 30 s
+    pnpm --filter @lxfoundry/stint-example-agent start
+
+`STINT_KEYPAIR_PATH` names a keypair file made for the agent that holds devnet USDC and nothing else: do not
+point it at the key that deploys the program or at the harness's funding key. Every spending limit is enforced by the client's policy in code. The stream's messages reach the model as
+data and cannot raise one. Every session is closed before the agent returns, whatever happened.
+
 ## Deploying to devnet
 
 The program is upgradeable on devnet and built verifiably. Both scripts refuse any cluster whose

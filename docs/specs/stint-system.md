@@ -1268,12 +1268,17 @@ the key path, caps and allowlists.
 
 ### 9.7 Example agent
 
-A Claude (`claude-opus-5-5`) agent using the Anthropic TypeScript SDK's tool runner, at low effort,
-with `tool_choice: auto`; its system prompt directs it to open a session first. It handles the
-`refusal` stop reason, with server-side fallback enabled.
+A Claude (`claude-opus-5-5`) agent using the Anthropic TypeScript SDK's tool runner
+(`client.beta.messages.toolRunner`), at low effort (`output_config.effort: "low"`), with `tool_choice: auto`.
+Its system prompt directs it to open a session first and to close it as soon as its task is done. It
+asks for server-side fallback (`fallbacks`, under the beta header `server-side-fallback-2026-07-01`), so that
+a refusal by the first model is retried on the next. If the response still ends with the `refusal` stop reason,
+the agent reports the refusal's explanation. Whatever happens, it closes every session still open before it
+returns.
 
-**Task:** watch a devnet token account until a payment arrives; report the amount received and the
-slot; close the session.
+**Task:** watch a devnet token account until payments arrive; report the amount of the last payment and
+its slot; close the session. The stream reports an account's balance after each change, so the agent
+takes the payment as the difference between two consecutive messages.
 
 **Untrusted input.** Stream messages reach the model as data. Every spending limit is enforced by
 the client's policy in code, so content in the stream cannot raise one.

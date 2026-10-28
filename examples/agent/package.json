@@ -1,0 +1,17 @@
+{
+  "name": "@lxfoundry/stint-example-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "start": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.3.0",
+    "@lxfoundry/stint-client": "workspace:*",
+    "@lxfoundry/stint-mcp": "workspace:*"
+  }
+}
