@@ -61,7 +61,7 @@ No §14 question is answered by this stage.
 | Package | Version | Used by |
 |---|---|---|
 | `@modelcontextprotocol/server` | 2.4.0 | The MCP server (Task 4) |
-| `@modelcontextprotocol/client` | 2.4.0 | MCP tests: `Client`, `InMemoryTransport`, `StdioClientTransport` |
+| `@modelcontextprotocol/client` | 2.4.0 | MCP tests: `Client`, `InMemoryTransport`, `StdioClientTransport` (from `@modelcontextprotocol/client/stdio`) |
 | `@anthropic-ai/sdk` | 1.3.0 | The example agent (Task 8) |
 
 Both MCP packages require Node 20 or later and depend on `zod`; they were installed and exercised with Node
@@ -253,6 +253,12 @@ Then replace the comment and the test `cannot yet redirect a residual owed to a 
         expect(fixture.exists(session)).toBe(true);
         expect(fixture.tokenAmount(vault)).toBe(30_500n);
         expect(fixture.tokenAmount(fixture.seller.token)).toBe(0n);
+
+        // The failure is the missing refund account and nothing else: with the account back, the same close goes through.
+        fixture.writeTokenAccount(buyer.token, buyer.signer.address, 0n);
+        const retried = await fixture.close({ session, closer: buyer.signer });
+        expect(retried.ok, retried.logs.join("\n")).toBe(true);
+        expect(fixture.exists(session)).toBe(false);
       });
 
       it("fails, and changes nothing, when the receiver's account is closed too", async () => {
@@ -771,6 +777,21 @@ In `packages/client/test/tools.test.ts`, add inside `describe("session tools (sp
     expect(outcome.failed).toHaveLength(1);
     expect(outcome.failed[0]?.sessionId).toBe(opened.sessionId);
   });
+
+  it("waits for an open that is still in flight, and closes its session", async () => {
+    const buyer = await generateKeyPairSigner();
+    gate = await startTestGate(buyer.address);
+    const client = createStintClient({
+      signer: buyer,
+      policy: { maxRate: 1_000n, maxPerSession: 100_000n, budget: { amount: 100_000n, periodSeconds: 3_600 } },
+    });
+    const { tools, closeAll } = createSessionTools(client);
+
+    const opening = tools.stint_open_session.run({ url: gate.url, seconds: 30, reason: "test" });
+    const outcome = await closeAll();
+
+    expect(outcome).toEqual({ closed: [(await opening).sessionId], failed: [] });
+  });
 ```
 
 `startTestGate` serves one session per buyer whatever the address, so two opens by one buyer give two sessions at the gate.
@@ -846,6 +867,8 @@ export interface SessionTools {
 ```ts
     async closeAll() {
       const outcome: { closed: string[]; failed: { sessionId: string; error: string }[] } = { closed: [], failed: [] };
+      // An open still in flight registers its session when it ends: wait for it, or its deposit is orphaned.
+      await Promise.allSettled([...opens]);
       const open = [...live.entries()].filter(([, state]) => !state.closed);
       await Promise.all(
         open.map(async ([sessionId, state]) => {
@@ -883,6 +906,27 @@ export interface SessionTools {
 ```
 
 In `packages/client/src/index.ts`, add `type CloseAllOutput`, `type StatusInput` and `type StatusOutput` to the export list from `./tools.js`.
+
+4. In `createSessionTools`, declare `const opens = new Set<Promise<unknown>>();` after `const live = new Map<string, Live>();`,
+and replace the whole `run` of `stint_open_session` with:
+
+```ts
+        run(input) {
+          // Tracked until its session is registered, so that `closeAll` can wait for an open that is in flight.
+          const work = (async () => {
+            const session = await client.open(input.url, input.seconds === undefined ? {} : { seconds: input.seconds });
+            live.set(session.id, { session, inbox: [], waiters: new Set(), closed: false });
+            return {
+              sessionId: session.id,
+              paidUntil: session.paidUntil,
+              cost: session.cost.toString(),
+              remainingBudget: client.remainingBudget().toString(),
+            };
+          })();
+          opens.add(work);
+          return work.finally(() => opens.delete(work));
+        },
+```
 
 Run: `pnpm --filter @lxfoundry/stint-client test`
 Expected: PASS, including the existing test that every tool has a strict schema and a description.
@@ -1496,7 +1540,7 @@ when the host goes away.
 | Package | Version | Used by |
 |---|---|---|
 | `@modelcontextprotocol/server` | 2.4.0 | The server: `McpServer`, `fromJsonSchema`, `serveStdio` |
-| `@modelcontextprotocol/client` | 2.4.0 | Tests: `Client`, `InMemoryTransport`, `StdioClientTransport` |
+| `@modelcontextprotocol/client` | 2.4.0 | Tests: `Client`, `InMemoryTransport`, `StdioClientTransport` (from `@modelcontextprotocol/client/stdio`) |
 
 Facts about the SDK that the code relies on, each observed with the pinned versions:
 - `fromJsonSchema(document)` registers a plain JSON Schema as a tool's `inputSchema`. The SDK checks every
@@ -1506,7 +1550,9 @@ Facts about the SDK that the code relies on, each observed with the pinned versi
   are refused the same way.
 - A handler that throws returns `isError: true` with the exception's message as text.
 - `serveStdio(factory)` owns the transport. When the client closes the pipe, the connection tears
-  itself down and the server's `onclose` fires; the process exits by itself once nothing else keeps it alive.
+  itself down and the server's `onclose` fires. `onclose` also fires for the instance that it builds and drops while a
+  client probes for the protocol version, so it does not mean that the host left: the entry point watches standard
+  input and the signals instead. The process exits by itself once nothing else keeps it alive.
 - stdout is the protocol channel: one stray line on it makes a host drop the connection. Log to stderr.
 
 - [ ] **Step 1: Create the package**
@@ -1968,12 +2014,12 @@ async function main(): Promise<void> {
     return leaving;
   };
 
-  const handle = serveStdio(() => {
-    const server = createMcpServer(tools);
-    server.server.onclose = () => void leave();
-    return server;
-  });
-  for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => void handle.close());
+  serveStdio(() => createMcpServer(tools));
+  // The host going away is the end of standard input. The protocol connection's own close is not that:
+  // `serveStdio` also builds and drops a connection of its own while a client probes for the protocol version.
+  process.stdin.once("end", () => void leave());
+  process.stdin.once("close", () => void leave());
+  for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => void leave());
   console.error(`stint-mcp: serving ${Object.keys(tools).length} tools on stdio as ${config.signer.address}`);
 }
 
@@ -1989,8 +2035,7 @@ Create `packages/mcp/test/stdio.test.ts`:
 
 ```ts
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/client";
@@ -2001,6 +2046,8 @@ import { afterEach, describe, expect, it } from "vitest";
 const tsx = fileURLToPath(new URL("../../../node_modules/.bin/tsx", import.meta.url));
 const entry = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const cwd = fileURLToPath(new URL("..", import.meta.url));
+// Under the package, in a git-ignored directory: `/tmp` can be emptied within seconds in the development environment.
+const scratch = fileURLToPath(new URL("../.cache/", import.meta.url));
 
 describe("the stdio entry point", () => {
   let directory: string | undefined;
@@ -2010,7 +2057,8 @@ describe("the stdio entry point", () => {
   });
 
   async function environment(): Promise<Record<string, string>> {
-    directory = mkdtempSync(join(tmpdir(), "stint-mcp-"));
+    mkdirSync(scratch, { recursive: true });
+    directory = mkdtempSync(join(scratch, "stint-mcp-"));
     const seed = crypto.getRandomValues(new Uint8Array(32));
     const signer = await createKeyPairSignerFromPrivateKeyBytes(seed);
     const path = join(directory, "agent.json");
@@ -2154,8 +2202,7 @@ Create `e2e/test/mcp-stdio.test.ts`:
 
 ```ts
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchMaybeSession } from "@lxfoundry/stint-program-client";
@@ -2167,6 +2214,8 @@ import { startLocalStack, type LocalStack } from "../src/targets/local.js";
 
 const entry = fileURLToPath(new URL("../../packages/mcp/src/cli.ts", import.meta.url));
 const cwd = fileURLToPath(new URL("../../packages/mcp", import.meta.url));
+// In a git-ignored directory of the package under test: `/tmp` can be emptied within seconds in the development environment.
+const scratch = fileURLToPath(new URL("../.cache/", import.meta.url));
 
 /** The stdio transport is one JSON-RPC message per line: enough to talk to the server without the SDK's client. */
 function speak(child: ChildProcessWithoutNullStreams) {
@@ -2202,7 +2251,8 @@ describe("the stdio server leaves with its sessions closed", () => {
 
   beforeAll(async () => {
     stack = await startLocalStack();
-    directory = mkdtempSync(join(tmpdir(), "stint-mcp-stdio-"));
+    mkdirSync(scratch, { recursive: true });
+    directory = mkdtempSync(join(scratch, "stint-mcp-stdio-"));
   }, 120_000);
 
   afterAll(async () => {
@@ -2264,9 +2314,9 @@ describe("the stdio server leaves with its sessions closed", () => {
 
 Run: `pnpm --filter @lxfoundry/stint-e2e test mcp-stdio.test.ts`
 Expected: PASS: for each way out, the process exits with status 0, says it closed the session, and the
-session account is gone. If the SIGTERM case exits with a signal status instead of 0, the handler of
-`cli.ts` did not run: `handle.close()` must end the transport so that the server's `onclose` fires; wire
-`leave()` into the signal handler directly rather than through `onclose`, and keep the test.
+session account is gone. If the SIGTERM case exits with a signal status instead of 0, the signal handler of
+`cli.ts` did not run `leave()`. If the standard-input case hangs, the `end` and `close` listeners did not
+fire: check that nothing paused the stream, and keep the test.
 
 - [ ] **Step 9: Document the server**
 
@@ -2280,7 +2330,7 @@ by environment variables, and refuses to start without the caps:
 
 | Variable | Meaning |
 |---|---|
-| `STINT_KEYPAIR_PATH` | A Solana CLI keypair file (a JSON array of 64 bytes). Required |
+| `STINT_KEYPAIR_PATH` | The absolute path of a Solana CLI keypair file, a JSON array of 64 bytes (`~` is not expanded). Required |
 | `STINT_MAX_RATE` | The highest rate accepted, in base units per second. Required |
 | `STINT_MAX_PER_SESSION` | The most one session may lock, in base units. Required |
 | `STINT_BUDGET_AMOUNT`, `STINT_BUDGET_PERIOD_SECONDS` | The most locked across sessions per period. Required |
@@ -2289,7 +2339,7 @@ by environment variables, and refuses to start without the caps:
 
 Every limit is enforced by the client's code, whatever a seller offers or the model asks. The agent's
 key holds USDC and no SOL. When the host disconnects, or the process is stopped, every session still
-open is closed first, so the unused part of each deposit comes back.
+open (and any open still in flight) is closed first, so the unused part of each deposit comes back.
 
 Register it with an MCP host as a command, from the repository root. For Claude Code:
 
@@ -2353,6 +2403,12 @@ marked **[Operator]**, and the operator prerequisites can be done at any time be
   v2 programs (`B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g`) is inactive there, and is only a
   reason to keep the program at v3. The local network disables that gate for the Subscriptions copy
   (spec §12.5).
+- Devnet's rent was read from the RPC, not computed: `getMinimumBalanceForRentExemption` returns
+  898,210,040 lamports (about 0.90 SOL) for the program's 176,685-byte data account (the program's
+  176,640 bytes and a 45-byte header), and 650,240 for an empty account. That is 5,080 lamports per byte
+  with 128 bytes of overhead, not the 6,960 that older documentation gives. A deployment holds the data
+  account and a buffer of the same size at once, so it needs about 1.8 SOL plus fees; the guard asks for 2.2.
+  Each 10 KB that a build grows adds about 0.05 SOL to each.
 - `solana program deploy` (Agave 4.3.2) extends the program's data account by itself when an upgrade
   is larger (`--no-auto-extend` turns that off), so no headroom is reserved at the first deployment.
   `--use-rpc` sends the writes through the RPC instead of the validators' TPU, and
@@ -2470,7 +2526,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DEVNET_GENESIS="EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
-# The ProgramData account's rent, the buffer that holds the same bytes until the deploy ends, and fees.
+# The ProgramData account's rent (about 0.90 SOL at devnet's 5,080 lamports per byte), the buffer that holds the
+# same bytes until the deploy ends (the same again), and fees: about 1.8 SOL, and room for a larger build.
 MIN_LAMPORTS=2200000000
 
 url="https://api.devnet.solana.com"
@@ -2520,14 +2577,15 @@ expected_id="$(sed -n '/^\[programs\.devnet\]/,/^\[/s/^stint *= *"\(.*\)"/\1/p' 
 program_id="$(solana-keygen pubkey "$program_keypair")"
 [[ -n "$expected_id" && "$expected_id" == "$program_id" ]] || die "$program_keypair is $program_id, but Anchor.toml names '$expected_id' for devnet"
 
+host="$(printf '%s' "$url" | sed -E 's#^([a-z]+://[^/?]+).*#\1#')"  # scheme and host only: a URL may carry an API key
 # The cluster: nothing below runs unless the RPC is devnet.
-genesis="$(solana genesis-hash --url "$url" 2>/dev/null)" || die "cannot read the genesis hash from $url"
-[[ "$genesis" == "$DEVNET_GENESIS" ]] || die "$url reports genesis hash $genesis, which is not devnet's"
+genesis="$(solana genesis-hash --url "$url" 2>/dev/null)" || die "cannot read the genesis hash from $host"
+[[ "$genesis" == "$DEVNET_GENESIS" ]] || die "the RPC at $host reports genesis hash $genesis, which is not devnet's"
 
 payer_address="$(solana-keygen pubkey "$payer")"
-balance_output="$(solana balance "$payer_address" --url "$url" --lamports)" || die "cannot read the balance of $payer_address from $url"
+balance_output="$(solana balance "$payer_address" --url "$url" --lamports)" || die "cannot read the balance of $payer_address from $host"
 balance="${balance_output%% *}"
-[[ "$balance" =~ ^[0-9]+$ ]] || die "cannot read the balance of $payer_address from $url (got '$balance_output')"
+[[ "$balance" =~ ^[0-9]+$ ]] || die "cannot read the balance of $payer_address from $host (got '$balance_output')"
 authority_address="$(solana-keygen pubkey "$authority")"
 echo "payer $payer_address holds $balance lamports on devnet; upgrade authority $authority_address; program id $program_id"
 if [[ "$authority_address" == "$payer_address" ]]; then
@@ -2538,8 +2596,12 @@ command=(solana program deploy "$program" --url "$url" --keypair "$payer" --prog
   --upgrade-authority "$authority" --use-rpc --max-sign-attempts 10)
 
 if [[ $dry_run -eq 1 ]]; then
-  echo "dry run: nothing was sent. It would run:"
-  printf '  %q' "${command[@]}"
+  echo "dry run: nothing was sent. It would run (the RPC URL is not printed: it may carry an API key):"
+  shown=()
+  for part in "${command[@]}"; do
+    if [[ "$part" == "$url" ]]; then shown+=("<the RPC at $host>"); else shown+=("$part"); fi
+  done
+  printf '  %q' "${shown[@]}"
   echo
   exit 0
 fi
@@ -2577,8 +2639,9 @@ die() {
 
 [[ -f "$artifact" ]] || die "$artifact is missing"
 [[ -n "$program_id" ]] || die "no program id: Anchor.toml names none for devnet"
-genesis="$(solana genesis-hash --url "$url" 2>/dev/null)" || die "cannot read the genesis hash from $url"
-[[ "$genesis" == "$DEVNET_GENESIS" ]] || die "$url reports genesis hash $genesis, which is not devnet's"
+host="$(printf '%s' "$url" | sed -E 's#^([a-z]+://[^/?]+).*#\1#')"  # scheme and host only: a URL may carry an API key
+genesis="$(solana genesis-hash --url "$url" 2>/dev/null)" || die "cannot read the genesis hash from $host"
+[[ "$genesis" == "$DEVNET_GENESIS" ]] || die "the RPC at $host reports genesis hash $genesis, which is not devnet's"
 
 mkdir -p target
 dump="$(mktemp "target/dump.XXXXXX")"
@@ -2645,11 +2708,11 @@ genesis hash is not devnet's: the Solana CLI's own default is mainnet.
     scripts/deploy-devnet.sh --payer ~/.config/stint/devnet.json --upgrade-authority ~/.config/stint/upgrade-authority.json --program target/verifiable/stint.so
     scripts/verify-deployment.sh target/verifiable/stint.so
 
-The payer needs about 2.2 SOL while the deploy runs (about 0.9 SOL stays in the program's data
-account; the buffer's share returns). Run the same command again to upgrade: `solana program deploy`
+The payer needs about 1.8 SOL plus fees while the deploy runs, and the script asks for 2.2 (about 0.9 SOL
+stays in the program's data account; the buffer's share returns). Run the same command again to upgrade: `solana program deploy`
 upgrades in place, and extends the program's data account when the new build is larger. The upgrade
 authority is the payer unless `--upgrade-authority` names another key; keep it a key of its own, apart
-from the payer, which the end-to-end harness and its funds-moving code load on every run. Before any
+from the payer, which holds the SOL. Before any
 mainnet deployment it must move to a multisig or be revoked.
 
 The program's ID is in `Anchor.toml`; its keypair is `target/deploy/stint-keypair.json` and is never
@@ -3081,6 +3144,16 @@ describe("loadDevnetConfig", () => {
     expect(config.wsUrl).toBe("wss://b.example");
   });
 
+  it("takes the seed of a recovery phrase as BIP-39 does, without checking its words, and ignores case and spacing", () => {
+    const phrase = `${"abandon ".repeat(23)}art`;
+    const config = loadDevnetConfig({ STINT_DEVNET_RPC_URL: "https://a.example", STINT_DEVNET_SEED: phrase });
+    expect(Buffer.from(config.seed).toString("hex")).toBe(
+      "408b285c123836004f4b8842c89324c1f01382450c0d439af345ba7fc49acf705489c6fc77dbd4e3dc1dd8cc6bc9f043db8ada1e243c4a0eafb290d399480840",
+    );
+    const untidy = `  ${phrase.toUpperCase().replaceAll(" ", "  ")}\n`;
+    expect(loadDevnetConfig({ STINT_DEVNET_RPC_URL: "https://a.example", STINT_DEVNET_SEED: untidy }).seed).toEqual(config.seed);
+  });
+
   it("names every problem at once", () => {
     try {
       loadDevnetConfig({ STINT_DEVNET_RPC_URL: "ftp://x" });
@@ -3089,15 +3162,15 @@ describe("loadDevnetConfig", () => {
       expect(error).toBeInstanceOf(DevnetConfigError);
       expect((error as DevnetConfigError).problems).toEqual([
         "STINT_DEVNET_RPC_URL must be an http or https URL",
-        "STINT_DEVNET_SEED is required: 64 hexadecimal characters (openssl rand -hex 32)",
+        "STINT_DEVNET_SEED is required: a recovery phrase of 12 to 24 words, or 64 hexadecimal characters (openssl rand -hex 32)",
       ]);
       // The URL may carry an API key: it is never echoed.
       expect((error as DevnetConfigError).message).not.toContain("ftp://x");
     }
   });
 
-  it("refuses a seed that is not 64 hexadecimal characters without quoting it", () => {
-    for (const seed of ["hunter2-looks-like-a-secret", "ab".repeat(31), "zz".repeat(32)]) {
+  it("refuses a seed that is neither a recovery phrase nor 64 hexadecimal characters, without quoting it", () => {
+    for (const seed of ["hunter2-looks-like-a-secret", "ab".repeat(31), "zz".repeat(32), "abandon ".repeat(13).trim()]) {
       const error = (() => {
         try {
           loadDevnetConfig({ STINT_DEVNET_RPC_URL: "https://a.example", STINT_DEVNET_SEED: seed });
@@ -3106,7 +3179,7 @@ describe("loadDevnetConfig", () => {
         }
         throw new Error("accepted");
       })();
-      expect(error.problems).toEqual(["STINT_DEVNET_SEED must be 64 hexadecimal characters"]);
+      expect(error.problems).toEqual(["STINT_DEVNET_SEED must be a recovery phrase of 12 to 24 words, or 64 hexadecimal characters"]);
       expect(error.message).not.toContain(seed);
     }
   });
@@ -3141,6 +3214,7 @@ Expected: FAIL: `../src/devnet/config.js` does not exist.
 Create `e2e/src/devnet/config.ts`:
 
 ```ts
+import { pbkdf2Sync } from "node:crypto";
 import type { Rpc, SolanaRpcApi } from "@solana/kit";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 
@@ -3150,7 +3224,10 @@ export const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG
 export interface DevnetConfig {
   readonly rpcUrl: string;
   readonly wsUrl: string;
-  /** The 32 bytes that every key of the devnet target derives from, the funding key included. */
+  /**
+   * The bytes that every key of the devnet target derives from, the funding key included: 32 from a
+   * hexadecimal seed, or 64 from a recovery phrase, as BIP-39 turns a phrase into a seed.
+   */
   readonly seed: Uint8Array;
 }
 
@@ -3161,6 +3238,17 @@ export class DevnetConfigError extends Error {
   }
 }
 
+const PHRASE_LENGTHS = [12, 15, 18, 21, 24];
+
+/**
+ * The seed of a recovery phrase as BIP-39 defines it: PBKDF2-HMAC-SHA512 over the phrase, 2048 rounds, the
+ * salt "mnemonic", 64 bytes. The words are not checked against the word list or its checksum: a mistyped
+ * phrase gives other keys, and `pnpm e2e:devnet funds` shows the funding address it gives.
+ */
+function phraseSeed(words: readonly string[]): Uint8Array {
+  return Uint8Array.from(pbkdf2Sync(words.join(" ").normalize("NFKD"), "mnemonic", 2048, 64, "sha512"));
+}
+
 /** The devnet target's configuration from environment variables (see `.env.example`). */
 export function loadDevnetConfig(env: Readonly<Record<string, string | undefined>>): DevnetConfig {
   const problems: string[] = [];
@@ -3169,14 +3257,16 @@ export function loadDevnetConfig(env: Readonly<Record<string, string | undefined
   if (!rpcUrl) problems.push("STINT_DEVNET_RPC_URL is required");
   // The URL may carry an API key, and the seed is a secret, so no message quotes either.
   else if (!/^https?:\/\/\S+$/.test(rpcUrl)) problems.push("STINT_DEVNET_RPC_URL must be an http or https URL");
-  if (!seedText) problems.push("STINT_DEVNET_SEED is required: 64 hexadecimal characters (openssl rand -hex 32)");
-  else if (!/^[0-9a-fA-F]{64}$/.test(seedText)) problems.push("STINT_DEVNET_SEED must be 64 hexadecimal characters");
-  if (problems.length > 0 || !rpcUrl || !seedText) throw new DevnetConfigError(problems);
-  return {
-    rpcUrl,
-    wsUrl: env.STINT_DEVNET_WS_URL?.trim() || rpcUrl.replace(/^http/, "ws"),
-    seed: Uint8Array.from(Buffer.from(seedText, "hex")),
-  };
+  let seed: Uint8Array | undefined;
+  if (!seedText) problems.push("STINT_DEVNET_SEED is required: a recovery phrase of 12 to 24 words, or 64 hexadecimal characters (openssl rand -hex 32)");
+  else if (/^[0-9a-fA-F]{64}$/.test(seedText)) seed = Uint8Array.from(Buffer.from(seedText, "hex"));
+  else {
+    const words = seedText.toLowerCase().split(/\s+/);
+    if (PHRASE_LENGTHS.includes(words.length) && words.every((word) => /^[a-z]+$/.test(word))) seed = phraseSeed(words);
+    else problems.push("STINT_DEVNET_SEED must be a recovery phrase of 12 to 24 words, or 64 hexadecimal characters");
+  }
+  if (problems.length > 0 || !rpcUrl || !seed) throw new DevnetConfigError(problems);
+  return { rpcUrl, wsUrl: env.STINT_DEVNET_WS_URL?.trim() || rpcUrl.replace(/^http/, "ws"), seed };
 }
 
 /** Refuses to go on unless the RPC is devnet's: no transaction of this harness may reach another network. */
@@ -3217,6 +3307,14 @@ describe("deriveKey", () => {
     expect((await deriveKey(SEED, 0)).signer.address).toBe("HScoUHx6TLP6WYahxQ2RicCnKWhLYNnKqct3wnmhnpDu");
     expect((await deriveKey(SEED, 1)).signer.address).toBe("76BGuYQabUAdJnUCWu3emyYUiLNa1hngHzrte4cF7ujw");
     expect((await deriveKey(SEED, 5)).signer.address).toBe("81TfcadkiUu6BjrUr6dp7i2AQGGNPqWfh1kiHgTRxRXo");
+  });
+
+  it("accepts the 64 bytes that a recovery phrase gives", async () => {
+    const phraseSeed = Uint8Array.from(
+      Buffer.from("408b285c123836004f4b8842c89324c1f01382450c0d439af345ba7fc49acf705489c6fc77dbd4e3dc1dd8cc6bc9f043db8ada1e243c4a0eafb290d399480840", "hex"),
+    );
+    expect((await deriveKey(phraseSeed, 0)).signer.address).toBe("7NaUu2saxsDHo5qY8CNP4H9mXn3ggg5tMF9bktv8ETaM");
+    expect((await deriveKey(phraseSeed, 1)).signer.address).toBe("DJFkSPHRG6gLLyuXb3fWdn9HUSSUgrZFsDmt2i8rDATP");
   });
 
   it("gives another key for another index and for another seed", async () => {
@@ -3282,7 +3380,7 @@ const FIRST_BUYER_INDEX = 5;
  */
 export const BUYER_POOL = 96;
 
-/** The key at `index` of `seed`: HMAC-SHA-256 of the index, keyed by the seed, taken as an Ed25519 private key. */
+/** The key at `index` of `seed`, of any length: HMAC-SHA-256 of the index, keyed by the seed, taken as an Ed25519 private key. */
 export async function deriveKey(seed: Uint8Array, index: number): Promise<HarnessKey> {
   const privateKey = Uint8Array.from(createHmac("sha256", seed).update(`stint-devnet-harness/${index}`).digest());
   const signer = await createKeyPairSignerFromPrivateKeyBytes(privateKey);
@@ -4109,9 +4207,11 @@ Create `.env.example`:
 STINT_DEVNET_RPC_URL=
 # Optional: derived from the URL (http to ws) when empty.
 STINT_DEVNET_WS_URL=
-# 64 hexadecimal characters (openssl rand -hex 32). Every key of the target derives from it, the funding
-# key included; a person funds that one from the faucets, and nothing else needs funding. Devnet only:
-# never a seed that controls funds anywhere else.
+# A recovery phrase of 12 to 24 words, in quotes (STINT_DEVNET_SEED="word word ..."), or 64 hexadecimal
+# characters (openssl rand -hex 32). Every key of the target derives from it, the funding key included; a
+# person funds that one from the faucets, and nothing else needs funding. The derivation is the harness's
+# own, so the addresses are not the ones a wallet shows for the same phrase. Whoever can read this file
+# can read the phrase, though: devnet only, never a phrase that holds funds anywhere else.
 STINT_DEVNET_SEED=
 ```
 
@@ -4148,8 +4248,10 @@ rate-limited. Create `.env.devnet` (git-ignored; `.env.example` lists the names)
 
 - `STINT_DEVNET_RPC_URL`: a devnet endpoint (and `STINT_DEVNET_WS_URL` if its WebSocket URL is not the
   same address with `ws` for `http`);
-- `STINT_DEVNET_SEED`: 64 hexadecimal characters (`openssl rand -hex 32`). Every key of the target
-  derives from it. Keep a copy off this machine, and never use a seed that controls funds anywhere else.
+- `STINT_DEVNET_SEED`: a recovery phrase of 12 to 24 words in quotes, or 64 hexadecimal characters
+  (`openssl rand -hex 32`). Every key of the target derives from it, by the harness's own rule, so the
+  addresses are not the ones a wallet shows for the same phrase. Use a phrase made for this, never one
+  that holds funds elsewhere, and keep a copy off this machine.
 
 `pnpm e2e:devnet funds` prints the funding key's address and balances. Fund that address once, with at
 least 0.5 SOL from a devnet faucet and 5 USDC from Circle's (Solana Devnet). It is the only key to
@@ -4161,7 +4263,9 @@ every session that the seed's keys have open and returns what they hold to the f
 run there is nothing to do; after a run that was killed it repairs what that run left. Then it funds the
 keys it needs from the funding key, runs the scenarios, and cleans up again. `pnpm e2e:devnet clean`
 does the clean-up alone. Run one at a time per seed: the clean-up closes every session that the seed's
-keys have open, whichever run opened it. The report is written to `e2e/report/`.
+keys have open, whichever run opened it. The report is written to `e2e/report/`. Kora is started with the RPC
+URL on its command line and writes it to its log, so a URL that carries an API key is visible to other users of the
+machine (`ps`) and in `e2e/report/kora.log` (git-ignored).
 ````
 
 In `CLAUDE.md`, in the "Toolchain" section, after the sentence `runs the end-to-end scenarios on the `local` target.`
@@ -4229,7 +4333,7 @@ Task 5 are met.
 From the repository root, in WSL, on the task's branch (see Task 5 for the deploying key):
 
 ```bash
-openssl rand -hex 32                          # the value of STINT_DEVNET_SEED: keep a copy off this machine
+# STINT_DEVNET_SEED: a recovery phrase in quotes, or the output of `openssl rand -hex 32`; keep a copy off this machine
 # put STINT_DEVNET_RPC_URL (and STINT_DEVNET_WS_URL if needed) and STINT_DEVNET_SEED in .env.devnet
 pnpm e2e:devnet funds
 scripts/verify-deployment.sh target/verifiable/stint.so
@@ -4274,11 +4378,12 @@ Run: `pnpm e2e:devnet` three times, one after the other.
 Expected: each run passes both scenarios and ends without clean-up problems. A run prints a line
 `funding key … holds … lamports and … USDC base units` when it starts and another, `after clean-up, …`, when
 it ends: the USDC figures must be identical (the harness returns every base unit), and the lamports must
-differ by no more than a few thousand (fees). Then check that no session is left open on the program:
+differ by less than 1,000,000 (fees only: a run sends some 30 to 40 transactions at 5,000 lamports each,
+so a few hundred thousand is normal). Then check that no session is left open on the program:
 
 ```bash
-export STINT_DEVNET_RPC_URL=<the URL that .env.devnet names>
-curl -s "$STINT_DEVNET_RPC_URL" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getProgramAccounts","params":["5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr",{"commitment":"confirmed","dataSlice":{"offset":0,"length":0},"filters":[{"dataSize":250}]}]}'
+url="$(grep '^STINT_DEVNET_RPC_URL=' .env.devnet | cut -d= -f2-)"   # read from the file: typed in, the URL (which may carry an API key) would stay in the shell history
+curl -s "$url" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getProgramAccounts","params":["5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr",{"commitment":"confirmed","dataSlice":{"offset":0,"length":0},"filters":[{"dataSize":250}]}]}'
 ```
 
 Expected: `"result":[]`. A run that leaves sessions behind is a failure of the clean-up, not a pass.
@@ -4369,6 +4474,10 @@ live API: Step 7 is the first run, and Step 4's test uses a mocked `fetch`):
 - A runnable tool is `{ name, description, input_schema, run(input, context?), parse(content) }`, where `run`
   returns a string or content blocks. An error that `run` throws is given back to the model as an error
   result, `Error: <message>`: that is how a policy refusal becomes readable.
+- By default the runner keeps the conversation on the server (observed with a mocked `fetch` at 1.3.0): it sends
+  `thread` and `stream` fields and the beta header `message-threads-2026-08-12`, and later requests carry only
+  the new messages. The agent sets `thread: false`, so that each request carries the whole conversation, as
+  the stream's data and `fallbacks` assume; the type allows it.
 - Effort: `output_config: { effort: "low" }`. The levels are `low`, `medium`, `high`, `xhigh` and `max`.
 - **Server-side fallback exists.** The request takes `fallbacks: [{ model, max_tokens?, output_config? }]`
   under the beta header `server-side-fallback-2026-07-01` (`betas: ["server-side-fallback-2026-07-01"]`).
@@ -4388,18 +4497,33 @@ const mode = process.argv[3] ?? "run";
 if (mode === "serve") {
   // Leaves the stack running for a person's agent or MCP host: the gate's URL, and a token account that
   // someone pays every 30 s, to watch. The timer keeps the process alive; the signal handler installed
-  // above stops the stack (sessions closed, funds returned, as after a run) and exits.
-  const context = stack.context();
-  // 1 USDC pays 100 times: enough for hours, and it leaves the funding key's USDC for whoever uses the stack.
-  const payer = await context.newBuyer(1_000_000n);
-  const watched = await context.newBuyer(0n);
-  process.stdout.write(`${JSON.stringify({ gateUrl: context.gateUrl, watchedAccount: watched.usdcAccount }, null, 2)}\n`);
-  setInterval(() => {
-    context.sendUsdc(payer, watched.usdcAccount, 10_000n).then(
-      (signature) => console.error(`paid ${watched.usdcAccount}: ${signature}`),
-      (error: unknown) => console.error(`payment failed: ${error instanceof Error ? error.message : String(error)}`),
-    );
-  }, 30_000);
+  // above stops the stack (sessions closed, everything returned to the funding key, as after a run) and exits.
+  let timer: NodeJS.Timeout | undefined;
+  // The handler stops `running`: the timer is cleared first, so that a payment does not race the clean-up.
+  running = {
+    ...stack,
+    stop: async () => {
+      clearInterval(timer);
+      await stack.stop();
+    },
+  };
+  try {
+    const context = stack.context();
+    // 1 USDC pays 100 times, about 50 minutes: raise it for a longer session.
+    const payer = await context.newBuyer(1_000_000n);
+    const watched = await context.newBuyer(0n);
+    process.stdout.write(`${JSON.stringify({ gateUrl: context.gateUrl, watchedAccount: watched.usdcAccount }, null, 2)}\n`);
+    timer = setInterval(() => {
+      context.sendUsdc(payer, watched.usdcAccount, 10_000n).then(
+        (signature) => console.error(`paid ${watched.usdcAccount}: ${signature}`),
+        (error: unknown) => console.error(`payment failed: ${error instanceof Error ? error.message : String(error)}`),
+      );
+    }, 30_000);
+  } catch (error) {
+    // Nothing else would stop the stack: its services are up and its keys are funded.
+    await stack.stop();
+    throw error;
+  }
 } else {
   // `pnpm e2e:local` and `pnpm e2e:devnet`: runs every scenario on the target, writes the report, and
   // exits 1 when a required scenario fails (spec section 12.2). Kora's logs are kept with a failing
@@ -4715,6 +4839,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       tool_choice: { type: "auto" },
       output_config: { effort: "low" },
       betas: [FALLBACK_BETA],
+      thread: false,
       fallbacks: [{ model: options.fallbackModel ?? FALLBACK_MODEL }],
       max_iterations: options.maxIterations ?? 20,
     } as never);
@@ -4823,7 +4948,7 @@ serve mode, as the difference of two balances; a total such as `20000` or `30000
 and a slot. Afterwards no session
 is left open (the `getProgramAccounts` check of Task 7); one left by an agent that was interrupted is
 closed when terminal 1 stops (or by the next `pnpm e2e:devnet`), because the harness signs as the stack's
-receiver authorizer. If the API refuses a parameter (`output_config`,
+receiver authorizer. If the API refuses a parameter (`output_config`, `thread`,
 `fallbacks` or the beta header), the error names it: correct the call to match the API, run the
 agent's tests again, and record the correction in the commit message.
 
@@ -4854,7 +4979,8 @@ In `.env.example`, append:
 ANTHROPIC_API_KEY=
 STINT_GATE_URL=
 STINT_WATCH_ACCOUNT=
-# A keypair file made for the agent, holding USDC only: never the funding or the upgrade-authority key.
+# The absolute path (`~` is not expanded) of a keypair file made for the agent, holding USDC only: never the
+# funding or the upgrade-authority key.
 STINT_KEYPAIR_PATH=
 STINT_MAX_RATE=
 STINT_MAX_PER_SESSION=
@@ -4862,8 +4988,9 @@ STINT_BUDGET_AMOUNT=
 STINT_BUDGET_PERIOD_SECONDS=
 ```
 
-In `docs/specs/stint-system.md`, §9.7, replace the sentence `**Task:** watch a devnet token account until a
-payment arrives; report the amount received and the slot; close the session.` with:
+In `docs/specs/stint-system.md`, §9.7, replace the `**Task:**` sentence (it begins `**Task:** watch a devnet token
+account until a payment arrives` and ends `close the session.`; the spec wraps it across lines, so match it as one
+sentence) with:
 
 ```
 **Task:** watch a devnet token account until payments arrive; report the amount of the last payment and
