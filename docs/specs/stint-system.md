@@ -1547,14 +1547,18 @@ the target accepts allowance funding. It also has a client mode, run against a r
 itself):
 - a gate configured with a test offer: `minSeconds` of 5 s or less, and a short
   `idleCloseSeconds`;
-- a funding key with SOL and the offer's asset on the target network. The harness creates the
-  keys that each scenario, and on `devnet` each stack, needs, and funds them from this key. At the
-  end of the run, it first closes any of its sessions still open, including those left open when
-  a scenario stopped its stack. It holds every buyer key, so it closes each one at once with a
-  `Standard` close signed by the session's authority (section 4.3). The funding key is the fee
-  payer (S14), since some buyers hold no SOL. If a scenario closed a payout account that the close
-  pays (section 4.3), either the buyer's refund account or the seller's `receiver_token`, the
-  harness recreates it first (S7). It then returns what is left to the funding key;
+- a funding key with SOL and the offer's asset on the target network, which it uses for nothing but
+  funding and fees. The harness derives every other key it needs from one seed, so the keys of any
+  earlier run are known without a record. It creates the keys that each scenario, and on `devnet` each
+  stack, needs, and funds them from the funding key, which is the fee payer of its own transactions
+  (S14), since some buyers hold no SOL. Before a run, and again after it, the harness cleans up: it
+  closes every session still open that one of its keys opened, receives or paid the rent of, including
+  those left open when a scenario stopped its stack or a run ended abnormally, and returns what its keys
+  hold to the funding key. A close is a `Standard` close (section 4.3) signed by the session's authority,
+  or, when the harness does not hold that key, by the session's `receiver_authorizer`. If a payout
+  account that the close pays (section 4.3), either the buyer's refund account or the seller's
+  `receiver_token`, has been closed, the same transaction recreates it first (S7, S13). The clean-up
+  starts from the keys alone, so it is the same after any run, and after none;
 - the network's RPC URL.
 
 **Timing tolerance:** a timed condition passes within 5 s (`confirmed` commitment plus the gate's

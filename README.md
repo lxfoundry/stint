@@ -25,6 +25,9 @@ The toolchain is pinned in `CLAUDE.md` (section "Toolchain") and checked by
     scripts/fetch-subscriptions-program.sh    # fetch and check the Subscriptions program copy, once
     pnpm test                                 # unit and integration tests
     pnpm e2e:local                            # end-to-end scenarios on the local target
+    pnpm e2e:devnet                           # the same scenarios on devnet (needs .env.devnet and a deployed program)
+    pnpm e2e:devnet funds                     # the address to fund for it, and what that address holds
+    pnpm e2e:devnet clean                     # the clean-up alone
 
 The end-to-end report is written to `e2e/report/report.md`.
 
@@ -75,3 +78,31 @@ mainnet deployment it must move to a multisig or be revoked.
 
 The program's ID is in `Anchor.toml`; its keypair is `target/deploy/stint-keypair.json` and is never
 committed. Back it up.
+
+## Running the scenarios on devnet
+
+`pnpm e2e:devnet` runs the end-to-end scenarios against devnet, with the program deployed by
+`scripts/deploy-devnet.sh`. It is run on demand, never as a merge gate: the public network is shared and
+rate-limited. Create `.env.devnet` (git-ignored; `.env.example` lists the names) with:
+
+- `STINT_DEVNET_RPC_URL`: a devnet endpoint (and `STINT_DEVNET_WS_URL` if its WebSocket URL is not the
+  same address with `ws` for `http`);
+- `STINT_DEVNET_SEED`: a recovery phrase of 12 to 24 words in quotes, or 64 hexadecimal characters
+  (`openssl rand -hex 32`). Every key of the target derives from it, by the harness's own rule, so the
+  addresses are not the ones a wallet shows for the same phrase. Use a phrase made for this, never one
+  that holds funds elsewhere, and keep a copy off this machine.
+
+`pnpm e2e:devnet funds` prints the funding key's address and balances. Fund that address once, with at
+least 0.5 SOL from a devnet faucet and 5 USDC from Circle's (Solana Devnet). It is the only key to
+watch: it plays no part in any scenario, and the fees that runs spend are the only thing that does not
+come back to it.
+
+A run checks that the endpoint is devnet and that the program is deployed, then cleans up: it closes
+every session that the seed's keys have open and returns what they hold to the funding key. On a first
+run there is nothing to do; after a run that was killed it repairs what that run left. Then it funds the
+keys it needs from the funding key, runs the scenarios, and cleans up again. `pnpm e2e:devnet clean`
+does the clean-up alone. Run one at a time per seed: the clean-up closes every session that the seed's
+keys have open, whichever run opened it. If the start-up clean-up fails, the run does not start; `pnpm e2e:devnet --force` goes
+on regardless. The report is written to `e2e/report/`. Kora is started with the RPC
+URL on its command line and writes it to its log, so a URL that carries an API key is visible to other users of the
+machine (`ps`) and in `e2e/report/kora.log` (git-ignored).

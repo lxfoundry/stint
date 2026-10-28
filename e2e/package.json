@@ -9,7 +9,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "local": "tsx src/cli.ts"
+    "local": "tsx src/cli.ts local",
+    "devnet": "tsx src/cli.ts devnet"
   },
   "dependencies": {
     "@lxfoundry/stint-client": "workspace:*",

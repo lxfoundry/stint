@@ -71,7 +71,8 @@ Named in section 3.5 of `docs/specs/stint-system.md` and pinned by
 `scripts/check-toolchain.sh` checks the installed tools and the files that pin them. Commands: `anchor build` builds the program;
 `pnpm generate:client` regenerates its client; `pnpm test` runs the unit and integration tests (the integration tests need `anchor build`,
 `scripts/fetch-subscriptions-program.sh` and the `surfpool` and `kora` binaries first); `pnpm e2e:local`
-runs the end-to-end scenarios on the `local` target. On Windows, everything runs inside WSL 2 (the
+runs the end-to-end scenarios on the `local` target. `pnpm e2e:devnet` runs them on devnet, on demand: it needs `.env.devnet` (see
+`.env.example`) and a deployed program. On Windows, everything runs inside WSL 2 (the
 Solana and Anchor toolchains require it). Running `anchor` outside a project that pins
 `[toolchain] solana_version` in `Anchor.toml` can switch the Solana CLI to the version Anchor
 bundles (3.1.10 for Anchor 1.2.1); `agave-install init 4.3.2` restores the pinned one, which

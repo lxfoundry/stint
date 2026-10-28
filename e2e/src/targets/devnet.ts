@@ -16,7 +16,7 @@ const STACK_LAMPORTS = 50_000_000n;
 /**
  * How long a scenario waits after subscribing before it causes the change it expects to hear about.
  * A provider's WebSocket can take seconds to register a subscription, which the stream does not
- * acknowledge; this is a measured value (Task 7 may raise it), not a guarantee.
+ * acknowledge; this is a measured value, not a guarantee: raise it if a provider is slower.
  */
 const SUBSCRIPTION_SETTLE_MS = 5_000;
 
