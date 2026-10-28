@@ -12,10 +12,12 @@
     "local": "tsx src/cli.ts"
   },
   "dependencies": {
+    "@lxfoundry/stint-client": "workspace:*",
     "@lxfoundry/stint-conformance": "workspace:*",
     "@lxfoundry/stint-example-stream": "workspace:*",
     "@lxfoundry/stint-facilitator": "workspace:*",
     "@lxfoundry/stint-gate": "workspace:*",
+    "@lxfoundry/stint-mcp": "workspace:*",
     "@lxfoundry/stint-program-client": "workspace:*",
     "@lxfoundry/stint-x402": "workspace:*",
     "@solana-program/system": "0.16.0",
@@ -23,5 +25,8 @@
     "@solana/kit": "8.5.0",
     "@solana/surfpool": "1.6.1",
     "@solana/sysvars": "8.5.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0"
   }
 }

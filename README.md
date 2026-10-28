@@ -27,3 +27,31 @@ The toolchain is pinned in `CLAUDE.md` (section "Toolchain") and checked by
     pnpm e2e:local                            # end-to-end scenarios on the local target
 
 The end-to-end report is written to `e2e/report/report.md`.
+
+## MCP server
+
+`@lxfoundry/stint-mcp` serves the session tools over MCP, on stdio, for any MCP host. It is configured
+by environment variables, and refuses to start without the caps:
+
+| Variable | Meaning |
+|---|---|
+| `STINT_KEYPAIR_PATH` | The absolute path of a Solana CLI keypair file, a JSON array of 64 bytes (`~` is not expanded). Required |
+| `STINT_MAX_RATE` | The highest rate accepted, in base units per second. Required |
+| `STINT_MAX_PER_SESSION` | The most one session may lock, in base units. Required |
+| `STINT_BUDGET_AMOUNT`, `STINT_BUDGET_PERIOD_SECONDS` | The most locked across sessions per period. Required |
+| `STINT_MAX_MIN_SECONDS` | The highest minimum charge accepted. Default 300 |
+| `STINT_SELLERS`, `STINT_PROGRAMS`, `STINT_NETWORKS`, `STINT_ASSETS` | Optional allowlists, comma-separated (`mint:decimals` for assets) |
+
+Every limit is enforced by the client's code, whatever a seller offers or the model asks. The agent's
+key holds USDC and no SOL. When the host disconnects, or the process is stopped, every session still
+open (and any open still in flight) is closed first, so the unused part of each deposit comes back.
+
+Register it with an MCP host as a command, from the repository root. For Claude Code:
+
+    claude mcp add stint \
+      --env STINT_KEYPAIR_PATH=$HOME/.config/stint/agent.json --env STINT_MAX_RATE=5000 \
+      --env STINT_MAX_PER_SESSION=600000 --env STINT_BUDGET_AMOUNT=2000000 --env STINT_BUDGET_PERIOD_SECONDS=3600 \
+      -- "$PWD/node_modules/.bin/tsx" "$PWD/packages/mcp/src/cli.ts"
+
+stdout carries the protocol, so the entry point writes nothing else to it. Run the host inside WSL on
+Windows, where the toolchain lives.
