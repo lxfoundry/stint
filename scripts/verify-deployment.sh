@@ -30,7 +30,8 @@ genesis="$(solana genesis-hash --url "$url" 2>/dev/null)" || die "cannot read th
 mkdir -p target
 dump="$(mktemp "target/dump.XXXXXX")"
 trap 'rm -f "$dump"' EXIT
-solana program dump "$program_id" "$dump" --url "$url" >/dev/null
+# The CLI's errors quote the URL it was given, key included: its output is not shown.
+solana program dump "$program_id" "$dump" --url "$url" >/dev/null 2>&1 || die "cannot dump $program_id from $host"
 
 size="$(stat -c %s "$artifact")"
 dumped_size="$(stat -c %s "$dump")"

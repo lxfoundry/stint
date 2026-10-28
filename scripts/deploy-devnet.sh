@@ -93,5 +93,12 @@ fi
 
 (( balance >= MIN_LAMPORTS )) || die "the payer holds $balance lamports; $MIN_LAMPORTS are needed (about 2.2 SOL): fund $payer_address on devnet first"
 
-"${command[@]}"
-solana program show "$program_id" --url "$url"
+# The CLI's errors quote the URL it was given, key included, and it prints a failed deploy's buffer
+# address and seed notice on stderr. Both streams are kept, each with every URL cut to scheme and
+# host. The match is a pattern: the CLI normalises the URL it prints, so the text may differ from $url.
+redact() { sed -uE 's|(https?://)([^/@ )]*@)?([^/?# )]+)[^ )]*|\1\3|g'; }
+# Runs a command, its stdout and stderr redacted and still on their own streams; its exit status stands.
+run_redacted() { { "$@" 2>&1 1>&3 3>&- | redact >&2; } 3>&1 | redact; }
+
+run_redacted "${command[@]}"
+run_redacted solana program show "$program_id" --url "$url"
