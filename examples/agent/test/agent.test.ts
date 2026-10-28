@@ -36,10 +36,22 @@ function mockedClient(responses: unknown[]): { client: Anthropic; sent: Sent[] }
 
 /** The five session tools, recording each call; `failing` names a tool that throws a policy refusal. */
 function fakeTools(calls: string[], failing?: string): SessionTools {
-  const tool = (name: string, output: unknown) => ({
+  const loose = { type: "object", properties: {}, additionalProperties: true };
+  // The schema of the real tool: a required field, typed fields and no others.
+  const receiveSchema = {
+    type: "object",
+    properties: {
+      sessionId: { type: "string" },
+      max: { type: "integer", minimum: 1 },
+      timeoutSeconds: { type: "number", minimum: 0 },
+    },
+    required: ["sessionId", "timeoutSeconds"],
+    additionalProperties: false,
+  };
+  const tool = (name: string, output: unknown, inputSchema: Record<string, unknown> = loose) => ({
     name,
     description: `The ${name} tool, described at length for the model`,
-    inputSchema: { type: "object", properties: {}, additionalProperties: true },
+    inputSchema,
     async run() {
       calls.push(name);
       if (name === failing) throw new ToolError("Policy refuses the offer: rate 5 exceeds maxRate 1");
@@ -51,7 +63,7 @@ function fakeTools(calls: string[], failing?: string): SessionTools {
       stint_open_session: tool("stint_open_session", { sessionId: "S1", paidUntil: 1, cost: "120000", remainingBudget: "880000" }),
       stint_session_status: tool("stint_session_status", { paidUntil: 1, timeLeftSeconds: 100, spent: "5000", refundable: "115000" }),
       stint_send: tool("stint_send", { ok: true }),
-      stint_receive: tool("stint_receive", { messages: [{ type: "account", slot: "42" }], timedOut: false }),
+      stint_receive: tool("stint_receive", { messages: [{ type: "account", slot: "42" }], timedOut: false }, receiveSchema),
       stint_close_session: tool("stint_close_session", { paid: "5000", refunded: "115000", transaction: "sig" }),
     } as never,
     closeCode: () => undefined,
@@ -91,6 +103,12 @@ describe("runAgent", () => {
     ]);
     expect(JSON.stringify(first.body.system)).toMatch(/Open a session first/);
     expect(JSON.stringify(first.body.messages)).toMatch(/WATCHED/);
+    // Each request carries the whole conversation, and the conversation is not kept on the server.
+    expect(first.body).not.toHaveProperty("thread");
+    expect(first.headers.get("anthropic-beta")).not.toContain("message-threads");
+    expect(sent[1]!.headers.get("anthropic-beta")).not.toContain("message-threads");
+    expect(sent[1]!.body.messages.map((entry: { role: string }) => entry.role)).toEqual(["user", "assistant", "user"]);
+    expect(sent[3]!.body.messages).toHaveLength(7);
   });
 
   it("gives a tool's failure back to the model as an error it can read", async () => {
@@ -106,6 +124,47 @@ describe("runAgent", () => {
     const toolResult = JSON.stringify(sent[1]!.body.messages);
     expect(toolResult).toMatch(/Policy refuses the offer: rate 5 exceeds maxRate 1/);
     expect(toolResult).toMatch(/"is_error":true/);
+  });
+
+  it("refuses a tool's input that does not match its schema, without running the tool", async () => {
+    const calls: string[] = [];
+    const { client, sent } = mockedClient([
+      message(
+        [
+          toolUse("t1", "stint_receive", { sessionId: "S1" }),
+          toolUse("t2", "stint_receive", { sessionId: "S1", timeoutSeconds: 30, max: "x" }),
+          toolUse("t3", "stint_receive", { sessionId: "S1", timeoutSeconds: 30, extra: true }),
+          toolUse("t4", "stint_receive", { sessionId: "S1", timeoutSeconds: 30, max: 1.5 }),
+        ],
+        "tool_use",
+      ),
+      message([{ type: "text", text: "Done." }], "end_turn"),
+    ]);
+
+    const result = await runAgent({ client, tools: fakeTools(calls), gateUrl: "http://gate", account: "WATCHED" });
+
+    expect(result.outcome).toBe("answered");
+    expect(calls).toEqual(["closeAll"]);
+    const results = sent[1]!.body.messages.at(-1).content as { type: string; is_error?: boolean; content: unknown }[];
+    expect(results).toHaveLength(4);
+    for (const entry of results) {
+      expect(entry).toMatchObject({ type: "tool_result", is_error: true });
+      expect(JSON.stringify(entry.content)).toMatch(/Invalid input for stint_receive/);
+    }
+  });
+
+  it("fails when the model is stopped before it is done, and still closes every session", async () => {
+    const calls: string[] = [];
+    const { client } = mockedClient([
+      message([toolUse("t1", "stint_receive", { sessionId: "S1", timeoutSeconds: 30 })], "tool_use"),
+      message([toolUse("t2", "stint_receive", { sessionId: "S1", timeoutSeconds: 30 })], "tool_use"),
+      message([toolUse("t3", "stint_receive", { sessionId: "S1", timeoutSeconds: 30 })], "tool_use"),
+    ]);
+
+    await expect(
+      runAgent({ client, tools: fakeTools(calls), gateUrl: "http://gate", account: "WATCHED", maxIterations: 2 }),
+    ).rejects.toThrow(/stopped before it was done \(stop reason: tool_use\)/);
+    expect(calls.at(-1)).toBe("closeAll");
   });
 
   it("reports a refusal that the fallback did not resolve, and closes every session", async () => {

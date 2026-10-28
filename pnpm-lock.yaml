@@ -269,6 +269,9 @@ importers:
       '@lxfoundry/stint-mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
+      '@modelcontextprotocol/server':
+        specifier: 2.4.0
+        version: 2.4.0
 
   examples/solana-stream:
     dependencies:

@@ -93,11 +93,14 @@ if (mode === "serve") {
   // someone pays every 30 s, to watch. The timer keeps the process alive; the signal handler installed
   // above stops the stack (sessions closed, everything returned to the funding key, as after a run) and exits.
   let timer: NodeJS.Timeout | undefined;
-  // The handler stops `running`: the timer is cleared first, so that a payment does not race the clean-up.
+  let payment: Promise<unknown> = Promise.resolve();
+  // The handler stops `running`: the timer is cleared and a payment in flight settles first, so that a
+  // payment does not race the clean-up.
   running = {
     ...stack,
     stop: async () => {
       clearInterval(timer);
+      await payment;
       await stack.stop();
     },
   };
@@ -106,10 +109,9 @@ if (mode === "serve") {
     // 1 USDC pays 100 times, about 50 minutes: raise it for a longer session.
     const payer = await context.newBuyer(1_000_000n);
     const watched = await context.newBuyer(0n);
-    process.stdout.write(`${JSON.stringify({ gateUrl: context.gateUrl, watchedAccount: watched.usdcAccount }, null, 2)}
-`);
+    process.stdout.write(`${JSON.stringify({ gateUrl: context.gateUrl, watchedAccount: watched.usdcAccount }, null, 2)}\n`);
     timer = setInterval(() => {
-      context.sendUsdc(payer, watched.usdcAccount, 10_000n).then(
+      payment = context.sendUsdc(payer, watched.usdcAccount, 10_000n).then(
         (signature) => console.error(`paid ${watched.usdcAccount}: ${signature}`),
         (error: unknown) => console.error(`payment failed: ${error instanceof Error ? error.message : String(error)}`),
       );
