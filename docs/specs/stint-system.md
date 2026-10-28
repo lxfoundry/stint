@@ -916,7 +916,7 @@ sessions it opens with itself. The API key and the limits per key bound that.
 | `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `202 {session, transaction}` while the settlement is pending; `400 invalid_duration` |
 | `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration` |
 | `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`, or `200 {transaction}` when the close is confirmed but its `Closed` event cannot be read; `202 {transaction}` while the settlement is pending (the client polls the status until `404`, for at most `closeWaitSeconds`: section 9.3); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
-| `GET /sessions/:id` | Status from the chain: `paidUntil`, deposited and a fresh blockhash. Earned so far and time left are estimates at the gate's session clock (section 7.3); the chain's clock decides the amounts (section 4.2) | `200`; `404` |
+| `GET /sessions/:id` | Status from the chain, public like the chain. Body: `session`, `paidUntil`, `startedAt`, `deposited`, `claimed`, `rate`, `minSeconds`, `maxSeconds`, a fresh `blockhash` with its `lastValidBlockHeight`, and, as estimates at the gate's session clock (section 7.3), `timeLeft`, `earned` (section 4.2), `due` (what a close then charges in total) and `refundable` (`deposited - max(claimed, due)`). `u64` values are decimal strings. The chain's clock decides the amounts (section 4.2). It works for a session the gate does not track yet. It reads the chain on every call and is not authenticated: a deployment rate-limits it like any public route | `200`; `404` for an address that holds no session, or a session with other terms (section 4.6) |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
 | `GET /.well-known/jwks.json` | The gate's assertion keys (section 7.7) | `200` |
 
@@ -1247,7 +1247,7 @@ server.
 | Tool | Input | Output |
 |---|---|---|
 | `stint_open_session` | `url`, `seconds?`, `reason` | `sessionId`, `paidUntil`, cost, remaining budget |
-| `stint_session_status` | `sessionId` | time left, spent, refundable now |
+| `stint_session_status` | `sessionId` | `paidUntil`, `timeLeftSeconds`, `spent` (what closing now would pay the seller, the minimum included), `refundable` (what it would return) |
 | `stint_top_up` | `sessionId`, `seconds` | `paidUntil`, cost |
 | `stint_close_session` | `sessionId` | paid, refunded, transaction |
 | `stint_send` | `sessionId`, `message` | ok |
@@ -1258,6 +1258,8 @@ server.
   message's top-level field of the same name.
 - Tool descriptions instruct agents to close sessions as soon as their task is done.
 - Policy refusals are returned as readable tool errors.
+- The runtime that holds the tools can close every session still open at once (`closeAll`), for a
+  process that is shutting down. No session can be opened after it.
 
 ### 9.6 MCP server
 

@@ -4,6 +4,8 @@ import { address, isAddress, type Address } from "@solana/kit";
 import {
   STINT_PROGRAM_ADDRESS,
   StintInstruction,
+  dueAt,
+  earnedAt,
   identifyStintInstruction,
   paidUntil,
   parseOpenInstruction,
@@ -33,6 +35,7 @@ import {
   type PaymentPayload,
   type PaymentRequired,
   type SellerTerms,
+  type SessionStatus,
   type TokenPurpose,
 } from "@lxfoundry/stint-x402";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -81,6 +84,8 @@ async function upstream<T>(call: () => Promise<T>): Promise<T> {
 
 /** The shape of a route; the id still has to be a real address (32 bytes), which the regex cannot say. */
 const SESSION_PATH = /^\/sessions\/([1-9A-HJ-NP-Za-km-z]{32,44})\/(ws|close)$/;
+/** `GET /sessions/:id` (the status); `SESSION_PATH` holds the routes that end in `/ws` or `/close`. */
+const STATUS_PATH = /^\/sessions\/([1-9A-HJ-NP-Za-km-z]{32,44})$/;
 const TOKEN_SKEW_MS = 30_000;
 
 function parseUrl(request: IncomingMessage, origin: string): URL | undefined {
@@ -341,6 +346,37 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     return { status: 200, body, ended: true };
   }
 
+  /**
+   * The status of a session, read from the chain and public like the chain itself (spec §7.1). It
+   * works for a session this gate does not track yet. A session with other terms is never served
+   * (spec §4.6), so it is not this gate's to report either.
+   */
+  async function sessionStatus(response: ServerResponse, session: Address): Promise<void> {
+    const stored = await upstream(() => config.chain.readSession(session));
+    if (!stored || !sessionMatches(stored, seller)) return sendJson(response, 404, { error: "unknown_session" });
+    const lifetime = await upstream(() => config.chain.latestBlockhash());
+    const now = BigInt(Math.floor(sessionClock() / 1000));
+    const until = paidUntil(stored);
+    const due = dueAt(stored, now);
+    const body: SessionStatus = {
+      session,
+      paidUntil: Number(until),
+      startedAt: Number(stored.startedAt),
+      deposited: stored.deposited.toString(),
+      claimed: stored.claimed.toString(),
+      rate: stored.rate.toString(),
+      minSeconds: stored.minSeconds,
+      maxSeconds: stored.maxSeconds,
+      timeLeft: Number(until > now ? until - now : 0n),
+      earned: earnedAt(stored, now).toString(),
+      due: due.toString(),
+      refundable: (stored.deposited - (due > stored.claimed ? due : stored.claimed)).toString(),
+      blockhash: lifetime.blockhash,
+      lastValidBlockHeight: lifetime.lastValidBlockHeight.toString(),
+    };
+    sendJson(response, 200, body);
+  }
+
   function refuseUpgrade(socket: Duplex, status: number): void {
     socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   }
@@ -379,6 +415,14 @@ export function createGate<U>(config: GateConfig<U>): Gate {
           const id = match[1]!;
           if (!isAddress(id)) sendJson(response, 404, { error: "unknown_session" });
           else await closeSession(request, response, id);
+          return true;
+        }
+        if (request.method === "GET") {
+          const found = STATUS_PATH.exec(url.pathname);
+          if (!found) return false;
+          const id = found[1]!;
+          if (!isAddress(id)) sendJson(response, 404, { error: "unknown_session" });
+          else await sessionStatus(response, id);
           return true;
         }
         return false;

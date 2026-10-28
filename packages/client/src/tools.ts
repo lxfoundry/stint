@@ -47,15 +47,33 @@ export interface CloseOutput {
   readonly transaction: string;
 }
 
+export interface StatusInput {
+  readonly sessionId: string;
+}
+/** `spent` is what closing the session now would pay the seller, the minimum included; `refundable` is what it would return. */
+export interface StatusOutput {
+  readonly paidUntil: number;
+  readonly timeLeftSeconds: number;
+  readonly spent: string;
+  readonly refundable: string;
+}
+export interface CloseAllOutput {
+  readonly closed: string[];
+  readonly failed: { readonly sessionId: string; readonly error: string }[];
+}
+
 export interface SessionTools {
   readonly tools: {
     readonly stint_open_session: Tool<OpenInput, OpenOutput>;
+    readonly stint_session_status: Tool<StatusInput, StatusOutput>;
     readonly stint_send: Tool<SendInput, { ok: true }>;
     readonly stint_receive: Tool<ReceiveInput, ReceiveOutput>;
     readonly stint_close_session: Tool<CloseInput, CloseOutput>;
   };
   /** The close code of the session's connection, once it has closed. */
   closeCode(sessionId: string): number | undefined;
+  /** Closes every session still open, for a runtime that is shutting down; none can be opened afterwards. A failure is reported, never thrown. */
+  closeAll(): Promise<CloseAllOutput>;
 }
 
 interface Live {
@@ -81,6 +99,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 /** The session tools of spec §9.5, sharing one runtime. */
 export function createSessionTools(client: StintClient): SessionTools {
   const live = new Map<string, Live>();
+  const opens = new Set<Promise<unknown>>();
+  let closing = false;
 
   const get = (sessionId: unknown): Live => {
     const state = typeof sessionId === "string" ? live.get(sessionId) : undefined;
@@ -132,6 +152,25 @@ export function createSessionTools(client: StintClient): SessionTools {
 
   return {
     closeCode: (sessionId) => live.get(sessionId)?.closeCode,
+    async closeAll() {
+      const outcome: { closed: string[]; failed: { sessionId: string; error: string }[] } = { closed: [], failed: [] };
+      // No open starts from here on; one still in flight registers its session when it ends: wait for it, or its deposit is orphaned.
+      closing = true;
+      await Promise.allSettled([...opens]);
+      const open = [...live.entries()].filter(([, state]) => !state.closed);
+      await Promise.all(
+        open.map(async ([sessionId, state]) => {
+          try {
+            await state.session.close();
+            state.closed = true;
+            outcome.closed.push(sessionId);
+          } catch (error) {
+            outcome.failed.push({ sessionId, error: error instanceof Error ? error.message : String(error) });
+          }
+        }),
+      );
+      return outcome;
+    },
     tools: {
       stint_open_session: {
         name: "stint_open_session",
@@ -146,13 +185,36 @@ export function createSessionTools(client: StintClient): SessionTools {
           ["url", "reason"],
         ),
         async run(input) {
-          const session = await client.open(input.url, input.seconds === undefined ? {} : { seconds: input.seconds });
-          live.set(session.id, { session, inbox: [], waiters: new Set(), closed: false });
+          if (closing) throw new ToolError("The session runtime is shutting down: no new session can be opened");
+          // Tracked until its session is registered, so that `closeAll` can wait for an open that is in flight.
+          const work = (async () => {
+            const session = await client.open(input.url, input.seconds === undefined ? {} : { seconds: input.seconds });
+            live.set(session.id, { session, inbox: [], waiters: new Set(), closed: false });
+            return {
+              sessionId: session.id,
+              paidUntil: session.paidUntil,
+              cost: session.cost.toString(),
+              remainingBudget: client.remainingBudget().toString(),
+            };
+          })();
+          opens.add(work);
+          return work.finally(() => opens.delete(work));
+        },
+      },
+      stint_session_status: {
+        name: "stint_session_status",
+        description:
+          "Reports how much time a session has left, what closing it now would pay the seller (spent, the minimum charge included) and what it would refund. The figures are estimates on the seller's clock; the chain's clock decides the final amounts.",
+        inputSchema: strict({ sessionId: sessionIdSchema }, ["sessionId"]),
+        async run(input) {
+          const state = get(input.sessionId);
+          if (state.closed) throw new ToolError("The session is closed");
+          const status = await state.session.status();
           return {
-            sessionId: session.id,
-            paidUntil: session.paidUntil,
-            cost: session.cost.toString(),
-            remainingBudget: client.remainingBudget().toString(),
+            paidUntil: status.paidUntil,
+            timeLeftSeconds: status.timeLeft,
+            spent: status.due,
+            refundable: status.refundable,
           };
         },
       },

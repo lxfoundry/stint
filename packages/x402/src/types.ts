@@ -63,6 +63,30 @@ export interface FacilitatorExtra {
   readonly closeUrl: string;
 }
 
+/** The body of the gate's `GET /sessions/:id` (spec §7.1). `u64` values are decimal strings. */
+export interface SessionStatus {
+  readonly session: string;
+  /** Unix seconds, from the chain: `started_at + deposited / rate`. */
+  readonly paidUntil: number;
+  readonly startedAt: number;
+  readonly deposited: string;
+  readonly claimed: string;
+  readonly rate: string;
+  readonly minSeconds: number;
+  readonly maxSeconds: number;
+  /** Seconds to `paidUntil` at the gate's session clock, never negative. An estimate. */
+  readonly timeLeft: number;
+  /** Spec §4.2 at the gate's session clock. An estimate. */
+  readonly earned: string;
+  /** What a close at that moment charges in total, the minimum included. An estimate. */
+  readonly due: string;
+  /** What a close at that moment refunds: `deposited - max(claimed, due)`. An estimate. */
+  readonly refundable: string;
+  /** A fresh blockhash, for a client with no node of its own (spec §7.1). */
+  readonly blockhash: string;
+  readonly lastValidBlockHeight: string;
+}
+
 export interface OpenPayload {
   readonly type: "open";
   readonly transaction: string;

@@ -3,6 +3,7 @@ export { StintError, createStintClient, type ClientOptions, type CloseReceipt, t
 export {
   ToolError,
   createSessionTools,
+  type CloseAllOutput,
   type CloseInput,
   type CloseOutput,
   type OpenInput,
@@ -11,5 +12,7 @@ export {
   type ReceiveOutput,
   type SendInput,
   type SessionTools,
+  type StatusInput,
+  type StatusOutput,
   type Tool,
 } from "./tools.js";

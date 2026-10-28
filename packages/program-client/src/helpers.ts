@@ -62,3 +62,27 @@ export function findClosedEvent(instructions: Iterable<ProgramInstruction>): Clo
   const payload = eventPayloads(instructions).find((data) => containsBytes(data, CLOSED_EVENT_DISCRIMINATOR, 0));
   return payload && parseClosedEvent(payload);
 }
+
+interface Terms {
+  readonly startedAt: bigint;
+  readonly deposited: bigint;
+  readonly rate: bigint;
+}
+
+const min = (a: bigint, b: bigint) => (a < b ? a : b);
+const max = (a: bigint, b: bigint) => (a > b ? a : b);
+
+/** `max(0, min(now, paid_until) - started_at)`, in seconds (spec §4.2). */
+export function elapsedAt(session: Terms, now: bigint): bigint {
+  return max(0n, min(now, paidUntil(session)) - session.startedAt);
+}
+
+/** `min(deposited, rate × elapsed)`: what `claim` may pay out at `now` (spec §4.2). */
+export function earnedAt(session: Terms, now: bigint): bigint {
+  return min(session.deposited, session.rate * elapsedAt(session, now));
+}
+
+/** `min(deposited, rate × max(min_seconds, elapsed))`: the session's total charge if it closed at `now` (spec §4.2). */
+export function dueAt(session: Terms & { readonly minSeconds: number }, now: bigint): bigint {
+  return min(session.deposited, session.rate * max(BigInt(session.minSeconds), elapsedAt(session, now)));
+}

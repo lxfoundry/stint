@@ -88,6 +88,96 @@ describe("session tools (spec §9.5)", () => {
     expect(await tools.stint_close_session.run({ sessionId: opened.sessionId })).toEqual({ transaction: "sig" });
   });
 
+  it("reports the status of an open session, and refuses it once the session is closed", async () => {
+    const buyer = await generateKeyPairSigner();
+    gate = await startTestGate(buyer.address);
+    const client = createStintClient({
+      signer: buyer,
+      policy: { maxRate: 1_000n, maxPerSession: 100_000n, budget: { amount: 100_000n, periodSeconds: 3_600 } },
+    });
+    const { tools } = createSessionTools(client);
+    const opened = await tools.stint_open_session.run({ url: gate.url, seconds: 30, reason: "test" });
+
+    const status = await tools.stint_session_status.run({ sessionId: opened.sessionId });
+
+    expect(status.paidUntil).toBe(opened.paidUntil);
+    expect(status.timeLeftSeconds).toBeGreaterThanOrEqual(20);
+    expect(status.timeLeftSeconds).toBeLessThanOrEqual(30);
+    // Under minSeconds the charge is the minimum: 5 s at 1,000 per second.
+    expect(status).toMatchObject({ spent: "5000", refundable: "25000" });
+
+    await tools.stint_close_session.run({ sessionId: opened.sessionId });
+    await expect(tools.stint_session_status.run({ sessionId: opened.sessionId })).rejects.toThrow(/closed/);
+  });
+
+  it("closes every session still open, and reports what it closed", async () => {
+    const buyer = await generateKeyPairSigner();
+    gate = await startTestGate(buyer.address);
+    const client = createStintClient({
+      signer: buyer,
+      policy: { maxRate: 1_000n, maxPerSession: 100_000n, budget: { amount: 100_000n, periodSeconds: 3_600 } },
+    });
+    const { tools, closeAll, closeCode } = createSessionTools(client);
+    const first = await tools.stint_open_session.run({ url: gate.url, seconds: 30, reason: "test" });
+    const second = await tools.stint_open_session.run({ url: gate.url, seconds: 30, reason: "test" });
+    await tools.stint_send.run({ sessionId: second.sessionId, message: "hello" });
+    await tools.stint_close_session.run({ sessionId: first.sessionId });
+
+    expect(await closeAll()).toEqual({ closed: [second.sessionId], failed: [] });
+    await expect.poll(() => closeCode(second.sessionId)).toBe(4410);
+    expect(await closeAll()).toEqual({ closed: [], failed: [] });
+  });
+
+  it("reports a session that could not be closed instead of throwing", async () => {
+    const buyer = await generateKeyPairSigner();
+    gate = await startTestGate(buyer.address);
+    const client = createStintClient({
+      signer: buyer,
+      policy: { maxRate: 1_000n, maxPerSession: 100_000n, budget: { amount: 100_000n, periodSeconds: 3_600 } },
+    });
+    const { tools, closeAll } = createSessionTools(client);
+    const opened = await tools.stint_open_session.run({ url: gate.url, seconds: 30, reason: "test" });
+    // The gate goes away before the close; `afterEach` then has nothing left to stop.
+    const stopping = gate;
+    gate = undefined;
+    await stopping.stop();
+
+    const outcome = await closeAll();
+
+    expect(outcome.closed).toEqual([]);
+    expect(outcome.failed).toHaveLength(1);
+    expect(outcome.failed[0]?.sessionId).toBe(opened.sessionId);
+  });
+
+  it("waits for an open that is still in flight, and closes its session", async () => {
+    const buyer = await generateKeyPairSigner();
+    gate = await startTestGate(buyer.address);
+    const client = createStintClient({
+      signer: buyer,
+      policy: { maxRate: 1_000n, maxPerSession: 100_000n, budget: { amount: 100_000n, periodSeconds: 3_600 } },
+    });
+    const { tools, closeAll } = createSessionTools(client);
+
+    const opening = tools.stint_open_session.run({ url: gate.url, seconds: 30, reason: "test" });
+    const outcome = await closeAll();
+
+    expect(outcome).toEqual({ closed: [(await opening).sessionId], failed: [] });
+  });
+
+  it("refuses to open a session once closeAll has run", async () => {
+    const buyer = await generateKeyPairSigner();
+    gate = await startTestGate(buyer.address);
+    const client = createStintClient({
+      signer: buyer,
+      policy: { maxRate: 1_000n, maxPerSession: 100_000n, budget: { amount: 100_000n, periodSeconds: 3_600 } },
+    });
+    const { tools, closeAll } = createSessionTools(client);
+
+    await closeAll();
+
+    await expect(tools.stint_open_session.run({ url: gate.url, seconds: 30, reason: "test" })).rejects.toThrow(/shutting down/);
+  });
+
   it("answers an unknown session with a readable error", async () => {
     const client = createStintClient({
       signer: await generateKeyPairSigner(),
