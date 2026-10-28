@@ -1,7 +1,7 @@
 import { getTransferCheckedInstruction } from "@solana-program/token";
 import type { Buyer } from "@lxfoundry/stint-conformance";
 import type { Address, Rpc, SolanaRpcApi, TransactionSigner } from "@solana/kit";
-import { sendInstructions } from "../network/transactions.js";
+import { sendInstructions, type SendOptions } from "../network/transactions.js";
 import { USDC_DECIMALS, USDC_DEVNET_MINT } from "./usdc.js";
 
 /**
@@ -14,6 +14,7 @@ export async function sendUsdc(
   from: Buyer,
   to: Address,
   amount: bigint,
+  options?: SendOptions,
 ): Promise<string> {
   const transfer = getTransferCheckedInstruction({
     source: from.usdcAccount,
@@ -23,5 +24,5 @@ export async function sendUsdc(
     amount,
     decimals: USDC_DECIMALS,
   });
-  return sendInstructions(rpc, feePayer, [transfer]);
+  return sendInstructions(rpc, feePayer, [transfer], options);
 }
