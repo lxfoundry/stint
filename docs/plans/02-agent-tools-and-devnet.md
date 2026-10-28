@@ -44,9 +44,10 @@ No §14 question is answered by this stage.
 - The program is built for SBPF v3 (Anchor 1.2.1's default). `e2e/test/artifact.test.ts` checks it.
 - `u64` values on the wire are decimal strings; `u32` values are JSON numbers (spec §5.1). Amounts are
   `bigint` in TypeScript, never `number`.
-- **No secrets, ever, in any commit.** Keypair files are named by path in `.env` (git-ignored);
-  `.env.example` carries names and empty values. Never print a key's contents; an RPC URL may carry an API
-  key, so it appears in `.env` only.
+- **No secrets, ever, in any commit.** Keypair files are named by path in `.env`, and the devnet
+  harness's seed is in `.env.devnet` (both git-ignored); `.env.example` carries names and empty values.
+  Never print a key's contents or the seed; an RPC URL may carry an API key, so it appears in `.env` or
+  `.env.devnet` only.
 - **stdout of the MCP server is its protocol channel.** Nothing else is written to it.
 - A client never signs a transaction supplied by a seller, and every spending limit is enforced by the
   client's policy in code (spec §9.3). Nothing a stream or a model sends can raise one.
@@ -71,9 +72,9 @@ Schema validator are why `stint-mcp` has no validator of its own.
 
 These cannot be done by an implementer, and some take time (faucets limit how often a key can be funded).
 Task 5 gives the steps.
-1. A devnet key for deploying and for the harness's funding, with at least 3.5 SOL and 5 USDC.
+1. A devnet key for deploying, with at least 3 SOL; and a seed for the harness's keys (Task 7 generates it), whose funding key you fund with 0.5 SOL and 5 USDC.
 2. Docker Desktop's WSL integration, for the verifiable build.
-3. A backup of the program's keypair and of that key, off the machine.
+3. A backup of the program's keypair, of the deploying key and of the seed, off the machine.
 4. Optionally, a provider's devnet RPC URL with WebSocket support (Task 7 runs better on it).
 5. An Anthropic API key, for the example agent's live run (Task 8, Step 7).
 
@@ -115,11 +116,11 @@ half-build them:
 | `scripts/deploy-devnet.sh`, `scripts/verify-deployment.sh` | Guarded deployment, and byte-for-byte verification |
 | `e2e/src/artifact.ts` | `sbpfVersion` |
 | `e2e/src/targets/{services,local,devnet}.ts` | The shared services; the two targets |
-| `e2e/src/devnet/{config,funds,journal}.ts` | The devnet configuration and guards; funding, returning funds, closing sessions; the on-disk journal of a run's keys |
+| `e2e/src/devnet/{config,keys,funds}.ts` | The devnet configuration and guards; the keys derived from one seed; funding, the clean-up (closing sessions, returning funds) |
 | `e2e/src/fixtures/transfers.ts` | `sendUsdc` |
-| `e2e/src/cli.ts` | Target selection; the `serve` and `recover` modes |
+| `e2e/src/cli.ts` | Target selection; the `serve`, `clean` and `funds` modes |
 | `examples/agent/src/*` | `@lxfoundry/stint-example-agent` |
-| `.env.example` | The variable names the devnet target, the MCP server and the agent read |
+| `.env.example` | The variable names the devnet target (`.env.devnet`), the MCP server and the agent read |
 
 Every new package follows stage 0's shape: `"private": true`, `"type": "module"`, `"exports": { ".":
 "./src/index.ts" }`, scripts `typecheck` (`tsc -p tsconfig.json`) and `test` (`vitest run`), and a
@@ -2365,16 +2366,18 @@ marked **[Operator]**, and the operator prerequisites can be done at any time be
 **[Operator] Prerequisites.** None of these is a secret in the repository, and none is committed.
 1. **Two devnet keys**, each with a job of its own. In WSL:
    `mkdir -p ~/.config/stint && solana-keygen new -o ~/.config/stint/devnet.json && solana-keygen new -o ~/.config/stint/upgrade-authority.json`.
-   `devnet.json` pays for deploying and is the harness's funding key (Task 6), which `.env` names and
-   which the harness reads on every run. `upgrade-authority.json` is the program's upgrade authority: it
-   signs deployments and upgrades, holds no SOL or USDC, is never written into `.env`, and is never
-   given to the harness or to an agent. Note both addresses (`solana-keygen pubkey <file>`).
-2. **Fund the first** with at least 3.5 SOL and 5 USDC. The faucet gives devnet SOL to a requester at
-   most twice every eight hours. USDC from Circle's testnet faucet, choosing Solana Devnet, for the key's
-   address. The devnet USDC mint is `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`.
+   `devnet.json` pays for deploying; the harness never reads it. `upgrade-authority.json` is the
+   program's upgrade authority: it signs deployments and upgrades, holds no SOL or USDC, is never written
+   into `.env` or `.env.devnet`, and is never given to the harness or to an agent. Note both addresses
+   (`solana-keygen pubkey <file>`). The harness's own funding key is neither of these: it derives from a
+   seed that Task 7 has you generate.
+2. **Fund the first** with at least 3 SOL (the deployment needs about 2.2). The faucet gives devnet SOL
+   to a requester at most twice every eight hours. The harness's funding key is funded in Task 7, with
+   SOL and with USDC from Circle's testnet faucet, choosing Solana Devnet. The devnet USDC mint is
+   `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`.
 3. **Back up** `target/deploy/stint-keypair.json` (the program's keypair; the same key is at
-   `~/.config/stint/stint-keypair.json` in the development environment), the devnet key and the
-   upgrade-authority key, somewhere off this machine.
+   `~/.config/stint/stint-keypair.json` in the development environment), the devnet key, the
+   upgrade-authority key and, from Task 7, the seed, somewhere off this machine.
 4. **Docker.** In Docker Desktop: Settings, Resources, WSL integration, enable the Ubuntu
    distribution. Check in WSL: `docker version` prints a client and a server.
 5. **An RPC endpoint for scenario runs** (Task 7): the public devnet endpoint is rate-limited, so a
@@ -2714,21 +2717,31 @@ local network). Nothing in this repository reads an on-chain IDL: the client is 
 ### Task 6: The devnet target
 
 The harness gets its second target (spec §12.2): the same stack of services, run against devnet with the
-deployed program. Spec §12.6 says what it needs: a funding key, fresh keys for the stack and for each
-scenario's buyers, funded from it; a test offer; and, at the end, sessions closed and what is left
-returned to the funding key. The target is tested against the local network first, so that its
-funding and clean-up logic is exercised offline and only the network-specific problems are left for
-the real run (Task 7).
+deployed program. Spec §12.6 says what it needs: a funding key; keys for the stack and for each
+scenario's buyers, funded from it; a test offer; and a clean-up that closes the sessions the harness's
+keys have open and returns what they hold to the funding key. The target is tested against the local
+network first, so that its funding and clean-up logic is exercised offline and only the network-specific
+problems are left for the real run (Task 7).
+
+**One seed, one clean-up.** Every key of the devnet target derives from a single seed, in `.env.devnet`:
+index 0 is the funding key, which a person funds from the faucets and which plays no part in any scenario;
+indexes 1 to 4 are the stack's keys; the buyers follow, one index each, in the order scenarios ask for
+them. Since the keys are known from the seed alone, no record of a run is kept, and the clean-up has one
+shape whatever happened before: it looks at what is on the chain for those keys and brings it to zero. It
+runs at the start of every run (a run that was killed, interrupted or never cleaned up is repaired
+before the next begins; on a first run it finds nothing) and again at the end, as a courtesy: if the end
+is skipped or fails, the next start does it. The funding key is the only one to watch: what a run spends
+in fees does not come back.
 
 **Files:**
 - Modify: `conformance/src/runner.ts`, `conformance/test/runner.test.ts`
 - Modify: `apps/facilitator/src/server.ts`
 - Modify: `e2e/src/network/transactions.ts`, `e2e/src/fixtures/transfers.ts`
 - Create: `e2e/src/targets/services.ts`; modify `e2e/src/targets/local.ts`
-- Create: `e2e/src/devnet/config.ts`, `e2e/src/devnet/funds.ts`, `e2e/src/devnet/journal.ts`, `e2e/src/targets/devnet.ts`
-- Modify: `e2e/src/index.ts`, `e2e/src/cli.ts`, `e2e/src/paths.ts`, `e2e/package.json`, `package.json`
-- Test: `e2e/test/devnet-config.test.ts`, `e2e/test/journal.test.ts`, `e2e/test/devnet-target.test.ts`
-- Create: `.env.example`; modify `README.md`, `CLAUDE.md`
+- Create: `e2e/src/devnet/config.ts`, `e2e/src/devnet/keys.ts`, `e2e/src/devnet/funds.ts`, `e2e/src/targets/devnet.ts`
+- Modify: `e2e/src/index.ts`, `e2e/src/cli.ts`, `e2e/package.json`, `package.json`
+- Test: `e2e/test/devnet-config.test.ts`, `e2e/test/devnet-keys.test.ts`, `e2e/test/devnet-target.test.ts`
+- Create: `.env.example`; modify `README.md`, `CLAUDE.md`, `docs/specs/stint-system.md` (§12.6)
 
 **Interfaces:**
 - Consumes: Task 3's `sendUsdc`, `ScenarioContext.sendUsdc`; stage 1's `startKora`, `startFacilitator`,
@@ -2743,20 +2756,22 @@ the real run (Task 7).
     takes `pollMs` as its fourth parameter. Transactions are sent with `preflightCommitment: "confirmed"`.
   - `startServices(options): Promise<Services>` in `e2e/src/targets/services.ts`, shared by both
     targets, with `TEST_TERMS`, `TEST_DURATIONS`, `TEST_IDLE_CLOSE_SECONDS`, `ServiceKeys`, `stopAll`.
-  - `loadDevnetConfig(env): DevnetConfig` (`{ rpcUrl, wsUrl, fundingKeyPath }`), `DevnetConfigError`,
-    `loadFundingKey(path)`, `DEVNET_GENESIS_HASH`, `assertDevnet(rpc)`, `assertProgramDeployed(rpc)`.
-    None of their messages quotes a key file or the RPC URL.
-  - `KeyJournal` and `readJournal(path)` in `e2e/src/devnet/journal.ts`: every key of a devnet run is
-    on disk (git-ignored, owner-only) before it is funded, and the file is removed only when the
-    clean-up has returned what the keys held.
+  - `loadDevnetConfig(env): DevnetConfig` (`{ rpcUrl, wsUrl, seed }`), `DevnetConfigError`,
+    `DEVNET_GENESIS_HASH`, `assertDevnet(rpc)`, `assertProgramDeployed(rpc)`. None of their messages
+    quotes the seed or the RPC URL.
+  - `deriveKey(seed, index)`, `deriveKeys(seed, buyerPool?)` and `BUYER_POOL` in `e2e/src/devnet/keys.ts`:
+    the funding key, the stack's keys, a pool of buyer keys, and `holders`, every key but the funding key,
+    by address.
+  - `cleanUp(rpc, funding, holders, options): Promise<string[]>` in `e2e/src/devnet/funds.ts`: closes every
+    open session that one of the holders opened, receives or paid the rent of, then returns the holders'
+    USDC and SOL to the funding key. Idempotent; returns what went wrong and throws nothing.
   - `startDevnetStack(options): Promise<DevnetStack>` with `target` (name `devnet`, capabilities
-    `stack` and `facilitatorApi`), `context()` and an idempotent `stop()` that never throws. It refuses to
-    start while a previous run's journal exists.
-  - `recoverDevnet(options): Promise<string[]>`: from the journal alone, closes the sessions the keys
-    opened, receive or paid the rent of (found on the chain), returns their USDC and SOL, and removes
-    the journal when nothing went wrong.
-  - `pnpm e2e:devnet`, `pnpm e2e:devnet recover` and `pnpm e2e:local`, through `e2e/src/cli.ts <target>
-    [recover]`. The signal handlers are installed before anything is started.
+    `stack` and `facilitatorApi`), `context()` and an idempotent `stop()` that never throws. It cleans up
+    before it starts anything, and does not start when that fails.
+  - `cleanDevnet(options): Promise<string[]>` and `devnetFunds(options): Promise<string>`: the clean-up on
+    its own, and the funding key's address and balances.
+  - `pnpm e2e:devnet`, `pnpm e2e:devnet clean`, `pnpm e2e:devnet funds` and `pnpm e2e:local`, through
+    `e2e/src/cli.ts <target> [clean|funds]`. The signal handlers are installed before anything is started.
 
 **What devnet differs in, as observed on devnet**, and what the code does about each:
 - Slots take about 235 ms, and a blockhash is valid for 150 blocks, about 36 s. An offer's
@@ -3041,9 +3056,10 @@ Expected: PASS: the local target behaves as before (its stack tests and `kora.te
 Create `e2e/test/devnet-config.test.ts`:
 
 ```ts
-import { createKeyPairSignerFromPrivateKeyBytes, getAddressEncoder } from "@solana/kit";
 import { describe, expect, it } from "vitest";
-import { DEVNET_GENESIS_HASH, DevnetConfigError, assertDevnet, assertProgramDeployed, loadDevnetConfig, loadFundingKey } from "../src/devnet/config.js";
+import { DEVNET_GENESIS_HASH, DevnetConfigError, assertDevnet, assertProgramDeployed, loadDevnetConfig } from "../src/devnet/config.js";
+
+const SEED = "ab".repeat(32);
 
 const fakeRpc = (overrides: { genesis?: string; account?: { executable: boolean } | null }) =>
   ({
@@ -3052,17 +3068,16 @@ const fakeRpc = (overrides: { genesis?: string; account?: { executable: boolean 
   }) as never;
 
 describe("loadDevnetConfig", () => {
-  it("reads the endpoint and the funding key, and derives the WebSocket URL", () => {
-    expect(loadDevnetConfig({ STINT_DEVNET_RPC_URL: "https://devnet.example/?api-key=k", STINT_FUNDING_KEYPAIR: "/keys/f.json" })).toEqual({
-      rpcUrl: "https://devnet.example/?api-key=k",
-      wsUrl: "wss://devnet.example/?api-key=k",
-      fundingKeyPath: "/keys/f.json",
-    });
-    expect(loadDevnetConfig({ STINT_DEVNET_RPC_URL: "http://localhost:8899", STINT_FUNDING_KEYPAIR: "f" }).wsUrl).toBe("ws://localhost:8899");
+  it("reads the endpoint and the seed, and derives the WebSocket URL", () => {
+    const config = loadDevnetConfig({ STINT_DEVNET_RPC_URL: "https://devnet.example/?api-key=k", STINT_DEVNET_SEED: SEED });
+    expect(config.rpcUrl).toBe("https://devnet.example/?api-key=k");
+    expect(config.wsUrl).toBe("wss://devnet.example/?api-key=k");
+    expect(Buffer.from(config.seed).toString("hex")).toBe(SEED);
+    expect(loadDevnetConfig({ STINT_DEVNET_RPC_URL: "http://localhost:8899", STINT_DEVNET_SEED: SEED }).wsUrl).toBe("ws://localhost:8899");
   });
 
   it("takes an explicit WebSocket URL over the derived one", () => {
-    const config = loadDevnetConfig({ STINT_DEVNET_RPC_URL: "https://a.example", STINT_DEVNET_WS_URL: "wss://b.example", STINT_FUNDING_KEYPAIR: "f" });
+    const config = loadDevnetConfig({ STINT_DEVNET_RPC_URL: "https://a.example", STINT_DEVNET_WS_URL: "wss://b.example", STINT_DEVNET_SEED: SEED });
     expect(config.wsUrl).toBe("wss://b.example");
   });
 
@@ -3074,28 +3089,26 @@ describe("loadDevnetConfig", () => {
       expect(error).toBeInstanceOf(DevnetConfigError);
       expect((error as DevnetConfigError).problems).toEqual([
         "STINT_DEVNET_RPC_URL must be an http or https URL",
-        "STINT_FUNDING_KEYPAIR is required",
+        "STINT_DEVNET_SEED is required: 64 hexadecimal characters (openssl rand -hex 32)",
       ]);
       // The URL may carry an API key: it is never echoed.
       expect((error as DevnetConfigError).message).not.toContain("ftp://x");
     }
   });
-});
 
-describe("loadFundingKey", () => {
-  it("reads a Solana CLI keypair file", async () => {
-    const seed = crypto.getRandomValues(new Uint8Array(32));
-    const signer = await createKeyPairSignerFromPrivateKeyBytes(seed);
-    const file = JSON.stringify([...seed, ...getAddressEncoder().encode(signer.address)]);
-    expect((await loadFundingKey("/keys/f.json", () => file)).address).toBe(signer.address);
-  });
-
-  it("refuses a file that is not a keypair without quoting it", async () => {
-    const error = await loadFundingKey("/keys/f.json", () => "hunter2-looks-like-a-secret").catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain("/keys/f.json");
-    expect((error as Error).message).not.toContain("hunter2");
-    await expect(loadFundingKey("/keys/f.json", () => "[1,2,3]")).rejects.toThrow(/64 bytes/);
+  it("refuses a seed that is not 64 hexadecimal characters without quoting it", () => {
+    for (const seed of ["hunter2-looks-like-a-secret", "ab".repeat(31), "zz".repeat(32)]) {
+      const error = (() => {
+        try {
+          loadDevnetConfig({ STINT_DEVNET_RPC_URL: "https://a.example", STINT_DEVNET_SEED: seed });
+        } catch (caught) {
+          return caught as DevnetConfigError;
+        }
+        throw new Error("accepted");
+      })();
+      expect(error.problems).toEqual(["STINT_DEVNET_SEED must be 64 hexadecimal characters"]);
+      expect(error.message).not.toContain(seed);
+    }
   });
 });
 
@@ -3128,8 +3141,7 @@ Expected: FAIL: `../src/devnet/config.js` does not exist.
 Create `e2e/src/devnet/config.ts`:
 
 ```ts
-import { readFileSync } from "node:fs";
-import { createKeyPairSignerFromBytes, type KeyPairSigner, type Rpc, type SolanaRpcApi } from "@solana/kit";
+import type { Rpc, SolanaRpcApi } from "@solana/kit";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 
 /** Devnet's genesis hash. The network identifier `solana:EtWT…` is its first 32 characters (spec §5.1). */
@@ -3138,8 +3150,8 @@ export const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG
 export interface DevnetConfig {
   readonly rpcUrl: string;
   readonly wsUrl: string;
-  /** A Solana CLI keypair file holding devnet SOL and devnet USDC. */
-  readonly fundingKeyPath: string;
+  /** The 32 bytes that every key of the devnet target derives from, the funding key included. */
+  readonly seed: Uint8Array;
 }
 
 export class DevnetConfigError extends Error {
@@ -3153,34 +3165,18 @@ export class DevnetConfigError extends Error {
 export function loadDevnetConfig(env: Readonly<Record<string, string | undefined>>): DevnetConfig {
   const problems: string[] = [];
   const rpcUrl = env.STINT_DEVNET_RPC_URL?.trim();
-  const fundingKeyPath = env.STINT_FUNDING_KEYPAIR?.trim();
+  const seedText = env.STINT_DEVNET_SEED?.trim();
   if (!rpcUrl) problems.push("STINT_DEVNET_RPC_URL is required");
-  // The URL may carry an API key, so no message quotes it.
+  // The URL may carry an API key, and the seed is a secret, so no message quotes either.
   else if (!/^https?:\/\/\S+$/.test(rpcUrl)) problems.push("STINT_DEVNET_RPC_URL must be an http or https URL");
-  if (!fundingKeyPath) problems.push("STINT_FUNDING_KEYPAIR is required");
-  if (problems.length > 0 || !rpcUrl || !fundingKeyPath) throw new DevnetConfigError(problems);
-  return { rpcUrl, wsUrl: env.STINT_DEVNET_WS_URL?.trim() || rpcUrl.replace(/^http/, "ws"), fundingKeyPath };
-}
-
-/**
- * Reads a Solana CLI keypair file. A failure names the path and never the contents: a parser's error
- * quotes the start of the text it was given, and a key never reaches a log.
- */
-export async function loadFundingKey(path: string, read: (path: string) => string = (file) => readFileSync(file, "utf8")): Promise<KeyPairSigner> {
-  let bytes: unknown;
-  try {
-    bytes = JSON.parse(read(path));
-  } catch {
-    throw new Error(`${path} cannot be read or is not JSON`);
-  }
-  if (!Array.isArray(bytes) || bytes.length !== 64 || !bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
-    throw new Error(`${path} is not a keypair file: it holds a JSON array of 64 bytes`);
-  }
-  try {
-    return await createKeyPairSignerFromBytes(Uint8Array.from(bytes as number[]));
-  } catch {
-    throw new Error(`${path} is not a valid keypair: its public half is not its seed's`);
-  }
+  if (!seedText) problems.push("STINT_DEVNET_SEED is required: 64 hexadecimal characters (openssl rand -hex 32)");
+  else if (!/^[0-9a-fA-F]{64}$/.test(seedText)) problems.push("STINT_DEVNET_SEED must be 64 hexadecimal characters");
+  if (problems.length > 0 || !rpcUrl || !seedText) throw new DevnetConfigError(problems);
+  return {
+    rpcUrl,
+    wsUrl: env.STINT_DEVNET_WS_URL?.trim() || rpcUrl.replace(/^http/, "ws"),
+    seed: Uint8Array.from(Buffer.from(seedText, "hex")),
+  };
 }
 
 /** Refuses to go on unless the RPC is devnet's: no transaction of this harness may reach another network. */
@@ -3200,44 +3196,199 @@ export async function assertProgramDeployed(rpc: Rpc<SolanaRpcApi>): Promise<voi
 Run: `pnpm --filter @lxfoundry/stint-e2e test devnet-config.test.ts`
 Expected: PASS.
 
-- [ ] **Step 7: Write the failing test of the devnet target, on the local network**
+- [ ] **Step 7: Write the failing tests of the key derivation**
+
+The addresses below are pinned on purpose: a change to the derivation would orphan whatever the old keys
+hold, on every machine that has used a seed. They were computed independently of this code, from
+HMAC-SHA-256 of the seed over the text `stint-devnet-harness/<index>` as an Ed25519 private key.
+
+Create `e2e/test/devnet-keys.test.ts`:
+
+```ts
+import { createKeyPairSignerFromBytes } from "@solana/kit";
+import { describe, expect, it } from "vitest";
+import { BUYER_POOL, deriveKey, deriveKeys } from "../src/devnet/keys.js";
+
+const SEED = Uint8Array.from(Buffer.from("ab".repeat(32), "hex"));
+const OTHER_SEED = Uint8Array.from(Buffer.from("cd".repeat(32), "hex"));
+
+describe("deriveKey", () => {
+  it("gives the same key for the same seed and index, on every machine", async () => {
+    expect((await deriveKey(SEED, 0)).signer.address).toBe("HScoUHx6TLP6WYahxQ2RicCnKWhLYNnKqct3wnmhnpDu");
+    expect((await deriveKey(SEED, 1)).signer.address).toBe("76BGuYQabUAdJnUCWu3emyYUiLNa1hngHzrte4cF7ujw");
+    expect((await deriveKey(SEED, 5)).signer.address).toBe("81TfcadkiUu6BjrUr6dp7i2AQGGNPqWfh1kiHgTRxRXo");
+  });
+
+  it("gives another key for another index and for another seed", async () => {
+    const addresses = new Set([
+      (await deriveKey(SEED, 0)).signer.address,
+      (await deriveKey(SEED, 1)).signer.address,
+      (await deriveKey(OTHER_SEED, 0)).signer.address,
+    ]);
+    expect(addresses.size).toBe(3);
+  });
+
+  it("returns the secret key in the form the services take: 64 bytes that sign as the same address", async () => {
+    const key = await deriveKey(SEED, 3);
+    expect(key.secretKey).toHaveLength(64);
+    expect((await createKeyPairSignerFromBytes(key.secretKey)).address).toBe(key.signer.address);
+  });
+});
+
+describe("deriveKeys", () => {
+  it("puts the funding key first, then the stack's keys, then the buyers", async () => {
+    const keys = await deriveKeys(SEED);
+    expect(keys.funding.signer.address).toBe("HScoUHx6TLP6WYahxQ2RicCnKWhLYNnKqct3wnmhnpDu");
+    expect(keys.stack.koraFeePayer.signer.address).toBe("76BGuYQabUAdJnUCWu3emyYUiLNa1hngHzrte4cF7ujw");
+    expect(keys.buyers[0]?.signer.address).toBe("81TfcadkiUu6BjrUr6dp7i2AQGGNPqWfh1kiHgTRxRXo");
+    expect(keys.buyers).toHaveLength(BUYER_POOL);
+  });
+
+  it("lists every key but the funding key as a holder, each once", async () => {
+    const keys = await deriveKeys(SEED, 3);
+    expect(keys.holders.size).toBe(4 + 3);
+    expect(keys.holders.has(keys.funding.signer.address)).toBe(false);
+    expect(keys.holders.get(keys.stack.seller.signer.address)).toBe(keys.stack.seller.signer);
+    expect(keys.holders.get(keys.buyers[2]!.signer.address)).toBe(keys.buyers[2]!.signer);
+    expect((await deriveKeys(SEED)).holders.size).toBe(4 + BUYER_POOL);
+  });
+});
+```
+
+Run: `pnpm --filter @lxfoundry/stint-e2e test devnet-keys.test.ts`
+Expected: FAIL: `../src/devnet/keys.js` does not exist.
+
+- [ ] **Step 8: Implement the key derivation**
+
+Create `e2e/src/devnet/keys.ts`:
+
+```ts
+import { createHmac } from "node:crypto";
+import { createKeyPairSignerFromPrivateKeyBytes, getAddressEncoder, type Address, type KeyPairSigner } from "@solana/kit";
+import type { HarnessKey } from "../fixtures/keys.js";
+import type { ServiceKeys } from "../targets/services.js";
+
+/**
+ * Which index of the seed is which key. The funding key is a person's to fund and plays no part in a
+ * scenario; the next four are the stack's; the buyers follow, one index each. An index is an address:
+ * never reorder these, or the keys of earlier runs, and what they hold, are no longer found.
+ */
+export const KEY_INDEX = { funding: 0, koraFeePayer: 1, rentPayer: 2, receiverAuthorizer: 3, seller: 4 } as const;
+const FIRST_BUYER_INDEX = 5;
+
+/**
+ * The buyer keys a run may hand out. With the four of the stack this makes 100 keys, which the clean-up
+ * reads in one batch of 100 accounts for their SOL and one for their USDC.
+ */
+export const BUYER_POOL = 96;
+
+/** The key at `index` of `seed`: HMAC-SHA-256 of the index, keyed by the seed, taken as an Ed25519 private key. */
+export async function deriveKey(seed: Uint8Array, index: number): Promise<HarnessKey> {
+  const privateKey = Uint8Array.from(createHmac("sha256", seed).update(`stint-devnet-harness/${index}`).digest());
+  const signer = await createKeyPairSignerFromPrivateKeyBytes(privateKey);
+  return { signer, secretKey: Uint8Array.from([...privateKey, ...getAddressEncoder().encode(signer.address)]) };
+}
+
+export interface DevnetKeys {
+  readonly funding: HarnessKey;
+  readonly stack: ServiceKeys;
+  /** In the order that the target hands them out. */
+  readonly buyers: readonly HarnessKey[];
+  /** Every key but the funding key, by address: what the clean-up empties and signs closes with. */
+  readonly holders: ReadonlyMap<Address, KeyPairSigner>;
+}
+
+export async function deriveKeys(seed: Uint8Array, buyerPool = BUYER_POOL): Promise<DevnetKeys> {
+  const funding = await deriveKey(seed, KEY_INDEX.funding);
+  const stack: ServiceKeys = {
+    koraFeePayer: await deriveKey(seed, KEY_INDEX.koraFeePayer),
+    rentPayer: await deriveKey(seed, KEY_INDEX.rentPayer),
+    receiverAuthorizer: await deriveKey(seed, KEY_INDEX.receiverAuthorizer),
+    seller: await deriveKey(seed, KEY_INDEX.seller),
+  };
+  const buyers = await Promise.all(Array.from({ length: buyerPool }, (_, offset) => deriveKey(seed, FIRST_BUYER_INDEX + offset)));
+  const holders = new Map<Address, KeyPairSigner>();
+  for (const key of [...Object.values(stack), ...buyers]) holders.set(key.signer.address, key.signer);
+  return { funding, stack, buyers, holders };
+}
+```
+
+Run: `pnpm --filter @lxfoundry/stint-e2e test devnet-keys.test.ts`
+Expected: PASS. If an address differs from the pinned one, the derivation is not the one the test
+documents: fix the code, not the test.
+
+- [ ] **Step 9: Write the failing test of the devnet target, on the local network**
 
 The target is run against the local network, standing in for devnet: its funding and clean-up code
 only needs an RPC and keys. The genesis, program and funds checks are skipped (`preflight: false`); they
-are the same functions that Step 6 tested.
+are the same functions that Step 6 tested. Each test that needs its own state uses a seed of its own, whose
+funding key the test funds, as a person does from the faucets.
 
 Create `e2e/test/devnet-target.test.ts`:
 
 ```ts
-import { fetchToken } from "@solana-program/token";
+import { fetchToken, getCloseAccountInstruction } from "@solana-program/token";
 import { catalogue, runScenarios, type Target } from "@lxfoundry/stint-conformance";
 import { createSessionTools, createStintClient } from "@lxfoundry/stint-client";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
-import { generateKeyPairSigner, type Address, type KeyPairSigner } from "@solana/kit";
+import { associatedTokenAddress } from "@lxfoundry/stint-x402";
+import type { Address } from "@solana/kit";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { deriveKeys } from "../src/devnet/keys.js";
+import { newBuyer } from "../src/fixtures/buyers.js";
 import { fundSol } from "../src/fixtures/keys.js";
-import { mintUsdc } from "../src/fixtures/usdc.js";
+import { USDC_DEVNET_MINT, mintUsdc } from "../src/fixtures/usdc.js";
+import { sendInstructions } from "../src/network/transactions.js";
 import { waitForNewSlot } from "../src/network/surfnet.js";
 import { startLocalChain, type LocalChain } from "../src/targets/chain.js";
-import { startDevnetStack, type DevnetStack } from "../src/targets/devnet.js";
+import { cleanDevnet, startDevnetStack, type DevnetStack, type DevnetStackOptions } from "../src/targets/devnet.js";
 
 const FUNDING_USDC = 10_000_000n;
+
+interface FundedSeed {
+  readonly seed: Uint8Array;
+  readonly funding: Address;
+  readonly fundingUsdc: Address;
+}
 
 describe("the devnet target, run against the local network", () => {
   let chain: LocalChain;
   let stack: DevnetStack;
-  let funding: KeyPairSigner;
-  let fundingUsdc: Address;
+  let main: FundedSeed;
   let lamportsBefore: bigint;
+
+  /** A seed whose funding key holds SOL and USDC, as a person leaves it after the faucets. */
+  async function fundedSeed(): Promise<FundedSeed> {
+    const seed = crypto.getRandomValues(new Uint8Array(32));
+    const { funding } = await deriveKeys(seed, 0);
+    fundSol(chain.network, funding.signer.address, 5);
+    await waitForNewSlot(chain.network.rpc);
+    const fundingUsdc = await mintUsdc(chain.network.rpc, chain.keys.mintAuthority.signer, funding.signer.address, FUNDING_USDC);
+    return { seed, funding: funding.signer.address, fundingUsdc };
+  }
+
+  const start = (seed: Uint8Array, extra: Partial<DevnetStackOptions> = {}) =>
+    startDevnetStack({ rpcUrl: chain.network.rpcUrl, wsUrl: chain.network.wsUrl, seed, preflight: false, pollMs: 100, ...extra });
+  const sessionsOnChain = async () =>
+    (await chain.network.rpc.getProgramAccounts(STINT_PROGRAM_ADDRESS, { commitment: "confirmed", encoding: "base64" }).send()).length;
+  const usdcOf = async (account: Address) => (await fetchToken(chain.network.rpc, account)).data.amount;
+  const openSession = async (running: DevnetStack, reason: string) => {
+    const context = running.context();
+    const buyer = await context.newBuyer(1_000_000n);
+    const { tools } = createSessionTools(
+      createStintClient({
+        signer: buyer.signer,
+        policy: { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } },
+      }),
+    );
+    await tools.stint_open_session.run({ url: context.gateUrl, seconds: 30, reason });
+  };
 
   beforeAll(async () => {
     chain = await startLocalChain();
-    funding = await generateKeyPairSigner();
-    fundSol(chain.network, funding.address, 5);
-    await waitForNewSlot(chain.network.rpc);
-    fundingUsdc = await mintUsdc(chain.network.rpc, chain.keys.mintAuthority.signer, funding.address, FUNDING_USDC);
-    lamportsBefore = (await chain.network.rpc.getBalance(funding.address, { commitment: "confirmed" }).send()).value;
-    stack = await startDevnetStack({ rpcUrl: chain.network.rpcUrl, wsUrl: chain.network.wsUrl, funding, preflight: false, pollMs: 100 });
+    main = await fundedSeed();
+    lamportsBefore = (await chain.network.rpc.getBalance(main.funding, { commitment: "confirmed" }).send()).value;
+    stack = await start(main.seed);
   });
 
   afterAll(async () => {
@@ -3265,218 +3416,144 @@ describe("the devnet target, run against the local network", () => {
     ]);
   }, 120_000);
 
-  it("closes a session left open, returns the funds, and stops", async () => {
-    const context = stack.context();
-    const buyer = await context.newBuyer(1_000_000n);
-    const { tools } = createSessionTools(
-      createStintClient({
-        signer: buyer.signer,
-        policy: { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } },
-      }),
-    );
-    await tools.stint_open_session.run({ url: context.gateUrl, seconds: 30, reason: "left open on purpose" });
-    const open = await chain.network.rpc.getProgramAccounts(STINT_PROGRAM_ADDRESS, { commitment: "confirmed", encoding: "base64" }).send();
-    expect(open).toHaveLength(1);
+  it("closes a session left open at the end, returns the funds, and stops", async () => {
+    await openSession(stack, "left open on purpose");
+    expect(await sessionsOnChain()).toBe(1);
 
     await stack.stop();
 
-    const left = await chain.network.rpc.getProgramAccounts(STINT_PROGRAM_ADDRESS, { commitment: "confirmed", encoding: "base64" }).send();
-    expect(left).toHaveLength(0);
+    expect(await sessionsOnChain()).toBe(0);
     // Every base unit that the funding key lent, the seller's earnings included, is back.
-    expect((await fetchToken(chain.network.rpc, fundingUsdc)).data.amount).toBe(FUNDING_USDC);
-    const lamportsAfter = (await chain.network.rpc.getBalance(funding.address, { commitment: "confirmed" }).send()).value;
+    expect(await usdcOf(main.fundingUsdc)).toBe(FUNDING_USDC);
+    const lamportsAfter = (await chain.network.rpc.getBalance(main.funding, { commitment: "confirmed" }).send()).value;
     // The funding key paid fees only: the rent it lent for token accounts, and the SOL it gave the stack, came back.
     expect(lamportsBefore - lamportsAfter).toBeLessThan(5_000_000n);
     await stack.stop(); // stopping twice is harmless
-    expect(existsSync(journalPath)).toBe(false); // nothing is left on the keys, so the journal is gone
   }, 120_000);
 
-  it("refuses to start over a journal a run left, and recovers a run that died with a session open", async () => {
-    // A second stack, never stopped: its process "dies" with a session open and USDC on its keys, and
-    // only the journal file is left.
-    const dyingJournal = join(scratch, "dying.json");
-    const dying = await startDevnetStack({ rpcUrl: chain.network.rpcUrl, wsUrl: chain.network.wsUrl, funding, preflight: false, pollMs: 100, journalPath: dyingJournal });
-    const context = dying.context();
-    const buyer = await context.newBuyer(1_000_000n);
+  it("does nothing, and says nothing is wrong, when there is nothing to clean up", async () => {
+    const fresh = await fundedSeed();
+    expect(await cleanDevnet({ rpcUrl: chain.network.rpcUrl, seed: fresh.seed, preflight: false, pollMs: 100 })).toEqual([]);
+    expect(await usdcOf(fresh.fundingUsdc)).toBe(FUNDING_USDC);
+  }, 60_000);
+
+  it("repairs a run that died with a session open and USDC on its keys, before the next one starts", async () => {
+    const { seed, fundingUsdc } = await fundedSeed();
+    const dying = await start(seed);
+    await openSession(dying, "left open by a run that died");
+    expect(await sessionsOnChain()).toBe(1);
+    // The process "dies": its services are gone, and nothing cleans up.
+    await dying.services.stop();
+
+    const next = await start(seed);
+
+    // The next run's start-up closed the session and took everything back before funding its own keys.
+    expect(await sessionsOnChain()).toBe(0);
+    await next.stop();
+    expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC);
+  }, 120_000);
+
+  it("closes a session whose seller's USDC account is gone, by recreating the account in the same transaction", async () => {
+    const { seed, fundingUsdc } = await fundedSeed();
+    const dying = await start(seed);
+    await openSession(dying, "left open, with its payout account closed");
+    await dying.services.stop();
+    // Someone closes the seller's token account, which is empty: the close that pays it would now fail (spec §4.3).
+    const keys = await deriveKeys(seed, 0);
+    const sellerToken = await associatedTokenAddress(keys.stack.seller.signer.address, USDC_DEVNET_MINT);
+    await sendInstructions(
+      chain.network.rpc,
+      keys.funding.signer,
+      [getCloseAccountInstruction({ account: sellerToken, destination: keys.funding.signer.address, owner: keys.stack.seller.signer })],
+      { pollMs: 100 },
+    );
+    expect((await chain.network.rpc.getAccountInfo(sellerToken, { commitment: "confirmed", encoding: "base64" }).send()).value).toBeNull();
+
+    const next = await start(seed);
+
+    expect(await sessionsOnChain()).toBe(0);
+    await next.stop();
+    expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC);
+  }, 120_000);
+
+  it("closes a session whose authority's key the harness does not hold, as the stack's receiver authorizer", async () => {
+    const { seed, fundingUsdc } = await fundedSeed();
+    const running = await start(seed);
+    // A buyer of its own, as the example agent is: its key is in no pool of the seed, so the clean-up cannot sign as it.
+    const outsider = await newBuyer(chain.network.rpc, chain.keys.mintAuthority.signer, 1_000_000n);
     const { tools } = createSessionTools(
       createStintClient({
-        signer: buyer.signer,
+        signer: outsider.signer,
         policy: { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } },
       }),
     );
-    await tools.stint_open_session.run({ url: context.gateUrl, seconds: 30, reason: "left open by a run that died" });
-    expect(await chain.network.rpc.getProgramAccounts(STINT_PROGRAM_ADDRESS, { commitment: "confirmed", encoding: "base64" }).send()).toHaveLength(1);
-    expect(existsSync(dyingJournal)).toBe(true);
+    await tools.stint_open_session.run({ url: running.context().gateUrl, seconds: 30, reason: "opened by a key the harness does not hold" });
+    expect(await sessionsOnChain()).toBe(1);
+    await running.services.stop();
 
-    await expect(
-      startDevnetStack({ rpcUrl: chain.network.rpcUrl, wsUrl: chain.network.wsUrl, funding, preflight: false, journalPath: dyingJournal }),
-    ).rejects.toThrow(/pnpm e2e:devnet recover/);
+    const next = await start(seed);
 
-    const problems = await recoverDevnet({ rpcUrl: chain.network.rpcUrl, funding, preflight: false, pollMs: 100, journalPath: dyingJournal });
-
-    expect(problems).toEqual([]);
-    expect(await chain.network.rpc.getProgramAccounts(STINT_PROGRAM_ADDRESS, { commitment: "confirmed", encoding: "base64" }).send()).toHaveLength(0);
-    expect((await fetchToken(chain.network.rpc, fundingUsdc)).data.amount).toBe(FUNDING_USDC);
-    expect(existsSync(dyingJournal)).toBe(false);
-    await dying.stop(); // the dead run's services are still ours to stop; its clean-up finds nothing left
+    // The start-up closed it with the receiver authorizer's key, which the seed gives back. The refund went to the
+    // outsider's own account, which was never closed: the deposit less what was due, which is between 5 s and 30 s of the rate.
+    expect(await sessionsOnChain()).toBe(0);
+    const refunded = await usdcOf(outsider.usdcAccount);
+    expect(refunded).toBeGreaterThanOrEqual(970_000n);
+    expect(refunded).toBeLessThan(1_000_000n);
+    await next.stop();
+    expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC);
   }, 120_000);
+
+  it("stops handing out buyers when the pool is used", async () => {
+    const { seed } = await fundedSeed();
+    const small = await start(seed, { buyerPool: 1 });
+    await small.context().newBuyer(0n);
+    await expect(small.context().newBuyer(0n)).rejects.toThrow(/buyer keys/);
+    await small.stop();
+  }, 60_000);
 });
 ```
 
-In the same file, add `import { existsSync, mkdtempSync } from "node:fs";`, `import { tmpdir } from "node:os";` and
-`import { join } from "node:path";` to the imports, `recoverDevnet` to the import from
-`../src/targets/devnet.js`, and, in the `describe`, next to `let lamportsBefore: bigint;`:
+Run: `pnpm --filter @lxfoundry/stint-e2e test devnet-target.test.ts`
+Expected: FAIL: `../src/targets/devnet.js` does not exist.
 
-```ts
-  const scratch = mkdtempSync(join(tmpdir(), "stint-devnet-target-"));
-  const journalPath = join(scratch, "keys.json");
-```
+- [ ] **Step 10: Implement the funding and the clean-up**
 
-and pass `journalPath` in the `startDevnetStack` call of `beforeAll`. (The default journal belongs to a
-real run: a test never touches it.)
+The clean-up has no memory of any run. It starts from the seed's keys, reads what is on the chain, and
+brings it to zero in a fixed order:
+1. Close every open session that one of the keys opened, receives or paid the rent of. Each close
+   creates, in its own transaction, the two accounts it pays if they are gone (the seller's
+   `receiver_token` and the buyer's refund account; spec §4.3, S7, S13), so a close that failed once, or
+   a payout account that someone closed, cannot make the next attempt fail. A session is signed by its
+   authority when the seed holds that key, and otherwise by its `receiver_authorizer`, which a `Standard`
+   close accepts before `paid_until` (and anyone after).
+2. Read what the keys hold, in two batches.
+3. Return each key's USDC and close its account, then its SOL.
 
-Create `e2e/test/journal.test.ts`:
-
-```ts
-import { existsSync, mkdtempSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { KeyJournal, readJournal } from "../src/devnet/journal.js";
-import { newHarnessKey } from "../src/fixtures/keys.js";
-
-const journalPath = () => join(mkdtempSync(join(tmpdir(), "stint-journal-")), "keys.json");
-
-describe("KeyJournal", () => {
-  it("has each key on disk when add returns, and reads them back as signers", async () => {
-    const path = journalPath();
-    const journal = new KeyJournal(path);
-    const first = await newHarnessKey();
-    journal.add("seller", first);
-    expect((await readJournal(path)).map((entry) => entry.signer.address)).toEqual([first.signer.address]);
-    const second = await newHarnessKey();
-    journal.add("buyer", second);
-    expect(await readJournal(path).then((entries) => entries.map((entry) => [entry.role, entry.signer.address]))).toEqual([
-      ["seller", first.signer.address],
-      ["buyer", second.signer.address],
-    ]);
-  });
-
-  it("is readable by its owner only", async () => {
-    const path = journalPath();
-    new KeyJournal(path).add("seller", await newHarnessKey());
-    if (process.platform !== "win32") expect(statSync(path).mode & 0o077).toBe(0);
-  });
-
-  it("refuses to start over a journal that is still there, and clears itself", async () => {
-    const path = journalPath();
-    const journal = new KeyJournal(path);
-    journal.add("seller", await newHarnessKey());
-    expect(() => new KeyJournal(path)).toThrow(/pnpm e2e:devnet recover/);
-    journal.clear();
-    expect(existsSync(path)).toBe(false);
-    expect(() => new KeyJournal(path)).not.toThrow();
-  });
-
-  it("does not quote an unreadable journal", async () => {
-    const path = journalPath();
-    new KeyJournal(path).add("seller", await newHarnessKey());
-    await expect(readJournal(`${path}.missing`)).rejects.toThrow(/cannot be read or is not JSON/);
-  });
-});
-```
-
-Run: `pnpm --filter @lxfoundry/stint-e2e test journal.test.ts devnet-target.test.ts`
-Expected: FAIL: `../src/devnet/journal.js` and `../src/targets/devnet.js` do not exist.
-
-- [ ] **Step 8: Implement the key journal, the funding and the clean-up**
-
-A run's keys live in memory, and the SOL and USDC that the run put on them are not recoverable
-without them. So every key is written to a journal on disk before it is funded, and the journal is
-removed only when the clean-up has returned what the keys held.
-
-In `e2e/src/paths.ts`, add:
-
-```ts
-/** The secret keys of a devnet run, from before the first is funded until the clean-up has finished. */
-export const DEVNET_JOURNAL_PATH = join(REPO_ROOT, "e2e/.cache/devnet-run-keys.json");
-```
-
-(`.cache/` is git-ignored; the journal holds secret keys and is never committed.)
-
-Create `e2e/src/devnet/journal.ts`:
-
-```ts
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-import { createKeyPairSignerFromBytes, type KeyPairSigner } from "@solana/kit";
-import type { HarnessKey } from "../fixtures/keys.js";
-
-interface Entry {
-  readonly role: string;
-  readonly secretKey: readonly number[];
-}
-
-/**
- * The secret keys of a devnet run, kept on disk (git-ignored, readable by their owner only) from before
- * the first of them is funded until the clean-up has returned what they hold. A run that is killed
- * leaves the file, and `pnpm e2e:devnet recover` returns the funds from it. The file is never printed.
- */
-export class KeyJournal {
-  private readonly entries: Entry[] = [];
-
-  constructor(private readonly path: string) {
-    if (existsSync(path)) {
-      throw new Error(`${path} exists: a previous devnet run did not finish its clean-up. Run "pnpm e2e:devnet recover" first`);
-    }
-  }
-
-  /** Writes the key down and returns once it is on disk. Call it before the key holds anything. */
-  add(role: string, key: HarnessKey): void {
-    this.entries.push({ role, secretKey: [...key.secretKey] });
-    mkdirSync(dirname(this.path), { recursive: true });
-    const scratch = `${this.path}.tmp`;
-    writeFileSync(scratch, JSON.stringify(this.entries), { mode: 0o600 });
-    renameSync(scratch, this.path);
-  }
-
-  /** Removes the file: only once nothing is left on the keys. */
-  clear(): void {
-    clearJournal(this.path);
-  }
-}
-
-/** The keys of a journal, as signers. A failure names the path and never the contents. */
-export async function readJournal(path: string): Promise<{ readonly role: string; readonly signer: KeyPairSigner }[]> {
-  let entries: Entry[];
-  try {
-    entries = JSON.parse(readFileSync(path, "utf8")) as Entry[];
-  } catch {
-    throw new Error(`${path} cannot be read or is not JSON`);
-  }
-  return Promise.all(
-    entries.map(async ({ role, secretKey }) => ({ role, signer: await createKeyPairSignerFromBytes(Uint8Array.from(secretKey)) })),
-  );
-}
-
-export function clearJournal(path: string): void {
-  rmSync(path, { force: true });
-}
-```
+A step that fails is recorded and the others still run. Nothing is lost by that: the next clean-up starts
+from the same keys, and step 1 repairs what a failed close needs.
 
 Create `e2e/src/devnet/funds.ts`:
 
 ```ts
 import { getTransferSolInstruction } from "@solana-program/system";
 import {
-  fetchMaybeToken,
   findAssociatedTokenPda,
   getCloseAccountInstruction,
   getCreateAssociatedTokenIdempotentInstructionAsync,
+  getTokenDecoder,
   getTransferCheckedInstruction,
   TOKEN_PROGRAM_ADDRESS,
 } from "@solana-program/token";
-import { getBase64Encoder, type Address, type Instruction, type KeyPairSigner, type Rpc, type SolanaRpcApi } from "@solana/kit";
+import {
+  fetchEncodedAccounts,
+  getBase64Encoder,
+  type Address,
+  type Instruction,
+  type KeyPairSigner,
+  type Rpc,
+  type SolanaRpcApi,
+} from "@solana/kit";
+import { describeError } from "@lxfoundry/stint-conformance";
 import {
   CloseKind,
   STINT_PROGRAM_ADDRESS,
@@ -3498,6 +3575,8 @@ export interface Funding {
 
 /** The fee of a transaction with one signature. */
 const FEE = 5_000n;
+/** The most accounts that one `getMultipleAccounts` reads. */
+const BATCH = 100;
 
 /** Sends SOL; the sender pays the fee. */
 export async function sendSol(rpc: Rpc<SolanaRpcApi>, from: KeyPairSigner, to: Address, lamports: bigint, options: SendOptions): Promise<void> {
@@ -3526,19 +3605,58 @@ export async function fundUsdcAccount(rpc: Rpc<SolanaRpcApi>, funding: Funding, 
   return account;
 }
 
-/** Moves what a USDC account holds back to the funding key's, then closes it so that its rent returns too. */
-export async function returnUsdc(rpc: Rpc<SolanaRpcApi>, funding: Funding, owner: KeyPairSigner, account: Address, options: SendOptions): Promise<void> {
-  const token = await fetchMaybeToken(rpc, account, { commitment: "confirmed" });
-  if (!token.exists) return;
+/** What one key holds: its SOL, and its USDC account's balance, or `undefined` when it has no such account. */
+export interface Held {
+  readonly owner: Address;
+  readonly lamports: bigint;
+  readonly usdcAccount: Address;
+  readonly usdc: bigint | undefined;
+}
+
+async function readAll(rpc: Rpc<SolanaRpcApi>, addresses: readonly Address[]) {
+  const accounts = [];
+  for (let from = 0; from < addresses.length; from += BATCH) {
+    accounts.push(...(await fetchEncodedAccounts(rpc, addresses.slice(from, from + BATCH), { commitment: "confirmed" })));
+  }
+  return accounts;
+}
+
+/** What each of `owners` holds, in a few batched reads: a start-up must not cost one request per key. */
+export async function scanHolders(rpc: Rpc<SolanaRpcApi>, owners: readonly Address[]): Promise<Held[]> {
+  const usdcAccounts = await Promise.all(owners.map((owner) => associatedTokenAddress(owner, USDC_DEVNET_MINT)));
+  const wallets = await readAll(rpc, owners);
+  const tokens = await readAll(rpc, usdcAccounts);
+  const decoder = getTokenDecoder();
+  return owners.map((owner, position) => {
+    const wallet = wallets[position]!;
+    const token = tokens[position]!;
+    return {
+      owner,
+      lamports: wallet.exists ? wallet.lamports : 0n,
+      usdcAccount: usdcAccounts[position]!,
+      usdc: token.exists ? decoder.decode(token.data).amount : undefined,
+    };
+  });
+}
+
+/** Moves `amount` base units from a USDC account back to the funding key's, then closes it so that its rent returns too. */
+export async function returnUsdc(
+  rpc: Rpc<SolanaRpcApi>,
+  funding: Funding,
+  owner: KeyPairSigner,
+  account: Address,
+  amount: bigint,
+  options: SendOptions,
+): Promise<void> {
   const instructions: Instruction[] = [];
-  if (token.data.amount > 0n) {
+  if (amount > 0n) {
     instructions.push(
       getTransferCheckedInstruction({
         source: account,
         mint: USDC_DEVNET_MINT,
         destination: funding.usdcAccount,
         authority: owner,
-        amount: token.data.amount,
+        amount,
         decimals: USDC_DECIMALS,
       }),
     );
@@ -3547,16 +3665,15 @@ export async function returnUsdc(rpc: Rpc<SolanaRpcApi>, funding: Funding, owner
   await sendInstructions(rpc, funding.signer, instructions, options);
 }
 
-/** Sends everything a key holds, less its own fee, back to the funding key. */
-export async function returnSol(rpc: Rpc<SolanaRpcApi>, funding: Funding, from: KeyPairSigner, options: SendOptions): Promise<void> {
-  const balance = (await rpc.getBalance(from.address, { commitment: "confirmed" }).send()).value;
-  if (balance > FEE) await sendSol(rpc, from, funding.signer.address, balance - FEE, options);
+/** Sends `lamports`, less the key's own fee, back to the funding key. */
+export async function returnSol(rpc: Rpc<SolanaRpcApi>, funding: Funding, from: KeyPairSigner, lamports: bigint, options: SendOptions): Promise<void> {
+  if (lamports > FEE) await sendSol(rpc, from, funding.signer.address, lamports - FEE, options);
 }
 
 /**
  * The sessions on the program that one of `owners` opened, receives or paid the rent of. The clean-up
  * finds sessions here, on the chain, and not in the gate's log: a session whose open was answered
- * `settlement_pending` is on the chain too, and a recovery has no log at all.
+ * `settlement_pending` is on the chain too, and a start-up has no log at all.
  */
 export async function findOpenSessions(rpc: Rpc<SolanaRpcApi>, owners: ReadonlySet<Address>): Promise<Address[]> {
   const accounts = await rpc
@@ -3578,14 +3695,17 @@ export interface CloseOutcome {
 }
 
 /**
- * Closes each session that is still open with a `Standard` close signed by its authority, whose key
- * the harness holds (spec §12.6). The funding key pays the fee: a buyer holds no SOL.
+ * Closes each session that is still open with a `Standard` close (spec §4.3). The signer is the session's
+ * authority when `signers` holds that key, and otherwise its `receiver_authorizer`: before `paid_until`
+ * the program accepts either, and from `paid_until` anyone. The funding key pays the fee: a buyer holds no
+ * SOL. The two accounts the close pays are created first, in the same transaction, if they are gone
+ * (spec §12.6; S7): a transaction is atomic (S13), so nothing is half done.
  */
 export async function closeSessions(
   rpc: Rpc<SolanaRpcApi>,
   funding: Funding,
   sessions: readonly Address[],
-  authorities: ReadonlyMap<Address, KeyPairSigner>,
+  signers: ReadonlyMap<Address, KeyPairSigner>,
   options: SendOptions,
 ): Promise<CloseOutcome> {
   const outcome: { closed: Address[]; failed: { session: Address; error: string }[] } = { closed: [], failed: [] };
@@ -3594,45 +3714,87 @@ export async function closeSessions(
       const account = await fetchMaybeSession(rpc, session, { commitment: "confirmed" });
       if (!account.exists) continue;
       const stored = account.data;
-      const authority = authorities.get(stored.authority);
-      if (!authority) throw new Error(`the harness holds no key for the authority ${stored.authority}`);
-      const instruction = getCloseInstruction({
-        closer: authority,
-        session,
-        vault: await associatedTokenAddress(session, stored.mint),
-        receiverToken: await associatedTokenAddress(stored.receiver, stored.mint),
-        refundTo: await associatedTokenAddress(stored.refundOwner, stored.mint),
-        rentPayer: stored.rentPayer,
-        ...(await eventAccounts()),
-        kind: CloseKind.Standard,
-      });
-      await sendInstructions(rpc, funding.signer, [instruction], options);
+      const closer = signers.get(stored.authority) ?? signers.get(stored.receiverAuthorizer);
+      if (!closer) throw new Error(`the harness holds neither the authority ${stored.authority} nor the receiver authorizer ${stored.receiverAuthorizer}`);
+      const instructions: Instruction[] = [
+        await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: funding.signer, owner: stored.receiver, mint: stored.mint }),
+        await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: funding.signer, owner: stored.refundOwner, mint: stored.mint }),
+        getCloseInstruction({
+          closer,
+          session,
+          vault: await associatedTokenAddress(session, stored.mint),
+          receiverToken: await associatedTokenAddress(stored.receiver, stored.mint),
+          refundTo: await associatedTokenAddress(stored.refundOwner, stored.mint),
+          rentPayer: stored.rentPayer,
+          ...(await eventAccounts()),
+          kind: CloseKind.Standard,
+        }),
+      ];
+      await sendInstructions(rpc, funding.signer, instructions, options);
       outcome.closed.push(session);
     } catch (error) {
-      outcome.failed.push({ session, error: error instanceof Error ? error.message : String(error) });
+      outcome.failed.push({ session, error: describeError(error) });
     }
   }
   return outcome;
 }
+
+/**
+ * Brings everything the `holders` keys have on the chain back to the funding key: closes their sessions,
+ * then returns their USDC and SOL. Safe to run at any time and any number of times, after any run or
+ * none. Returns what went wrong; throws nothing.
+ */
+export async function cleanUp(
+  rpc: Rpc<SolanaRpcApi>,
+  funding: Funding,
+  holders: ReadonlyMap<Address, KeyPairSigner>,
+  options: SendOptions,
+): Promise<string[]> {
+  const problems: string[] = [];
+  const attempt = async (what: string, work: () => Promise<unknown>) => {
+    try {
+      await work();
+    } catch (error) {
+      problems.push(`${what}: ${describeError(error)}`);
+    }
+  };
+  await attempt("closing sessions", async () => {
+    const sessions = await findOpenSessions(rpc, new Set(holders.keys()));
+    const outcome = await closeSessions(rpc, funding, sessions, holders, options);
+    for (const failure of outcome.failed) problems.push(`closing session ${failure.session}: ${failure.error}`);
+  });
+  let held: Held[] = [];
+  await attempt("reading what the keys hold", async () => {
+    held = await scanHolders(rpc, [...holders.keys()]);
+  });
+  for (const { owner, usdcAccount, usdc } of held) {
+    if (usdc === undefined) continue;
+    await attempt(`returning the USDC of ${owner}`, () => returnUsdc(rpc, funding, holders.get(owner)!, usdcAccount, usdc, options));
+  }
+  for (const { owner, lamports } of held) {
+    await attempt(`returning the SOL of ${owner}`, () => returnSol(rpc, funding, holders.get(owner)!, lamports, options));
+  }
+  return problems;
+}
 ```
 
-- [ ] **Step 9: Implement the devnet target**
+If a helper has a different signature in `@solana-program/token` 0.18.0 or `@solana/kit` (`fetchEncodedAccounts`,
+`getTokenDecoder`, `getCloseAccountInstruction`), adapt the call and keep the behaviour.
+
+- [ ] **Step 11: Implement the devnet target**
 
 Create `e2e/src/targets/devnet.ts`:
 
 ```ts
-import { existsSync } from "node:fs";
 import { fetchMaybeToken } from "@solana-program/token";
-import { createSolanaRpc, type Address, type KeyPairSigner, type Rpc, type SolanaRpcApi } from "@solana/kit";
+import { createSolanaRpc, type Rpc, type SolanaRpcApi } from "@solana/kit";
 import { describeError, type ScenarioContext, type Target } from "@lxfoundry/stint-conformance";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import { assertDevnet, assertProgramDeployed } from "../devnet/config.js";
-import { closeSessions, findOpenSessions, fundUsdcAccount, returnSol, returnUsdc, sendSol, type Funding } from "../devnet/funds.js";
-import { clearJournal, KeyJournal, readJournal } from "../devnet/journal.js";
-import { newHarnessKey } from "../fixtures/keys.js";
+import { cleanUp, fundUsdcAccount, sendSol, type Funding } from "../devnet/funds.js";
+import { KEY_INDEX, deriveKey, deriveKeys, type DevnetKeys } from "../devnet/keys.js";
 import { sendUsdc } from "../fixtures/transfers.js";
 import { USDC_DEVNET_MINT } from "../fixtures/usdc.js";
-import { DEVNET_JOURNAL_PATH } from "../paths.js";
 import { startServices, type ServiceKeys, type Services } from "./services.js";
 
 /** What the funding key must hold to start: fees and rent for the stack, and the buyers' USDC. */
@@ -3649,13 +3811,14 @@ const SUBSCRIPTION_SETTLE_MS = 5_000;
 export interface DevnetStackOptions {
   readonly rpcUrl: string;
   readonly wsUrl: string;
-  readonly funding: KeyPairSigner;
+  /** The seed that every key derives from (`deriveKeys`), the funding key included. */
+  readonly seed: Uint8Array;
   /** Check the genesis hash, the deployed program and the funds before starting. Default true. */
   readonly preflight?: boolean;
   /** Milliseconds between status reads. Default 400: devnet's public endpoint is rate-limited. */
   readonly pollMs?: number;
-  /** Where the run's secret keys are kept until its clean-up has finished. Default `DEVNET_JOURNAL_PATH`. */
-  readonly journalPath?: string;
+  /** How many buyer keys the run may hand out. Default `BUYER_POOL`. */
+  readonly buyerPool?: number;
 }
 
 export interface DevnetStack {
@@ -3664,8 +3827,12 @@ export interface DevnetStack {
   readonly keys: ServiceKeys;
   readonly services: Services;
   context(): ScenarioContext;
-  /** Stops the services, closes every session still open, and returns what is left. Never throws; idempotent. */
+  /** Stops the services, then cleans up. Never throws; idempotent. */
   stop(): Promise<void>;
+}
+
+async function fundingOf(keys: Pick<DevnetKeys, "funding">): Promise<Funding> {
+  return { signer: keys.funding.signer, usdcAccount: await associatedTokenAddress(keys.funding.signer.address, USDC_DEVNET_MINT) };
 }
 
 async function assertFunds(rpc: Rpc<SolanaRpcApi>, funding: Funding): Promise<void> {
@@ -3693,80 +3860,71 @@ async function fundsLine(rpc: Rpc<SolanaRpcApi>, funding: Funding): Promise<stri
   }
 }
 
+function report(problems: readonly string[]): void {
+  if (problems.length > 0) {
+    console.error(`devnet target: clean-up problems\n- ${problems.join("\n- ")}\nThe next run's start-up repeats the clean-up; "pnpm e2e:devnet clean" does it now.`);
+  }
+}
+
 /**
  * The `devnet` target (spec §12.2): Kora, the facilitator and the example stream with its gate, run
- * against a network that is not ours, with the deployed program. Every key the stack and the
- * scenarios need is new, written to the journal before it is funded, and funded from the funding key;
- * at the end every session still open is closed and what remains is returned (spec §12.6). A run
- * that dies leaves the journal, and `recoverDevnet` returns the funds from it.
+ * against a network that is not ours, with the deployed program. Every key derives from one seed, the
+ * funding key included, which is never used in a scenario. The run begins by cleaning up whatever any
+ * earlier run, or none, left on the seed's keys, and does not start if that fails; it ends with the same
+ * clean-up, which the next start repeats if this one fails (spec §12.6).
  */
 export async function startDevnetStack(options: DevnetStackOptions): Promise<DevnetStack> {
-  const journalPath = options.journalPath ?? DEVNET_JOURNAL_PATH;
-  // Refuses to start over the keys of a run that did not finish: their funds come back first.
-  const journal = new KeyJournal(journalPath);
   const rpc = createSolanaRpc(options.rpcUrl);
+  const keys = await deriveKeys(options.seed, options.buyerPool);
+  const funding = await fundingOf(keys);
   const send = { pollMs: options.pollMs ?? 400 };
-  const funding: Funding = {
-    signer: options.funding,
-    usdcAccount: await associatedTokenAddress(options.funding.address, USDC_DEVNET_MINT),
-  };
   if (options.preflight !== false) {
     await assertDevnet(rpc);
     await assertProgramDeployed(rpc);
+  }
+  const left = await cleanUp(rpc, funding, keys.holders, send);
+  if (left.length > 0) {
+    throw new Error(`Cleaning up what earlier runs left failed, so this run does not start:\n- ${left.join("\n- ")}\nFix the cause, or wait for the session's paid time, and run again.`);
+  }
+  if (options.preflight !== false) {
     await assertFunds(rpc, funding);
     console.error(await fundsLine(rpc, funding));
   }
 
-  const keys: ServiceKeys = {
-    koraFeePayer: await newHarnessKey(),
-    rentPayer: await newHarnessKey(),
-    receiverAuthorizer: await newHarnessKey(),
-    seller: await newHarnessKey(),
-  };
-  // Every key is on disk before it holds anything. `holders` is every key the run made, by address: a
-  // close is signed by a session's authority, and the clean-up empties each key's USDC and SOL.
-  const holders = new Map<Address, KeyPairSigner>();
-  for (const [role, key] of Object.entries(keys)) {
-    journal.add(role, key);
-    holders.set(key.signer.address, key.signer);
-  }
-
   let services: Services;
   try {
-    await sendSol(rpc, funding.signer, keys.koraFeePayer.signer.address, STACK_LAMPORTS, send);
-    await sendSol(rpc, funding.signer, keys.rentPayer.signer.address, STACK_LAMPORTS, send);
-    await fundUsdcAccount(rpc, funding, keys.seller.signer.address, 0n, send);
+    await sendSol(rpc, funding.signer, keys.stack.koraFeePayer.signer.address, STACK_LAMPORTS, send);
+    await sendSol(rpc, funding.signer, keys.stack.rentPayer.signer.address, STACK_LAMPORTS, send);
+    await fundUsdcAccount(rpc, funding, keys.stack.seller.signer.address, 0n, send);
     services = await startServices({
       rpc,
       rpcUrl: options.rpcUrl,
       rpcWsUrl: options.wsUrl,
-      keys,
+      keys: keys.stack,
       // Devnet's blockhashes last about 36 s: an offer may not outlast its own (spec §5.1).
       maxTimeoutSeconds: 30,
       readRetry: { attempts: 20, delayMs: 500 },
     });
   } catch (error) {
-    const problems = await giveBack(rpc, funding, holders, send);
-    if (problems.length === 0) journal.clear();
-    else console.error(`devnet target: clean-up problems\n- ${problems.join("\n- ")}\nThe keys are kept in ${journalPath}: run "pnpm e2e:devnet recover".`);
+    report(await cleanUp(rpc, funding, keys.holders, send));
     throw error;
   }
 
   const target: Target = { name: "devnet", capabilities: new Set(["stack", "facilitatorApi"]) };
+  let nextBuyer = 0;
   let stopping: Promise<void> | undefined;
   return {
     target,
     rpc,
-    keys,
+    keys: keys.stack,
     services,
     context: () => ({
       target,
       gateUrl: services.stream.url,
       rpc,
       newBuyer: async (usdc) => {
-        const key = await newHarnessKey();
-        journal.add("buyer", key); // on disk before it holds anything
-        holders.set(key.signer.address, key.signer);
+        const key = keys.buyers[nextBuyer++];
+        if (!key) throw new Error(`The run used all ${keys.buyers.length} buyer keys: raise BUYER_POOL in e2e/src/devnet/keys.ts`);
         const usdcAccount = await fundUsdcAccount(rpc, funding, key.signer.address, usdc, send);
         return { signer: key.signer, usdcAccount };
       },
@@ -3781,100 +3939,61 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
         } catch (error) {
           problems.push(`stopping the services: ${describeError(error)}`);
         }
-        problems.push(...(await giveBack(rpc, funding, holders, send)));
+        problems.push(...(await cleanUp(rpc, funding, keys.holders, send)));
         if (options.preflight !== false) console.error(`after clean-up, ${await fundsLine(rpc, funding)}`);
-        if (problems.length === 0) {
-          journal.clear();
-        } else {
-          console.error(`devnet target: clean-up problems\n- ${problems.join("\n- ")}\nThe keys are kept in ${journalPath}: run "pnpm e2e:devnet recover".`);
-        }
+        report(problems);
       })();
       return stopping;
     },
   };
 }
 
-export interface RecoverOptions {
+export interface CleanOptions {
   readonly rpcUrl: string;
-  readonly funding: KeyPairSigner;
+  readonly seed: Uint8Array;
   readonly preflight?: boolean;
   readonly pollMs?: number;
-  readonly journalPath?: string;
+  readonly buyerPool?: number;
 }
 
-/**
- * Returns what a run that did not finish its clean-up left on its keys, from the journal alone: it
- * closes every session that one of the keys opened, receives or paid the rent of, then returns the
- * keys' USDC and SOL to the funding key. Removes the journal only when nothing went wrong, so it can
- * be run again. Returns what went wrong; throws nothing once the journal is read.
- */
-export async function recoverDevnet(options: RecoverOptions): Promise<string[]> {
-  const journalPath = options.journalPath ?? DEVNET_JOURNAL_PATH;
-  if (!existsSync(journalPath)) return [];
+/** The clean-up on its own (`pnpm e2e:devnet clean`). Returns what went wrong. */
+export async function cleanDevnet(options: CleanOptions): Promise<string[]> {
   const rpc = createSolanaRpc(options.rpcUrl);
   if (options.preflight !== false) await assertDevnet(rpc);
-  const funding: Funding = {
-    signer: options.funding,
-    usdcAccount: await associatedTokenAddress(options.funding.address, USDC_DEVNET_MINT),
-  };
-  const holders = new Map<Address, KeyPairSigner>((await readJournal(journalPath)).map(({ signer }) => [signer.address, signer]));
-  const problems = await giveBack(rpc, funding, holders, { pollMs: options.pollMs ?? 400 });
-  if (options.preflight !== false) console.error(`after recovery, ${await fundsLine(rpc, funding)}`);
-  if (problems.length === 0) clearJournal(journalPath);
+  const keys = await deriveKeys(options.seed, options.buyerPool);
+  const funding = await fundingOf(keys);
+  const problems = await cleanUp(rpc, funding, keys.holders, { pollMs: options.pollMs ?? 400 });
+  if (options.preflight !== false) console.error(`after clean-up, ${await fundsLine(rpc, funding)}`);
   return problems;
 }
 
-/**
- * Closes the sessions that the keys opened, receive or paid the rent of, then returns the keys' USDC
- * and SOL. The sessions are found on the chain, not in a log, so a session whose open was answered
- * `settlement_pending` is found too. Returns what went wrong; throws nothing.
- */
-async function giveBack(
-  rpc: Rpc<SolanaRpcApi>,
-  funding: Funding,
-  holders: ReadonlyMap<Address, KeyPairSigner>,
-  send: { readonly pollMs: number },
-): Promise<string[]> {
-  const problems: string[] = [];
-  const attempt = async (what: string, work: () => Promise<unknown>) => {
-    try {
-      await work();
-    } catch (error) {
-      problems.push(`${what}: ${describeError(error)}`);
-    }
-  };
-  await attempt("closing sessions", async () => {
-    const sessions = await findOpenSessions(rpc, new Set(holders.keys()));
-    const outcome = await closeSessions(rpc, funding, sessions, holders, send);
-    for (const failure of outcome.failed) problems.push(`closing session ${failure.session}: ${failure.error}`);
-  });
-  for (const [owner, signer] of holders) {
-    await attempt(`returning the USDC of ${owner}`, async () =>
-      returnUsdc(rpc, funding, signer, await associatedTokenAddress(owner, USDC_DEVNET_MINT), send),
-    );
-  }
-  for (const [owner, signer] of holders) await attempt(`returning SOL from ${owner}`, () => returnSol(rpc, funding, signer, send));
-  return problems;
+/** The funding key's address and balances, and what a run needs there (`pnpm e2e:devnet funds`). */
+export async function devnetFunds(options: Pick<CleanOptions, "rpcUrl" | "seed">): Promise<string> {
+  const rpc = createSolanaRpc(options.rpcUrl);
+  await assertDevnet(rpc);
+  const funding = await fundingOf({ funding: await deriveKey(options.seed, KEY_INDEX.funding) });
+  return `${await fundsLine(rpc, funding)}\nA run needs at least ${MINIMUM_FUNDS.lamports} lamports and ${MINIMUM_FUNDS.usdc} USDC base units there: fund ${funding.signer.address} from the SOL and USDC faucets.`;
 }
+
 ```
 
 In `e2e/src/index.ts`, add:
 
 ```ts
-export { recoverDevnet, startDevnetStack, type DevnetStack, type DevnetStackOptions, type RecoverOptions } from "./targets/devnet.js";
-export { loadDevnetConfig, loadFundingKey, DevnetConfigError, type DevnetConfig } from "./devnet/config.js";
+export { cleanDevnet, devnetFunds, startDevnetStack, type CleanOptions, type DevnetStack, type DevnetStackOptions } from "./targets/devnet.js";
+export { loadDevnetConfig, DevnetConfigError, type DevnetConfig } from "./devnet/config.js";
 ```
 
 Run: `pnpm typecheck && pnpm --filter @lxfoundry/stint-e2e test devnet-target.test.ts`
-Expected: PASS: scenarios 1 and 22 pass with buyers funded from the funding key; the session left
-open is closed; the funding key's USDC is exactly what it started with.
+Expected: PASS: scenarios 1 and 22 pass with buyers funded from the funding key; a session left open is
+closed at the end; a run that died is repaired by the next start-up, including a session whose seller's
+USDC account was closed and one whose authority is a key the seed does not hold; the funding key's USDC
+is exactly what it started with.
 
-If the USDC does not come back exactly, the difference names what the clean-up missed: print the
-token accounts the funding key still owns before changing an assertion. If `getCloseAccountInstruction`
-or `fetchMaybeToken` has a different signature in `@solana-program/token` 0.18.0, adapt the call, and
-keep the behaviour: transfer what is left, then close the account.
+If the USDC does not come back exactly, the difference names what the clean-up missed: print the token
+accounts the funding key still owns before changing an assertion.
 
-- [ ] **Step 10: Select the target on the command line**
+- [ ] **Step 12: Select the target on the command line**
 
 Replace `e2e/src/cli.ts` with:
 
@@ -3882,9 +4001,9 @@ Replace `e2e/src/cli.ts` with:
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { catalogue, exitCodeFor, renderReport, runScenarios, writeReport, type ScenarioContext, type Target } from "@lxfoundry/stint-conformance";
-import { loadDevnetConfig, loadFundingKey } from "./devnet/config.js";
-import { DEVNET_JOURNAL_PATH, REPO_ROOT, REPORT_DIR } from "./paths.js";
-import { recoverDevnet, startDevnetStack } from "./targets/devnet.js";
+import { loadDevnetConfig } from "./devnet/config.js";
+import { REPO_ROOT, REPORT_DIR } from "./paths.js";
+import { cleanDevnet, devnetFunds, startDevnetStack } from "./targets/devnet.js";
 import { startLocalStack } from "./targets/local.js";
 
 /**
@@ -3902,12 +4021,11 @@ interface Running {
   logs(): string;
 }
 
-/** The devnet target's settings from `.env`, and the funding key they name. */
-async function devnetSettings() {
-  const envFile = join(REPO_ROOT, ".env");
+/** The devnet target's settings from `.env.devnet` (git-ignored; `.env.example` lists the names). */
+function devnetSettings() {
+  const envFile = join(REPO_ROOT, ".env.devnet");
   if (existsSync(envFile)) process.loadEnvFile(envFile);
-  const config = loadDevnetConfig(process.env);
-  return { config, funding: await loadFundingKey(config.fundingKeyPath) };
+  return loadDevnetConfig(process.env);
 }
 
 async function start(name: string): Promise<Running> {
@@ -3916,8 +4034,8 @@ async function start(name: string): Promise<Running> {
     return { target: stack.target, context: () => stack.context(), stop: () => stack.stop(), logs: () => stack.kora.logs() };
   }
   if (name === "devnet") {
-    const { config, funding } = await devnetSettings();
-    const stack = await startDevnetStack({ rpcUrl: config.rpcUrl, wsUrl: config.wsUrl, funding });
+    const config = devnetSettings();
+    const stack = await startDevnetStack({ rpcUrl: config.rpcUrl, wsUrl: config.wsUrl, seed: config.seed });
     return { target: stack.target, context: () => stack.context(), stop: () => stack.stop(), logs: () => stack.services.kora.logs() };
   }
   throw new Error(`Unknown target "${name}": use local or devnet`);
@@ -3925,18 +4043,22 @@ async function start(name: string): Promise<Running> {
 
 const targetName = process.argv[2] ?? "local";
 
-// `pnpm e2e:devnet recover`: returns the funds that a devnet run left on its keys when it died.
-if (targetName === "devnet" && process.argv[3] === "recover") {
-  const { config, funding } = await devnetSettings();
-  const problems = await recoverDevnet({ rpcUrl: config.rpcUrl, funding });
-  console.error(problems.length === 0 ? "recovered: nothing is left on the run's keys" : `recovery problems\n- ${problems.join("\n- ")}`);
+// `pnpm e2e:devnet funds` prints the funding key's address and balances; `pnpm e2e:devnet clean` does the
+// clean-up alone. Neither starts a service.
+if (targetName === "devnet" && (process.argv[3] === "funds" || process.argv[3] === "clean")) {
+  const config = devnetSettings();
+  if (process.argv[3] === "funds") {
+    console.error(await devnetFunds(config));
+    process.exit(0);
+  }
+  const problems = await cleanDevnet(config);
+  console.error(problems.length === 0 ? "clean: nothing is left on the harness's keys" : `clean-up problems\n- ${problems.join("\n- ")}`);
   process.exit(problems.length === 0 ? 0 : 1);
 }
 
-// Installed before anything is started or funded, so that no moment of a run is without a handler: an
-// interrupted run stops its services, closes its sessions and returns its funds, and one interrupted
-// while it starts points to the journal of its keys. A second signal, during the clean-up, ends the
-// process at once: the journal still holds the keys.
+// Installed before anything is started or funded. An interrupted run stops its services and cleans up. One
+// interrupted while it starts just exits: every key is the seed's, so the next start-up cleans up whatever
+// it left. A second signal, during the clean-up, ends the process at once.
 let running: Running | undefined;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
@@ -3944,7 +4066,6 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
       void running.stop().finally(() => process.exit(130));
       return;
     }
-    if (targetName === "devnet") console.error(`interrupted while starting: run "pnpm e2e:devnet recover" to return the funds on the keys in ${DEVNET_JOURNAL_PATH}`);
     process.exit(130);
   });
 }
@@ -3981,35 +4102,39 @@ Create `.env.example`:
 ```
 # Copy to .env (git-ignored) and fill in. Nothing is committed with a value.
 
-# The devnet target of the end-to-end harness: pnpm e2e:devnet.
+# The devnet target of the end-to-end harness (pnpm e2e:devnet) reads these three from its own file,
+# .env.devnet (git-ignored too), so that nothing which runs against a third party's stream can read the seed.
 # A devnet RPC endpoint. The public one, https://api.devnet.solana.com, is rate-limited; a provider's
-# devnet URL with WebSocket support is steadier. The URL may carry an API key: keep it here.
+# devnet URL with WebSocket support is steadier. The URL may carry an API key: keep it in .env.devnet.
 STINT_DEVNET_RPC_URL=
 # Optional: derived from the URL (http to ws) when empty.
 STINT_DEVNET_WS_URL=
-# A Solana CLI keypair file holding devnet SOL (at least 0.5) and devnet USDC (at least 5). The harness
-# funds every key it needs from it, and returns what is left.
-STINT_FUNDING_KEYPAIR=
+# 64 hexadecimal characters (openssl rand -hex 32). Every key of the target derives from it, the funding
+# key included; a person funds that one from the faucets, and nothing else needs funding. Devnet only:
+# never a seed that controls funds anywhere else.
+STINT_DEVNET_SEED=
 ```
 
-- [ ] **Step 11: Check the command-line entry on the local target**
+- [ ] **Step 13: Check the command-line entry on the local target**
 
 Run: `pnpm e2e:local`
 Expected: as before: the report reads `Status: required 2, pending 33 · Result: pass 2, fail 0, pending 32, not applicable 1`.
 
 Run: `pnpm e2e:devnet`
 Expected: it stops at once with the problems listed (`STINT_DEVNET_RPC_URL is required`,
-`STINT_FUNDING_KEYPAIR is required`) when `.env` does not exist, and starts nothing.
+`STINT_DEVNET_SEED is required: …`) when `.env.devnet` does not exist, and starts nothing.
 
 Run: `pnpm --filter @lxfoundry/stint-e2e exec tsx src/cli.ts elsewhere`
 Expected: it stops with `Unknown target "elsewhere": use local or devnet`.
 
-- [ ] **Step 12: Document the target**
+- [ ] **Step 14: Document the target**
 
 In `README.md`'s `## Development` list of commands, add after `pnpm e2e:local`:
 
 ```
-    pnpm e2e:devnet                           # the same scenarios on devnet (needs .env and a deployed program)
+    pnpm e2e:devnet                           # the same scenarios on devnet (needs .env.devnet and a deployed program)
+    pnpm e2e:devnet funds                     # the address to fund for it, and what that address holds
+    pnpm e2e:devnet clean                     # the clean-up alone
 ```
 
 and add a section after `## Deploying to devnet`:
@@ -4019,33 +4144,56 @@ and add a section after `## Deploying to devnet`:
 
 `pnpm e2e:devnet` runs the end-to-end scenarios against devnet, with the program deployed by
 `scripts/deploy-devnet.sh`. It is run on demand, never as a merge gate: the public network is shared and
-rate-limited. Copy `.env.example` to `.env` and set:
+rate-limited. Create `.env.devnet` (git-ignored; `.env.example` lists the names) with:
 
 - `STINT_DEVNET_RPC_URL`: a devnet endpoint (and `STINT_DEVNET_WS_URL` if its WebSocket URL is not the
   same address with `ws` for `http`);
-- `STINT_FUNDING_KEYPAIR`: a keypair file with at least 0.5 SOL and 5 devnet USDC.
+- `STINT_DEVNET_SEED`: 64 hexadecimal characters (`openssl rand -hex 32`). Every key of the target
+  derives from it. Keep a copy off this machine, and never use a seed that controls funds anywhere else.
 
-The run checks that the endpoint is devnet, that the program is deployed and that the key is funded; it
-creates new keys for the stack and for each scenario's buyers and funds them from the funding key; and, when
-it ends or is interrupted, it closes every session still open and returns what is left. Each key is written
-to `e2e/.cache/devnet-run-keys.json` (git-ignored) before it is funded, and the file is removed once the
-clean-up has finished; if a run is killed, `pnpm e2e:devnet recover` returns the funds from that file, and
-no new run starts while it exists. The report is
-written to `e2e/report/`.
+`pnpm e2e:devnet funds` prints the funding key's address and balances. Fund that address once, with at
+least 0.5 SOL from a devnet faucet and 5 USDC from Circle's (Solana Devnet). It is the only key to
+watch: it plays no part in any scenario, and the fees that runs spend are the only thing that does not
+come back to it.
+
+A run checks that the endpoint is devnet and that the program is deployed, then cleans up: it closes
+every session that the seed's keys have open and returns what they hold to the funding key. On a first
+run there is nothing to do; after a run that was killed it repairs what that run left. Then it funds the
+keys it needs from the funding key, runs the scenarios, and cleans up again. `pnpm e2e:devnet clean`
+does the clean-up alone. Run one at a time per seed: the clean-up closes every session that the seed's
+keys have open, whichever run opened it. The report is written to `e2e/report/`.
 ````
 
 In `CLAUDE.md`, in the "Toolchain" section, after the sentence `runs the end-to-end scenarios on the `local` target.`
-(the file wraps it after `pnpm e2e:local`: match it as one sentence), add: `` `pnpm e2e:devnet` runs them on devnet, on demand: it needs `.env` (see
+(the file wraps it after `pnpm e2e:local`: match it as one sentence), add: `` `pnpm e2e:devnet` runs them on devnet, on demand: it needs `.env.devnet` (see
 `.env.example`) and a deployed program. `` Keep the file's other text unchanged.
 
-- [ ] **Step 13: Run everything and commit**
+In `docs/specs/stint-system.md`, §12.6, replace the bullet that begins `- a funding key with SOL and the offer's asset on the target network.` and ends
+`It then returns what is left to the funding key;` with:
+
+```
+- a funding key with SOL and the offer's asset on the target network, which it uses for nothing but
+  funding and fees. The harness derives every other key it needs from one seed, so the keys of any
+  earlier run are known without a record. It creates the keys that each scenario, and on `devnet` each
+  stack, needs, and funds them from the funding key, which is the fee payer of its own transactions
+  (S14), since some buyers hold no SOL. Before a run, and again after it, the harness cleans up: it
+  closes every session still open that one of its keys opened, receives or paid the rent of, including
+  those left open when a scenario stopped its stack or a run ended abnormally, and returns what its keys
+  hold to the funding key. A close is a `Standard` close (section 4.3) signed by the session's authority,
+  or, when the harness does not hold that key, by the session's `receiver_authorizer`. If a payout
+  account that the close pays (section 4.3), either the buyer's refund account or the seller's
+  `receiver_token`, has been closed, the same transaction recreates it first (S7, S13). The clean-up
+  starts from the keys alone, so it is the same after any run, and after none;
+```
+
+- [ ] **Step 15: Run everything and commit**
 
 Run: `pnpm typecheck && pnpm test && pnpm e2e:local`
 Expected: PASS.
 
 ```bash
-git add conformance apps/facilitator e2e package.json .env.example README.md CLAUDE.md
-git commit -m "Add the devnet target to the harness, funded from one key and tested on the local network"
+git add conformance apps/facilitator e2e package.json .env.example README.md CLAUDE.md docs/specs/stint-system.md
+git commit -m "Add the devnet target to the harness: keys derived from one seed, funded from one key, cleaned up at start and end"
 ```
 
 ---
@@ -4063,8 +4211,8 @@ Task 5 are met.
 - Modify: `docs/specs/stint-system.md` (§2.3, §12.6), `README.md`
 
 **Interfaces:**
-- Consumes: Task 5's deployed program, Task 6's `pnpm e2e:devnet`, a `.env` with
-  `STINT_DEVNET_RPC_URL` and `STINT_FUNDING_KEYPAIR`.
+- Consumes: Task 5's deployed program, Task 6's `pnpm e2e:devnet`, a `.env.devnet` with
+  `STINT_DEVNET_RPC_URL` and `STINT_DEVNET_SEED`.
 - Produces: scenarios 1 and 22 passing on `devnet`; the facts the run established, in the spec.
 
 **Rules for this task.**
@@ -4073,23 +4221,25 @@ Task 5 are met.
 - A change to an **assertion**, a scenario, the gate, the facilitator, the client or the program is not
   made here. If a scenario fails on devnet for a reason that is not timing or configuration, stop and
   report: the failure is a finding about the design. Do not weaken a check to get a green run.
-- Never put a key, a keypair path outside `.env`, or an RPC URL with its API key into a commit, a log
-  that is committed, or a pull request.
+- Never put a key, the seed, or an RPC URL with its API key into a commit, a log that is committed, or a
+  pull request. They live in `.env.devnet`.
 
-- [ ] **Step 1: [Operator] Check the prerequisites**
+- [ ] **Step 1: [Operator] Make the seed and fund the funding key**
 
-From the repository root, in WSL, on the task's branch (see Task 5 for the keys):
+From the repository root, in WSL, on the task's branch (see Task 5 for the deploying key):
 
 ```bash
-grep -E '^STINT_(DEVNET_RPC_URL|FUNDING_KEYPAIR)=.+' .env | cut -d= -f1
-export STINT_FUNDING_KEYPAIR=<the path that .env names>
-solana balance "$(solana-keygen pubkey "$STINT_FUNDING_KEYPAIR")" --url devnet
+openssl rand -hex 32                          # the value of STINT_DEVNET_SEED: keep a copy off this machine
+# put STINT_DEVNET_RPC_URL (and STINT_DEVNET_WS_URL if needed) and STINT_DEVNET_SEED in .env.devnet
+pnpm e2e:devnet funds
 scripts/verify-deployment.sh target/verifiable/stint.so
 ```
 
-Expected: the first command prints `STINT_DEVNET_RPC_URL` and `STINT_FUNDING_KEYPAIR`; the
-balance is at least 0.5 SOL; the verification prints `devnet program 5iCYPq… is …`. If the program was
-deployed from `target/deploy/stint.so`, verify that file instead.
+Expected: `funds` prints the funding key's address, what it holds, and what a run needs. Fund that
+address from a devnet SOL faucet (at least 0.5 SOL) and from Circle's testnet faucet (Solana Devnet,
+at least 5 USDC), then run `funds` again until it shows both. The verification prints `devnet program
+5iCYPq… is …`. If the program was deployed from `target/deploy/stint.so`, verify that file instead.
+The funding key is the only key to top up from now on: a run spends fees, and nothing else.
 
 - [ ] **Step 2: Run the scenarios**
 
@@ -4106,7 +4256,7 @@ If it fails, the report names the scenario and the check, and `e2e/report/kora.l
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
-| `The funding key is short` | The faucets have not delivered | Fund the key; the message names the address and the amounts |
+| `The funding key is short` | The faucets have not delivered, or fees have used it up | Fund the key; the message names the address and the amounts (`pnpm e2e:devnet funds` prints them) |
 | HTTP 429, `rate limit` or `Too many requests` in an error or in Kora's log | The public endpoint's limits | Use a provider's devnet URL in `STINT_DEVNET_RPC_URL`; if it persists, raise `pollMs` in `startDevnetStack` |
 | `404 unknown_session` or `The gate reported another session` right after an open | A node answered a read with nothing | Raise `attempts` or `delayMs` in the `readRetry` literal of `startDevnetStack` |
 | `blockhash_expired`, or `settlement_pending` on an open | A slow confirmation, or an offer that outlasted its blockhash | Check the time between the offer and the settlement; lower `maxTimeoutSeconds` |
@@ -4114,7 +4264,7 @@ If it fails, the report names the scenario and the check, and `e2e/report/kora.l
 | Scenario 22: `No message about … carried …` | The subscription was not live when the payment landed, or the WebSocket does not deliver | Raise `SUBSCRIPTION_SETTLE_MS` in `e2e/src/targets/devnet.ts` first; then check `STINT_DEVNET_WS_URL` (a provider's WebSocket URL may differ from the HTTP one) and the provider's subscription limits; look at the stream's `error` messages in the run's output |
 | Scenario 22: the slot check fails | The node reports another slot than the transaction's | Stop and report: print `message.slot` and the transaction's `slot`, and do not weaken the check |
 | Kora's log shows a balance or fee error | The fee payer ran out of SOL | Raise `STACK_LAMPORTS` |
-| `clean-up problems` on stderr, or a run that was killed | A session or account was not closed or returned | The run's keys are in `e2e/.cache/devnet-run-keys.json` (git-ignored, never printed). Fix the cause the problem names, then run `pnpm e2e:devnet recover`: it closes the sessions and returns the USDC and SOL, and removes the file. The next run refuses to start while the file exists |
+| `Cleaning up what earlier runs left failed`, or `clean-up problems` on stderr | A session or account was not closed or returned: a rate limit, a slow node, or a session that only its authority may close before its `paid_until` | Nothing is lost: every key derives from the seed, and the next run's start-up repeats the clean-up. Run `pnpm e2e:devnet clean` to do it now. If it names a session that cannot be closed yet, wait for that session's paid time (at most 120 s at the test offer) and run it again |
 
 After any change: `pnpm typecheck && pnpm test && pnpm e2e:devnet`.
 
@@ -4127,22 +4277,22 @@ it ends: the USDC figures must be identical (the harness returns every base unit
 differ by no more than a few thousand (fees). Then check that no session is left open on the program:
 
 ```bash
-export STINT_DEVNET_RPC_URL=<the URL that .env names>
+export STINT_DEVNET_RPC_URL=<the URL that .env.devnet names>
 curl -s "$STINT_DEVNET_RPC_URL" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getProgramAccounts","params":["5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr",{"commitment":"confirmed","dataSlice":{"offset":0,"length":0},"filters":[{"dataSize":250}]}]}'
 ```
 
-Expected: `"result":[]`, and `e2e/.cache/devnet-run-keys.json` does not exist. A run that leaves sessions
-behind is a failure of the clean-up, not a pass.
+Expected: `"result":[]`. A run that leaves sessions behind is a failure of the clean-up, not a pass.
 
-Then check the recovery path once, because it is the only protection against a killed run:
+Then check the start-up clean-up once, because it is the only protection against a killed run:
 
-1. Start `pnpm e2e:devnet` and press Ctrl-C while it is still funding the stack (before the services
-   print anything). Expected: it prints `interrupted while starting: run "pnpm e2e:devnet recover" …` and exits 130.
-2. Run `pnpm e2e:devnet recover`. Expected: `recovered: nothing is left on the run's keys`, the line
-   `after recovery, funding key … holds … USDC base units` with the figure of Step 4's first run, and no journal file.
-3. Start `pnpm e2e:devnet`, kill its process with `kill -9` while scenario 22 runs, stop the processes it
-   left behind (`pkill -f kora`), then run `pnpm e2e:devnet recover`. Expected: the same, and no session
-   left on the program (the curl above).
+1. Start `pnpm e2e:devnet`, kill its process with `kill -9` while scenario 22 runs, and stop the processes
+   it left behind (`pkill -f kora`). Run the curl above: a session is open.
+2. Run `pnpm e2e:devnet`. Expected: before any service starts it closes that session and returns what the
+   dead run's keys held (the line `after clean-up, funding key … holds … USDC base units` comes out with the
+   figure of Step 4's first run), then it passes both scenarios, and the curl then shows no session.
+3. Press Ctrl-C while the next run is funding the stack (before the services print anything), then run
+   `pnpm e2e:devnet clean`. Expected: `clean: nothing is left on the harness's keys`, the same USDC figure,
+   and no session left on the program.
 
 - [ ] **Step 5: State what devnet taught in the spec**
 
@@ -4639,9 +4789,9 @@ Expected: PASS.
 
 - [ ] **Step 7: [Operator] Run the agent once, for real**
 
-This runs against devnet, with Task 5's deployment and Task 7's `.env`, and an Anthropic API key in
+This runs against devnet, with Task 5's deployment and Task 7's `.env.devnet`, and an Anthropic API key in
 `.env` (`ANTHROPIC_API_KEY`). The agent signs with a key of its own that holds devnet USDC and nothing
-else: the process feeds a third party's stream to a model, so it never loads the funding key (which moves
+else: the process feeds a third party's stream to a model, so it never reads `.env.devnet` (whose seed controls
 the harness's funds) or the upgrade-authority key. Make it and fund it from Circle's testnet faucet
 (Solana Devnet, 10 USDC is more than enough; the facilitator pays the fees, so it needs no SOL):
 
@@ -4671,7 +4821,9 @@ Expected: stderr shows the agent's tool calls (`stint_open_session`, `stint_send
 `stint_close_session`), and stdout ends with `answered: …` naming the amount `10000` (one payment of the
 serve mode, as the difference of two balances; a total such as `20000` or `30000` means the prompt was misread)
 and a slot. Afterwards no session
-is left open (the `getProgramAccounts` check of Task 7). If the API refuses a parameter (`output_config`,
+is left open (the `getProgramAccounts` check of Task 7); one left by an agent that was interrupted is
+closed when terminal 1 stops (or by the next `pnpm e2e:devnet`), because the harness signs as the stack's
+receiver authorizer. If the API refuses a parameter (`output_config`,
 `fallbacks` or the beta header), the error names it: correct the call to match the API, run the
 agent's tests again, and record the correction in the commit message.
 
