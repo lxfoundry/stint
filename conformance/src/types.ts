@@ -33,6 +33,17 @@ export interface ScenarioContext {
   /** The network's RPC, for reading what the scenario's own transactions did (spec §12.2). */
   readonly rpc: Rpc<SolanaRpcApi>;
   newBuyer(usdc: bigint): Promise<Buyer>;
+  /**
+   * Sends USDC from a buyer's token account to any token account, and returns the transaction's
+   * signature. The harness pays the fee: a buyer holds no SOL (spec §9.1, §12.6).
+   */
+  sendUsdc(from: Buyer, to: Address, amount: bigint): Promise<string>;
+  /**
+   * Milliseconds a scenario waits after subscribing before it causes the change it expects to hear
+   * about. The stream acknowledges a subscription with nothing, so the wait is the only evidence that
+   * the node has it; how long that takes is the target's to say, not the scenario's (spec §12.2).
+   */
+  readonly subscriptionSettleMs: number;
 }
 
 export interface Scenario {

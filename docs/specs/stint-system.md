@@ -1411,6 +1411,15 @@ reported as not applicable, not as failed.
 reported by the close equals what the receiver gained in the session's claim and close
 transactions, and `refunded` what the buyer gained in the close.
 
+A scenario sends a payment through the context's `sendUsdc` (from a buyer's token account to any
+token account): the harness signs for the buyer and pays the fee. The scenario creates the watched
+account before it subscribes and waits the target's `subscriptionSettleMs` (the stream acknowledges a
+subscription with nothing), then reads `stint_receive` until a message about that account carries
+the payment's amount, because the node sends one message per change, the account's creation
+included. The stream's `slot` is asserted only on `devnet`: the local network reports the slot of the
+subscription (T6). The rent payer's balance change is read from the close transaction's lamport
+balances (`preBalances` and `postBalances`), which are not the token balances that T9 is about.
+
 **Status.** Every scenario is `required` or `pending`; the library records which, beside the
 scenario.
 - Both kinds run every time. A failing required scenario fails the run; a pending one is only
@@ -1518,7 +1527,7 @@ upgrade.
 | Difference | Effect on the scenarios | Covered by |
 |---|---|---|
 | Commitment levels are simulated: account reads and account subscriptions return the latest state at any commitment (T6) | The delay before `confirmed`, which the gate's margin and the facilitator's 10 s top-up margin allow for, does not occur | The `devnet` target |
-| Account notifications carry the slot at which the subscription was made (T6) | The `slot` of the example stream's `account` messages (section 8) is not meaningful locally; no scenario asserts on it | The `devnet` target |
+| Account notifications carry the slot at which the subscription was made (T6) | The `slot` of the example stream's `account` messages (section 8) is not meaningful locally; scenario 22 asserts on it, on the devnet target only | The `devnet` target |
 | One node, no network latency, no other traffic | Expired blockhashes, retries and rate limits are rare | The `devnet` target |
 | The USDC mint's authorities are harness keys | Freeze scenarios run locally only: on `devnet`, the mint's freeze authority (S10) is a key the harness does not hold | — |
 | A transaction's `preTokenBalances` is truncated to the length of its `postTokenBalances` (T9) | Balance metadata is not used: token balance changes are computed from the transfer instructions | The `devnet` target |
@@ -1579,7 +1588,7 @@ section 12.2.
 | 19 | *(on `external`, only with `--facilitator` and `--facilitator-key`; otherwise not applicable)* `/verify` of a valid open | — | No change on-chain |
 | 20 | A session opened directly on-chain with the gate's terms but another mint (S5) | — | `403` on connect; not adopted |
 | 21 | The buyer closes its refund account and sends one base unit to the vault, asks the gate to close, then lets the session expire | — | The close request gets `409 refund_account_closed`, and the gate does not retry it. Closed at expiry; the residual goes to the receiver; the rent returns to the rent payer |
-| 22 | The example agent's task, scripted (section 12.2) | Stack | `stint_receive` returns the payment to the watched account; `paid` and `refunded` equal the balance changes recorded in the session's transactions; the session account is closed and its rent returned to the rent payer |
+| 22 | The example agent's task, scripted (section 12.2) | Stack | `stint_receive` returns the payment to the watched account (on `devnet`, with a `slot` at or after the payment's); `paid` and `refunded` equal the balance changes recorded in the session's close; the session account is closed and the rent payer's balance rises by exactly what the session account and the vault held, read from the close's own metadata |
 | 23 | The gate restarts with a session open | Stack | Timers restored from the chain; the session is not closed early, and settles at `paidUntil` as in scenario 3 |
 | 24 | The gate is unreachable when the buyer closes | Stack | The client's fallback (section 9.3) closes through `closeUrl`; refund as in scenario 1 |
 | 25 | The gate and the facilitator are unreachable when the buyer closes | Stack | With SOL on the authority: a unilateral close, refunded as in scenario 1. Without: the session runs to expiry |

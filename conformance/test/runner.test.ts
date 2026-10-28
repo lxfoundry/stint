@@ -12,6 +12,10 @@ const context = (target: Target) => (): ScenarioContext => ({
   newBuyer: async () => {
     throw new Error("no buyers in unit tests");
   },
+  sendUsdc: async () => {
+    throw new Error("no payments in unit tests");
+  },
+  subscriptionSettleMs: 0,
 });
 
 function scenario(overrides: Partial<Scenario>): Scenario {

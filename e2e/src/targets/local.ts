@@ -6,6 +6,7 @@ import { startFacilitator, type RunningFacilitator } from "@lxfoundry/stint-faci
 import { createFacilitatorClient, createRpcChain } from "@lxfoundry/stint-gate";
 import { SOLANA_DEVNET, USDC_DEVNET, type Terms } from "@lxfoundry/stint-x402";
 import { newBuyer } from "../fixtures/buyers.js";
+import { sendUsdc } from "../fixtures/transfers.js";
 import { SUBSCRIPTIONS_PROGRAM_ADDRESS } from "../fixtures/programs.js";
 import { USDC_DEVNET_MINT } from "../fixtures/usdc.js";
 import { KORA_ALLOWED_PROGRAMS } from "../kora/config.js";
@@ -103,6 +104,8 @@ export async function startLocalStack(): Promise<LocalStack> {
         gateUrl: stream.url,
         rpc: chain.network.rpc,
         newBuyer: (usdc) => newBuyer(chain.network.rpc, chain.keys.mintAuthority.signer, usdc),
+        sendUsdc: (from, to, amount) => sendUsdc(chain.network.rpc, chain.keys.mintAuthority.signer, from, to, amount),
+        subscriptionSettleMs: 1_500,
       }),
       stop: () => stopAll(stops),
     };

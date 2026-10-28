@@ -23,12 +23,13 @@ describe("local target", () => {
     expect(account.data.owner).toBe(stack.keys.seller.signer.address);
   });
 
-  it("passes scenario 1, now required, and reports every other scenario", async () => {
+  it("passes scenarios 1 and 22, now required, and reports every other scenario", async () => {
     const outcomes = await runScenarios(catalogue, stack.target, () => stack.context());
     expect(outcomes).toHaveLength(35);
     expect(outcomes.find((outcome) => outcome.id === 1)).toMatchObject({ status: "required", result: "pass" });
+    expect(outcomes.find((outcome) => outcome.id === 22)).toMatchObject({ status: "required", result: "pass" });
     expect(outcomes.find((outcome) => outcome.id === 12)?.result).toBe("not applicable");
-    expect(outcomes.filter((outcome) => outcome.result === "pending")).toHaveLength(33);
+    expect(outcomes.filter((outcome) => outcome.result === "pending")).toHaveLength(32);
     expect(exitCodeFor(outcomes)).toBe(0);
   });
 });

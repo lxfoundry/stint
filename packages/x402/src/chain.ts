@@ -130,6 +130,50 @@ export async function tokenBalanceChanges(rpc: Rpc<SolanaRpcApi>, signature: str
   });
 }
 
+/** A lamport balance before and after a transaction. */
+export interface LamportBalance {
+  readonly pre: bigint;
+  readonly post: bigint;
+}
+
+/** The parts of a fetched transaction that lamport balances are read from. */
+export interface RecordedBalances {
+  /** Every account key, in index order. */
+  readonly accountKeys: readonly Address[];
+  /** `meta.err`: non-null when the transaction failed. */
+  readonly err?: unknown;
+  readonly preBalances: readonly (number | bigint)[];
+  readonly postBalances: readonly (number | bigint)[];
+}
+
+/**
+ * Every account's lamport balance before and after a transaction, by address. Throws on a failed
+ * transaction, which moved nothing, and on balances that do not cover every account key.
+ */
+export function lamportBalancesFrom(transaction: RecordedBalances): Map<Address, LamportBalance> {
+  if (transaction.err != null) throw new Error(`The transaction failed (${json(transaction.err)}): it moved no lamports`);
+  const { accountKeys, preBalances, postBalances } = transaction;
+  if (preBalances.length !== accountKeys.length || postBalances.length !== accountKeys.length) {
+    throw new Error(`The balance metadata cover ${preBalances.length} and ${postBalances.length} of ${accountKeys.length} account keys`);
+  }
+  return new Map(accountKeys.map((key, index) => [key, { pre: BigInt(preBalances[index]!), post: BigInt(postBalances[index]!) }]));
+}
+
+/**
+ * The lamport balances of a confirmed transaction (spec §12.2): they come from the transaction's own
+ * metadata, so a concurrent transaction that also moves the same accounts cannot disturb them.
+ */
+export async function lamportBalances(rpc: Rpc<SolanaRpcApi>, signature: string): Promise<Map<Address, LamportBalance>> {
+  const transaction = await fetchConfirmed(rpc, signature);
+  if (!transaction?.meta) throw new Error(`Transaction ${signature} not found at confirmed`);
+  return lamportBalancesFrom({
+    accountKeys: accountKeysOf(transaction),
+    err: transaction.meta.err,
+    preBalances: transaction.meta.preBalances,
+    postBalances: transaction.meta.postBalances,
+  });
+}
+
 export type Confirmation = "confirmed" | "expired" | "pending";
 
 /** The transaction landed with an error: its signature status carries `err`. */
