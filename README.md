@@ -55,3 +55,23 @@ Register it with an MCP host as a command, from the repository root. For Claude 
 
 stdout carries the protocol, so the entry point writes nothing else to it. Run the host inside WSL on
 Windows, where the toolchain lives.
+
+## Deploying to devnet
+
+The program is upgradeable on devnet and built verifiably. Both scripts refuse any cluster whose
+genesis hash is not devnet's: the Solana CLI's own default is mainnet.
+
+    anchor build --verifiable                  # needs Docker; writes target/verifiable/stint.so
+    scripts/deploy-devnet.sh --payer ~/.config/stint/devnet.json --upgrade-authority ~/.config/stint/upgrade-authority.json --program target/verifiable/stint.so --dry-run
+    scripts/deploy-devnet.sh --payer ~/.config/stint/devnet.json --upgrade-authority ~/.config/stint/upgrade-authority.json --program target/verifiable/stint.so
+    scripts/verify-deployment.sh target/verifiable/stint.so
+
+The payer needs about 1.8 SOL plus fees while the deploy runs, and the script asks for 2.2 (about 0.9 SOL
+stays in the program's data account; the buffer's share returns). Run the same command again to upgrade: `solana program deploy`
+upgrades in place, and extends the program's data account when the new build is larger. The upgrade
+authority is the payer unless `--upgrade-authority` names another key; keep it a key of its own, apart
+from the payer, which holds the SOL. Before any
+mainnet deployment it must move to a multisig or be revoked.
+
+The program's ID is in `Anchor.toml`; its keypair is `target/deploy/stint-keypair.json` and is never
+committed. Back it up.
