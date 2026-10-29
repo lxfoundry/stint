@@ -113,6 +113,8 @@ export async function exampleAgentTask(context: ScenarioContext): Promise<void> 
   expectTrue(receipt.paid !== undefined && receipt.refunded !== undefined, "the gate reported the close's amounts");
   const changes = await tokenBalanceChanges(context.rpc, receipt.transaction, context.readRetry);
   const receiverToken = await associatedTokenAddress(stored.receiver, stored.mint);
+  // `paid` is claimed + owed + redirected (spec §5.5). The scenario makes no claim, so `claimed` is zero and the
+  // receiver's whole gain is in the close; a claim made earlier would have to be added to the close's gain.
   expectEqual(BigInt(receipt.paid), changes.get(receiverToken) ?? 0n, "paid = what the receiver gained in the close");
   expectEqual(BigInt(receipt.refunded), changes.get(agent.usdcAccount) ?? 0n, "refunded = what the buyer gained in the close");
   expectEqual(BigInt(receipt.paid) + BigInt(receipt.refunded), deposit, "paid + refunded = the deposit");

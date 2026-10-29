@@ -3,8 +3,11 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { ConfigError, loadConfig } from "./config.js";
 import { createMcpServer } from "./server.js";
 
-/** The longest the server waits to close sessions on its way out. */
-const CLOSE_LIMIT_MS = 30_000;
+/**
+ * The longest the server waits to close sessions on its way out. An open still in flight must finish before its
+ * session can be closed, and on a slow network that takes longer than a close does.
+ */
+const CLOSE_LIMIT_MS = 90_000;
 
 /**
  * The stdio entry point (spec §9.6). stdout is the protocol channel, so everything written for a

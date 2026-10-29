@@ -1390,8 +1390,8 @@ run is repeatable.
 
 | Target | What the harness starts | Network | Capabilities | Runs |
 |---|---|---|---|---|
-| `local` | Surfpool (embedded) and Kora, then the facilitator, the gate and the example resource from this repository | Surfpool, offline, with the fixtures of section 12.3 | Chain control, stack control | On every change, and in continuous integration on every push and pull request |
-| `devnet` | Kora, the facilitator, the gate and the example resource | Devnet, with the deployed program and a funding key (section 12.6) | Stack control | On demand. Never a merge gate: the public network is shared and rate-limited, and its faucets cannot be scripted |
+| `local` | Surfpool (embedded) and Kora, then the facilitator, the gate and the example resource from this repository | Surfpool, offline, with the fixtures of section 12.3 | Chain control, stack control, facilitator API | On every change, and in continuous integration on every push and pull request |
+| `devnet` | Kora, the facilitator, the gate and the example resource | Devnet, with the deployed program and a funding key (section 12.6) | Stack control, facilitator API | On demand. Never a merge gate: the public network is shared and rate-limited, and its faucets cannot be scripted |
 | `external` | Nothing: `stint-conformance` targets a running gate, and optionally a facilitator (section 12.6) | The target's own | Allowance, when declared (below). Every scenario that needs chain control also needs stack control, so none runs here | Against any implementation |
 
 **Capabilities.**
@@ -1402,6 +1402,8 @@ run is repeatable.
 - **Stack control:** the harness runs the services, so it holds their keys (the seller's wallet,
   the receiver authorizer, the facilitator's API key, the resource's admin key) and can stop,
   restart or add instances of them.
+- **Facilitator API:** the harness can call the facilitator's `/verify` with an API key (section 6.5). Always
+  on `local` and `devnet`; on `external` only with `--facilitator` and `--facilitator-key`.
 - **Allowance:** the facilitator accepts an allowance pull as the funding instruction (section
   10), an optional mode. The `local` and `devnet` targets have it once this repository's
   facilitator supports allowance funding (section 14, question 3). On `external`,
@@ -1413,8 +1415,10 @@ reported as not applicable, not as failed.
 **The example agent's task, scripted** (scenario 22): `stint_open_session` → `stint_send`
 (subscribe to a watched account) → the harness sends a payment to that account →
 `stint_receive` with `match` returns the notification → `stint_close_session` → the `paid`
-reported by the close equals what the receiver gained in the session's claim and close
-transactions, and `refunded` what the buyer gained in the close.
+reported by the close (`claimed + owed + redirected`, section 5.5) equals what the receiver gained in the
+close, and `refunded` what the buyer gained in the close. The scenario makes no claim before it closes, so
+`claimed` is zero and the close is the only transaction that pays the receiver; a claim made earlier would
+have to be added to the receiver's gain.
 
 A scenario sends a payment through the context's `sendUsdc` (from a buyer's token account to any
 token account): the harness signs for the buyer and pays the fee. The scenario creates the watched
@@ -1563,7 +1567,11 @@ itself):
   or, when the harness does not hold that key, by the session's `receiver_authorizer`. If a payout
   account that the close pays (section 4.3), either the buyer's refund account or the seller's
   `receiver_token`, has been closed, the same transaction recreates it first (S7, S13). The clean-up
-  starts from the keys alone, so it is the same after any run, and after none;
+  starts from the keys alone, so it is the same after any run, and after none. The harness holds neither
+  the authority nor the receiver authorizer of a session that an outside key opened with one of its keys as
+  rent payer: from the session's `paid_until` on, anyone may close it (section 4.3), so the funding key,
+  which pays the fees, signs that close. Before then the clean-up reports the session. A run does not
+  start when its start-up clean-up fails, unless it is given `--force`;
 - the network's RPC URL.
 
 **Timing tolerance:** a timed condition passes within 5 s (`confirmed` commitment plus the gate's

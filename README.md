@@ -47,7 +47,8 @@ by environment variables, and refuses to start without the caps:
 
 Every limit is enforced by the client's code, whatever a seller offers or the model asks. The agent's
 key holds USDC and no SOL. When the host disconnects, or the process is stopped, every session still
-open (and any open still in flight) is closed first, so the unused part of each deposit comes back.
+open (and any open still in flight) is closed first, so the unused part of each deposit comes back. The server
+waits at most 90 s for that, and then exits with an error.
 
 Register it with an MCP host as a command, from the repository root. For Claude Code:
 
