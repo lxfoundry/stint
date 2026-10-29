@@ -18,10 +18,10 @@ import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import type { Address } from "@solana/kit";
 import { fetchSysvarClock } from "@solana/sysvars";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { cleanUp, returnUsdc, returnUsdcRetrying } from "../src/devnet/funds.js";
+import { cleanUp, returnSol, returnSolRetrying, returnUsdc, returnUsdcRetrying } from "../src/devnet/funds.js";
 import { deriveKeys } from "../src/devnet/keys.js";
 import { newBuyer } from "../src/fixtures/buyers.js";
-import { fundSol } from "../src/fixtures/keys.js";
+import { fundSol, newHarnessKey } from "../src/fixtures/keys.js";
 import { USDC_DEVNET_MINT, mintUsdc } from "../src/fixtures/usdc.js";
 import { sendInstructions } from "../src/network/transactions.js";
 import { waitForNewSlot } from "../src/network/surfnet.js";
@@ -221,6 +221,22 @@ describe("the devnet target, run against the local network", () => {
 
     expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC + 1_000_000n);
     expect((await chain.network.rpc.getAccountInfo(buyer.usdcAccount, { commitment: "confirmed", encoding: "base64" }).send()).value).toBeNull();
+  }, 60_000);
+
+  it("returns a key's whole SOL when the balance read before was stale, by reading it again", async () => {
+    const { seed, fundingUsdc } = await fundedSeed();
+    const keys = await deriveKeys(seed, 0);
+    const funding = { signer: keys.funding.signer, usdcAccount: fundingUsdc };
+    const { signer: key } = await newHarnessKey();
+    fundSol(chain.network, key.address, 1);
+    await waitForNewSlot(chain.network.rpc);
+    // A lagging node reported 500,000 lamports less than the key holds: sending that, less the fee, would leave
+    // the key with less than the rent-exempt minimum (890,880 lamports), which the runtime refuses.
+    await expect(returnSol(chain.network.rpc, funding, key, 999_500_000n, { pollMs: 100 })).rejects.toThrow();
+
+    await returnSolRetrying(chain.network.rpc, funding, key, 999_500_000n, { pollMs: 100 });
+
+    expect((await chain.network.rpc.getBalance(key.address, { commitment: "confirmed" }).send()).value).toBe(0n);
   }, 60_000);
 
   it("starts, and leaves alone, a session that an outside key opened naming the seller as its receiver", async () => {

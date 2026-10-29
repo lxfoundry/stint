@@ -9,8 +9,10 @@ import {
 } from "@solana-program/token";
 import {
   fetchEncodedAccounts,
+  getBase58Decoder,
   getBase64Encoder,
   type Address,
+  type Base58EncodedBytes,
   type Instruction,
   type KeyPairSigner,
   type Rpc,
@@ -19,6 +21,7 @@ import {
 import { describeError } from "@lxfoundry/stint-conformance";
 import {
   CloseKind,
+  SESSION_DISCRIMINATOR,
   STINT_PROGRAM_ADDRESS,
   eventAccounts,
   fetchMaybeSession,
@@ -167,6 +170,22 @@ export async function returnSol(rpc: Rpc<SolanaRpcApi>, funding: Funding, from: 
   if (lamports > FEE) await sendSol(rpc, from, funding.signer.address, lamports - FEE, options);
 }
 
+/**
+ * `returnSol` for a balance that may be stale: a node that lags can report another balance than the key holds,
+ * such as one read before a close returned rent to it. Then the transfer fails, for want of lamports or because it
+ * would leave the key below the rent-exempt minimum. If the first attempt fails, the balance is read again, after a
+ * pause, and the return is tried once more with it.
+ */
+export async function returnSolRetrying(rpc: Rpc<SolanaRpcApi>, funding: Funding, from: KeyPairSigner, lamports: bigint, options: SendOptions): Promise<void> {
+  try {
+    await returnSol(rpc, funding, from, lamports, options);
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, (options.pollMs ?? 400) * 2));
+    const { value } = await rpc.getBalance(from.address, { commitment: "confirmed" }).send();
+    await returnSol(rpc, funding, from, value, options);
+  }
+}
+
 /** The sessions that name a held key: those the clean-up acts on, and those it leaves alone. */
 export interface FoundSessions {
   /** Sessions of the configured USDC mint. */
@@ -189,8 +208,14 @@ export interface FoundSessions {
  * they like, would stop every run that cannot close it.
  */
 export async function findOpenSessions(rpc: Rpc<SolanaRpcApi>, owners: ReadonlySet<Address>): Promise<FoundSessions> {
+  // The size alone would also match another account type of the program that happened to have it.
+  const discriminator = getBase58Decoder().decode(SESSION_DISCRIMINATOR) as Base58EncodedBytes;
   const accounts = await rpc
-    .getProgramAccounts(STINT_PROGRAM_ADDRESS, { commitment: "confirmed", encoding: "base64", filters: [{ dataSize: BigInt(getSessionSize()) }] })
+    .getProgramAccounts(STINT_PROGRAM_ADDRESS, {
+      commitment: "confirmed",
+      encoding: "base64",
+      filters: [{ dataSize: BigInt(getSessionSize()) }, { memcmp: { offset: 0n, bytes: discriminator, encoding: "base58" } }],
+    })
     .send();
   const decoder = getSessionDecoder();
   const base64 = getBase64Encoder();
@@ -276,7 +301,7 @@ export async function closeSessions(
  * none. Sessions of a mint other than USDC that name a held key are reported as a note and left alone: they
  * do not stop a start, and closing one would create accounts for a mint the harness does not hold. So are
  * sessions that name a held key only as their receiver: an outside key opened them, and they are its to close.
- * A USDC balance that was read stale is read again once. Returns what went wrong; throws nothing.
+ * A balance that was read stale, of USDC or SOL, is read again once. Returns what went wrong; throws nothing.
  */
 export async function cleanUp(
   rpc: Rpc<SolanaRpcApi>,
@@ -312,7 +337,7 @@ export async function cleanUp(
     await attempt(`returning the USDC of ${owner}`, () => returnUsdcRetrying(rpc, funding, holders.get(owner)!, usdcAccount, usdc, options));
   }
   for (const { owner, lamports } of held) {
-    await attempt(`returning the SOL of ${owner}`, () => returnSol(rpc, funding, holders.get(owner)!, lamports, options));
+    await attempt(`returning the SOL of ${owner}`, () => returnSolRetrying(rpc, funding, holders.get(owner)!, lamports, options));
   }
   return problems;
 }
