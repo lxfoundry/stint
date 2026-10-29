@@ -164,6 +164,23 @@ describe("session tools (spec §9.5)", () => {
     expect(outcome).toEqual({ closed: [(await opening).sessionId], failed: [] });
   });
 
+  it("waits for a close that is still in flight, and does not close its session a second time", async () => {
+    const buyer = await generateKeyPairSigner();
+    gate = await startTestGate(buyer.address);
+    const client = createStintClient({
+      signer: buyer,
+      policy: { maxRate: 1_000n, maxPerSession: 100_000n, budget: { amount: 100_000n, periodSeconds: 3_600 } },
+    });
+    const { tools, closeAll } = createSessionTools(client);
+    const opened = await tools.stint_open_session.run({ url: gate.url, seconds: 30, reason: "test" });
+
+    const closing = tools.stint_close_session.run({ sessionId: opened.sessionId });
+    const outcome = await closeAll();
+
+    expect(outcome).toEqual({ closed: [], failed: [] });
+    expect((await closing).transaction).toEqual(expect.any(String));
+  });
+
   it("refuses to open a session once closeAll has run", async () => {
     const buyer = await generateKeyPairSigner();
     gate = await startTestGate(buyer.address);

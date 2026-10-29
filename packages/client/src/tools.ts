@@ -100,6 +100,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 export function createSessionTools(client: StintClient): SessionTools {
   const live = new Map<string, Live>();
   const opens = new Set<Promise<unknown>>();
+  const closes = new Set<Promise<unknown>>();
   let closing = false;
 
   const get = (sessionId: unknown): Live => {
@@ -157,6 +158,8 @@ export function createSessionTools(client: StintClient): SessionTools {
       // No open starts from here on; one still in flight registers its session when it ends: wait for it, or its deposit is orphaned.
       closing = true;
       await Promise.allSettled([...opens]);
+      // A close still in flight would race a second one for the same session: wait for it, and close only what it left open.
+      await Promise.allSettled([...closes]);
       const open = [...live.entries()].filter(([, state]) => !state.closed);
       await Promise.all(
         open.map(async ([sessionId, state]) => {
@@ -274,8 +277,13 @@ export function createSessionTools(client: StintClient): SessionTools {
         inputSchema: strict({ sessionId: sessionIdSchema }, ["sessionId"]),
         async run(input) {
           const state = get(input.sessionId);
-          const receipt = await state.session.close();
-          state.closed = true;
+          // Marked closed within the promise that closeAll waits for, so that closeAll then sees it closed.
+          const close = state.session.close().then((receipt) => {
+            state.closed = true;
+            return receipt;
+          });
+          closes.add(close);
+          const receipt = await close.finally(() => closes.delete(close));
           return {
             ...(receipt.paid === undefined ? {} : { paid: receipt.paid.toString() }),
             ...(receipt.refunded === undefined ? {} : { refunded: receipt.refunded.toString() }),
