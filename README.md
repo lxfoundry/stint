@@ -13,6 +13,16 @@ get back what they don't use:
 
 Brand assets and usage rules: [`brand/`](brand/README.md).
 
+## Status
+
+Work in progress. Working today: the Solana program, deployed on devnet (`open`, and `close`, which pays the
+seller for the time used and refunds the rest); the x402 `elapsed` scheme; the facilitator, the gate, the
+client library, an MCP server and an example agent. Two of the 35 end-to-end scenarios of the
+[specification](docs/specs/stint-system.md) (section 12.7) pass, on a local network and on devnet, and the run
+report lists the other 33 as pending. Not built yet: sessions that run to their end and the sweeper that closes
+them, top-ups, refusals of bad payments and settlement records, fallback closes, and resilience across restarts.
+The [plans](docs/plans/README.md) list the stages that remain.
+
 ## Development
 
 The toolchain is pinned in `CLAUDE.md` (section "Toolchain") and checked by
@@ -137,3 +147,8 @@ as its receiver, is reported and left alone. If the start-up clean-up fails, the
 on regardless. The report is written to `e2e/report/`. Kora is started with the RPC
 URL on its command line, so a URL that carries an API key is visible to other users of the machine (`ps`).
 Its log, which a failed run writes to `e2e/report/kora.log` (git-ignored), has every URL cut to its scheme and host.
+
+## Licence
+
+[MIT](LICENSE). The third-party skills vendored under `.claude/skills` keep their own licences, listed in
+`.claude/skills/VENDORED.md`.
