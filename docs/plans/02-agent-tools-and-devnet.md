@@ -5347,7 +5347,9 @@ code and in no sketch:
   network's URLs and the service keys, so that the local and devnet targets run the same stack.
 - **An RPC URL never reaches output.** A URL that carries credentials is refused (`fetch` quotes it in its error).
   Every URL in Kora's start-up errors and kept log, in a scenario outcome's error before it is printed or
-  written to the report, and in an error the facilitator relays from Kora, is cut to its scheme and host. The devnet
+  written to the report, and in an error the facilitator relays from Kora, is cut to its scheme and host, by one
+  function, `redactUrls` in `@lxfoundry/stint-x402`, which the facilitator and the harness share (the deploy
+  script has a shell version of its own). The devnet
   configuration validates its URLs by parsing them (`http` or `https` for the RPC URL, `ws` or `wss` for an explicit
   WebSocket URL), and no message quotes either. The verification script does not show the dump's output.
 - **The clean-up closes only sessions of the configured USDC mint.** One of another mint that names a held key is

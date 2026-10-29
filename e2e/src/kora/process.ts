@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { redactUrls } from "../redact.js";
+import { redactUrls } from "@lxfoundry/stint-x402";
 import { renderKoraConfig, renderSignersConfig, type KoraConfigInput } from "./config.js";
 
 export interface KoraOptions {

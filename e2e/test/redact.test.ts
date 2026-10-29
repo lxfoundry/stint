@@ -6,19 +6,9 @@ import { describe, expect, it } from "vitest";
 import { USDC_DEVNET_MINT } from "../src/fixtures/usdc.js";
 import { KORA_ALLOWED_PROGRAMS } from "../src/kora/config.js";
 import { startKora } from "../src/kora/process.js";
-import { redactOutcomes, redactUrls } from "../src/redact.js";
+import { redactOutcomes } from "../src/redact.js";
 
 const KEYED = "https://devnet.provider.example/v2/SECRETKEY?api-key=SECRETKEY";
-
-describe("redactUrls", () => {
-  it("reduces every URL to its scheme and host, in a text of any shape", () => {
-    expect(redactUrls(`error sending request for url (${KEYED}): timed out`)).toBe(
-      "error sending request for url (https://devnet.provider.example): timed out",
-    );
-    expect(redactUrls("wss://user:pw@ws.example:8900/path?k=SECRETKEY and http://127.0.0.1:8899")).toBe("wss://ws.example:8900 and http://127.0.0.1:8899");
-    expect(redactUrls("no url here")).toBe("no url here");
-  });
-});
 
 describe("redactOutcomes", () => {
   it("redacts the error of each outcome and leaves the rest as it was", () => {
