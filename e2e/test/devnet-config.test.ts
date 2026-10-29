@@ -101,6 +101,13 @@ describe("loadDevnetConfig, malformed URLs", () => {
     expect(error.message).not.toContain("host:abc");
   });
 
+  it("refuses a URL with credentials, without quoting any of it", () => {
+    const error = problemsOf({ STINT_DEVNET_RPC_URL: "https://user:pass@host.example/KEYKEY?api-key=k" });
+    expect(error.problems).toEqual(["STINT_DEVNET_RPC_URL must be an http or https URL"]);
+    expect(error.message).not.toContain("KEYKEY");
+    expect(error.message).not.toContain("pass");
+  });
+
   it("requires a ws or wss URL for the WebSocket endpoint, without quoting it", () => {
     for (const ws of ["https://b.example/?api-key=k", "wss://b.example:abc/?api-key=k", "b.example"]) {
       const error = problemsOf({ STINT_DEVNET_RPC_URL: "https://a.example", STINT_DEVNET_WS_URL: ws });

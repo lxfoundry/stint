@@ -1561,7 +1561,7 @@ itself):
   earlier run are known without a record. It creates the keys that each scenario, and on `devnet` each
   stack, needs, and funds them from the funding key, which is the fee payer of its own transactions
   (S14), since some buyers hold no SOL. Before a run, and again after it, the harness cleans up: it
-  closes every session still open that one of its keys opened, receives or paid the rent of, including
+  closes every session still open, of the USDC mint, that one of its keys opened, receives or paid the rent of, including
   those left open when a scenario stopped its stack or a run ended abnormally, and returns what its keys
   hold to the funding key. A close is a `Standard` close (section 4.3) signed by the session's authority,
   or, when the harness does not hold that key, by the session's `receiver_authorizer`. If a payout

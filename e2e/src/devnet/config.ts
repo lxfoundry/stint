@@ -24,8 +24,12 @@ export class DevnetConfigError extends Error {
 
 const PHRASE_LENGTHS = [12, 15, 18, 21, 24];
 
-/** A URL that parses and has one of the schemes. Never quoted in a message: it can carry a key. */
-const isUrl = (value: string, protocols: readonly string[]) => URL.canParse(value) && protocols.includes(new URL(value).protocol);
+/** A URL that parses, has one of the schemes and no credentials (fetch rejects those, quoting the URL). Never quoted in a message: it can carry a key. */
+const isUrl = (value: string, protocols: readonly string[]) => {
+  if (!URL.canParse(value)) return false;
+  const url = new URL(value);
+  return protocols.includes(url.protocol) && url.username === "" && url.password === "";
+};
 
 /**
  * The seed of a recovery phrase as BIP-39 defines it: PBKDF2-HMAC-SHA512 over the phrase, 2048 rounds, the
