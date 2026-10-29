@@ -1565,7 +1565,8 @@ itself):
   those left open when a scenario stopped its stack or a run ended abnormally, and returns what its keys
   hold to the funding key. A session that names one of its keys only as its receiver is reported and left
   alone: an open is signed by its `authority` and `rent_payer` only (section 4.3), so anyone may name the
-  seller, for as long as they pay for, and such a session is its opener's to close. A close is a `Standard` close (section 4.3) signed by the session's authority,
+  seller, for as long as they choose to pay for, and such a session is its opener's to close. A close is a
+  `Standard` close (section 4.3) signed by the session's authority,
   or, when the harness does not hold that key, by the session's `receiver_authorizer`. If the seller's
   `receiver_token` has been closed, the same transaction recreates it first (S7, S13). It recreates the
   buyer's refund account the same way, but only when the close is made before `paid_until`: from then on, a
