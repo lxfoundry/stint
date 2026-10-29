@@ -5,19 +5,20 @@ import { fromJsonSchema } from "@modelcontextprotocol/server";
 import { SYSTEM_PROMPT, taskPrompt } from "./prompt.js";
 
 export const MODEL = "claude-opus-5-5";
-/** Used by the API when the first model refuses (server-side fallback). */
-export const FALLBACK_MODEL = "claude-sonnet-5-5";
-/** The name the API gives the server-side fallback feature's beta header: an identifier, not a schedule. */
+/** The beta header under which a request may ask for the API's default server-side fallback. It names the feature, not a schedule. */
 export const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
 export interface AgentOptions {
   readonly client: Anthropic;
+  /**
+   * The session tools the model uses. `runAgent` closes every session still open before it returns, and
+   * the tools refuse to open one afterwards: they serve this run only.
+   */
   readonly tools: SessionTools;
   readonly gateUrl: string;
   /** The token account to watch. */
   readonly account: string;
   readonly model?: string;
-  readonly fallbackModel?: string;
   /** Most model turns. Default 20. */
   readonly maxIterations?: number;
   readonly log?: (line: string) => void;
@@ -71,7 +72,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       output_config: { effort: "low" },
       betas: [FALLBACK_BETA],
       thread: false,
-      fallbacks: [{ model: options.fallbackModel ?? FALLBACK_MODEL }],
+      fallbacks: "default",
       max_iterations: options.maxIterations ?? 20,
     });
     const final = await runner;

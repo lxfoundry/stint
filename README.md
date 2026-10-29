@@ -69,6 +69,9 @@ payment arrives. It takes the same `STINT_*` variables as the MCP server, plus `
     pnpm e2e:serve:devnet    # starts a stack on devnet, prints the gate's URL and a watched account, pays it every 30 s
     pnpm --filter @lxfoundry/stint-example-agent start
 
+`serve` prints `gateUrl` and `watchedAccount`: copy them into `STINT_GATE_URL` and `STINT_WATCH_ACCOUNT`. The
+agent stops once it has worked out the last payment from two consecutive messages about the account.
+
 `STINT_KEYPAIR_PATH` names a keypair file made for the agent that holds devnet USDC and nothing else: do not
 point it at the key that deploys the program or at the harness's funding key. Every spending limit is enforced by the client's policy in code. The stream's messages reach the model as
 data and cannot raise one. Every session is closed before the agent returns, whatever happened.

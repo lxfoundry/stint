@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ToolError, type SessionTools } from "@lxfoundry/stint-client";
 import { describe, expect, it } from "vitest";
-import { FALLBACK_MODEL, MODEL, runAgent } from "../src/index.js";
+import { MODEL, runAgent } from "../src/index.js";
 
 const message = (content: unknown[], stopReason: string, extra: Record<string, unknown> = {}) => ({
   id: "msg_test",
@@ -92,7 +92,7 @@ describe("runAgent", () => {
     expect(first.body.model).toBe(MODEL);
     expect(first.body.output_config).toMatchObject({ effort: "low" });
     expect(first.body.tool_choice).toMatchObject({ type: "auto" });
-    expect(first.body.fallbacks).toEqual([expect.objectContaining({ model: FALLBACK_MODEL })]);
+    expect(first.body.fallbacks).toBe("default");
     expect(first.headers.get("anthropic-beta")).toContain("server-side-fallback-2026-07-01");
     expect(first.body.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
       "stint_close_session",

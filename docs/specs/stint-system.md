@@ -1271,9 +1271,9 @@ the key path, caps and allowlists.
 A Claude (`claude-opus-5-5`) agent using the Anthropic TypeScript SDK's tool runner
 (`client.beta.messages.toolRunner`), at low effort (`output_config.effort: "low"`), with `tool_choice: auto`.
 Its system prompt directs it to open a session first and to close it as soon as its task is done. It
-asks for server-side fallback (`fallbacks`, under the beta header `server-side-fallback-2026-07-01`), so that
-a refusal by the first model is retried on the next. If the response still ends with the `refusal` stop reason,
-the agent reports the refusal's explanation. Whatever happens, it closes every session still open before it
+asks for the API's default server-side fallback (`fallbacks: "default"`, under the beta header
+`server-side-fallback-2026-07-01`), so that a refusal by the first model is routed to the API's default fallback. If the
+response still ends with the `refusal` stop reason, the agent reports the refusal's explanation. Whatever happens, it closes every session still open before it
 returns.
 
 **Task:** watch a devnet token account until payments arrive; report the amount of the last payment and
