@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { catalogue, exitCodeFor, renderReport, runScenarios, writeReport, type ScenarioContext, type Target } from "@lxfoundry/stint-conformance";
 import { loadDevnetConfig } from "./devnet/config.js";
 import { REPO_ROOT, REPORT_DIR } from "./paths.js";
+import { redactOutcomes } from "./redact.js";
 import { cleanDevnet, devnetFunds, startDevnetStack } from "./targets/devnet.js";
 import { startLocalStack } from "./targets/local.js";
 
@@ -17,7 +18,7 @@ interface Running {
   readonly target: Target;
   context(): ScenarioContext;
   stop(): Promise<void>;
-  /** Kora's log, kept with the report of a failing run. It can contain the RPC URL, API key included. */
+  /** Kora's log, kept with the report of a failing run, with its URLs reduced to their host (the RPC URL can carry a key). */
   logs(): string;
 }
 
@@ -126,7 +127,8 @@ if (mode === "serve") {
   // exits 1 when a required scenario fails (spec section 12.2). Kora's logs are kept with a failing
   // run's report.
   try {
-    const outcomes = await runScenarios(catalogue, stack.target, () => stack.context(), undefined, { timeoutMs: SCENARIO_TIMEOUT_MS });
+    // A failing service can quote the RPC URL, key included, in the error a scenario reports: URLs are reduced to their host.
+    const outcomes = redactOutcomes(await runScenarios(catalogue, stack.target, () => stack.context(), undefined, { timeoutMs: SCENARIO_TIMEOUT_MS }));
     writeReport(REPORT_DIR, outcomes);
     process.stdout.write(renderReport(outcomes));
     process.exitCode = exitCodeFor(outcomes);

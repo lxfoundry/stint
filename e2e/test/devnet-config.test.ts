@@ -83,3 +83,33 @@ describe("assertProgramDeployed", () => {
     await expect(assertProgramDeployed(fakeRpc({ account: { executable: false } }))).rejects.toThrow(/not deployed/);
   });
 });
+
+describe("loadDevnetConfig, malformed URLs", () => {
+  const problemsOf = (env: Record<string, string>) => {
+    try {
+      loadDevnetConfig({ STINT_DEVNET_SEED: SEED, ...env });
+    } catch (caught) {
+      return caught as DevnetConfigError;
+    }
+    throw new Error("accepted");
+  };
+
+  it("refuses a URL that does not parse, without quoting any of it", () => {
+    const error = problemsOf({ STINT_DEVNET_RPC_URL: "https://host:abc/?api-key=k" });
+    expect(error.problems).toEqual(["STINT_DEVNET_RPC_URL must be an http or https URL"]);
+    expect(error.message).not.toContain("api-key");
+    expect(error.message).not.toContain("host:abc");
+  });
+
+  it("requires a ws or wss URL for the WebSocket endpoint, without quoting it", () => {
+    for (const ws of ["https://b.example/?api-key=k", "wss://b.example:abc/?api-key=k", "b.example"]) {
+      const error = problemsOf({ STINT_DEVNET_RPC_URL: "https://a.example", STINT_DEVNET_WS_URL: ws });
+      expect(error.problems).toEqual(["STINT_DEVNET_WS_URL must be a ws or wss URL"]);
+      expect(error.message).not.toContain("api-key");
+    }
+  });
+
+  it("refuses a derived WebSocket URL that does not parse", () => {
+    expect(problemsOf({ STINT_DEVNET_RPC_URL: "https://host:abc/?api-key=k" }).problems).toHaveLength(1);
+  });
+});

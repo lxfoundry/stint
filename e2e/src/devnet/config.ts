@@ -24,6 +24,9 @@ export class DevnetConfigError extends Error {
 
 const PHRASE_LENGTHS = [12, 15, 18, 21, 24];
 
+/** A URL that parses and has one of the schemes. Never quoted in a message: it can carry a key. */
+const isUrl = (value: string, protocols: readonly string[]) => URL.canParse(value) && protocols.includes(new URL(value).protocol);
+
 /**
  * The seed of a recovery phrase as BIP-39 defines it: PBKDF2-HMAC-SHA512 over the phrase, 2048 rounds, the
  * salt "mnemonic", 64 bytes. The words are not checked against the word list or its checksum: a mistyped
@@ -40,7 +43,9 @@ export function loadDevnetConfig(env: Readonly<Record<string, string | undefined
   const seedText = env.STINT_DEVNET_SEED?.trim();
   if (!rpcUrl) problems.push("STINT_DEVNET_RPC_URL is required");
   // The URL may carry an API key, and the seed is a secret, so no message quotes either.
-  else if (!/^https?:\/\/\S+$/.test(rpcUrl)) problems.push("STINT_DEVNET_RPC_URL must be an http or https URL");
+  else if (!isUrl(rpcUrl, ["http:", "https:"])) problems.push("STINT_DEVNET_RPC_URL must be an http or https URL");
+  const explicitWsUrl = env.STINT_DEVNET_WS_URL?.trim();
+  if (explicitWsUrl && !isUrl(explicitWsUrl, ["ws:", "wss:"])) problems.push("STINT_DEVNET_WS_URL must be a ws or wss URL");
   let seed: Uint8Array | undefined;
   if (!seedText) problems.push("STINT_DEVNET_SEED is required: a recovery phrase of 12 to 24 words, or 64 hexadecimal characters (openssl rand -hex 32)");
   else if (/^[0-9a-fA-F]{64}$/.test(seedText)) seed = Uint8Array.from(Buffer.from(seedText, "hex"));
@@ -50,7 +55,7 @@ export function loadDevnetConfig(env: Readonly<Record<string, string | undefined
     else problems.push("STINT_DEVNET_SEED must be a recovery phrase of 12 to 24 words, or 64 hexadecimal characters");
   }
   if (problems.length > 0 || !rpcUrl || !seed) throw new DevnetConfigError(problems);
-  return { rpcUrl, wsUrl: env.STINT_DEVNET_WS_URL?.trim() || rpcUrl.replace(/^http/, "ws"), seed };
+  return { rpcUrl, wsUrl: explicitWsUrl || rpcUrl.replace(/^http/, "ws"), seed };
 }
 
 /** Refuses to go on unless the RPC is devnet's: no transaction of this harness may reach another network. */
