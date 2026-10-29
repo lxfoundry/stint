@@ -5,7 +5,7 @@ import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import type { Address } from "@solana/kit";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { cleanUp, returnUsdc } from "../src/devnet/funds.js";
+import { cleanUp, returnUsdc, returnUsdcRetrying } from "../src/devnet/funds.js";
 import { deriveKeys } from "../src/devnet/keys.js";
 import { newBuyer } from "../src/fixtures/buyers.js";
 import { fundSol } from "../src/fixtures/keys.js";
@@ -195,6 +195,20 @@ describe("the devnet target, run against the local network", () => {
     await next.stop();
     expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC);
   }, 120_000);
+
+  it("returns a USDC account's whole balance when the amount read before was stale, by reading it again", async () => {
+    const { seed, fundingUsdc } = await fundedSeed();
+    const keys = await deriveKeys(seed, 0);
+    const funding = { signer: keys.funding.signer, usdcAccount: fundingUsdc };
+    const buyer = await newBuyer(chain.network.rpc, chain.keys.mintAuthority.signer, 1_000_000n);
+    // A lagging node reported less than the account holds: the close of the account would fail with that amount.
+    await expect(returnUsdc(chain.network.rpc, funding, buyer.signer, buyer.usdcAccount, 400_000n, { pollMs: 100 })).rejects.toThrow();
+
+    await returnUsdcRetrying(chain.network.rpc, funding, buyer.signer, buyer.usdcAccount, 400_000n, { pollMs: 100 });
+
+    expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC + 1_000_000n);
+    expect((await chain.network.rpc.getAccountInfo(buyer.usdcAccount, { commitment: "confirmed", encoding: "base64" }).send()).value).toBeNull();
+  }, 60_000);
 
   it("reports a session that no held key may close yet, then closes it once its paid time has passed", async () => {
     const { seed } = await fundedSeed();

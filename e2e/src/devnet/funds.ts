@@ -137,26 +137,59 @@ export async function returnUsdc(
   await sendInstructions(rpc, funding.signer, instructions, options);
 }
 
+/**
+ * `returnUsdc` for an amount that may be stale: a node that lags can report a smaller balance than the account
+ * holds, and then closing the account fails. If the first attempt fails, the balance is read again, after a
+ * pause, and the return is tried once more with it.
+ */
+export async function returnUsdcRetrying(
+  rpc: Rpc<SolanaRpcApi>,
+  funding: Funding,
+  owner: KeyPairSigner,
+  account: Address,
+  amount: bigint,
+  options: SendOptions,
+): Promise<void> {
+  try {
+    await returnUsdc(rpc, funding, owner, account, amount, options);
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, (options.pollMs ?? 400) * 2));
+    const [now] = await scanHolders(rpc, [owner.address]);
+    if (now?.usdc === undefined) return; // the account is gone: the first attempt landed after all
+    await returnUsdc(rpc, funding, owner, account, now.usdc, options);
+  }
+}
+
 /** Sends `lamports`, less the key's own fee, back to the funding key. */
 export async function returnSol(rpc: Rpc<SolanaRpcApi>, funding: Funding, from: KeyPairSigner, lamports: bigint, options: SendOptions): Promise<void> {
   if (lamports > FEE) await sendSol(rpc, from, funding.signer.address, lamports - FEE, options);
 }
 
+/** The sessions that name a held key: those the clean-up acts on, and those of another mint, which it leaves alone. */
+export interface FoundSessions {
+  /** Sessions of the configured USDC mint. */
+  readonly sessions: Address[];
+  /** Sessions of any other mint: the harness never opens one, closing it would create accounts it cannot recover, and it is not its to fix. */
+  readonly otherMint: Address[];
+}
+
 /**
  * The sessions on the program that one of `owners` opened, receives or paid the rent of. The clean-up
  * finds sessions here, on the chain, and not in the gate's log: a session whose open was answered
- * `settlement_pending` is on the chain too, and a start-up has no log at all.
+ * `settlement_pending` is on the chain too, and a start-up has no log at all. Only sessions of the USDC mint
+ * are for the clean-up to close; those of another mint are set apart, to be reported and left alone.
  */
-export async function findOpenSessions(rpc: Rpc<SolanaRpcApi>, owners: ReadonlySet<Address>): Promise<Address[]> {
+export async function findOpenSessions(rpc: Rpc<SolanaRpcApi>, owners: ReadonlySet<Address>): Promise<FoundSessions> {
   const accounts = await rpc
     .getProgramAccounts(STINT_PROGRAM_ADDRESS, { commitment: "confirmed", encoding: "base64", filters: [{ dataSize: BigInt(getSessionSize()) }] })
     .send();
   const decoder = getSessionDecoder();
   const base64 = getBase64Encoder();
-  const found: Address[] = [];
+  const found: FoundSessions = { sessions: [], otherMint: [] };
   for (const { pubkey, account } of accounts) {
     const session = decoder.decode(base64.encode(account.data[0]));
-    if (owners.has(session.authority) || owners.has(session.receiver) || owners.has(session.rentPayer)) found.push(pubkey);
+    if (!owners.has(session.authority) && !owners.has(session.receiver) && !owners.has(session.rentPayer)) continue;
+    (session.mint === USDC_DEVNET_MINT ? found.sessions : found.otherMint).push(pubkey);
   }
   return found;
 }
@@ -220,7 +253,9 @@ export async function closeSessions(
 /**
  * Brings everything the `holders` keys have on the chain back to the funding key: closes their sessions,
  * then returns their USDC and SOL. Safe to run at any time and any number of times, after any run or
- * none. Returns what went wrong; throws nothing.
+ * none. Sessions of a mint other than USDC that name a held key are reported as a note and left alone: they
+ * do not stop a start, and closing one would create accounts for a mint the harness does not hold. A USDC
+ * balance that was read stale is read again once. Returns what went wrong; throws nothing.
  */
 export async function cleanUp(
   rpc: Rpc<SolanaRpcApi>,
@@ -237,7 +272,10 @@ export async function cleanUp(
     }
   };
   await attempt("closing sessions", async () => {
-    const sessions = await findOpenSessions(rpc, new Set(holders.keys()));
+    const { sessions, otherMint } = await findOpenSessions(rpc, new Set(holders.keys()));
+    if (otherMint.length > 0) {
+      console.error(`devnet target: note: ${otherMint.length} session(s) of another mint name a held key and are left alone: ${otherMint.join(", ")}`);
+    }
     const outcome = await closeSessions(rpc, funding, sessions, holders, options);
     for (const failure of outcome.failed) problems.push(`closing session ${failure.session}: ${failure.error}`);
   });
@@ -247,7 +285,7 @@ export async function cleanUp(
   });
   for (const { owner, usdcAccount, usdc } of held) {
     if (usdc === undefined) continue;
-    await attempt(`returning the USDC of ${owner}`, () => returnUsdc(rpc, funding, holders.get(owner)!, usdcAccount, usdc, options));
+    await attempt(`returning the USDC of ${owner}`, () => returnUsdcRetrying(rpc, funding, holders.get(owner)!, usdcAccount, usdc, options));
   }
   for (const { owner, lamports } of held) {
     await attempt(`returning the SOL of ${owner}`, () => returnSol(rpc, funding, holders.get(owner)!, lamports, options));
