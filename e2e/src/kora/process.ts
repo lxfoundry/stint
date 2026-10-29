@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { redactUrls } from "@lxfoundry/stint-x402";
 import { renderKoraConfig, renderSignersConfig, type KoraConfigInput } from "./config.js";
 
 export interface KoraOptions {
@@ -96,11 +97,12 @@ export async function startKora(options: KoraOptions): Promise<KoraProcess> {
     let delay = 50;
     while (Date.now() < deadline) {
       if (spawnError) throw new Error(`Could not start Kora (${binary}): ${spawnError.message}`);
+      // Kora quotes the RPC URL in its errors, and the URL can carry a key: the output is kept redacted.
       if (exited) throw new Error(`Kora exited during startup:
-${output}`);
+${redactUrls(output)}`);
       try {
         const response = await fetch(`${url}/liveness`);
-        if (response.ok) return { url, apiKey: options.apiKey, logs: () => output, stop };
+        if (response.ok) return { url, apiKey: options.apiKey, logs: () => redactUrls(output), stop };
       } catch {
         // Not listening yet.
       }
@@ -108,7 +110,7 @@ ${output}`);
       delay = Math.min(delay * 2, 1_000);
     }
     throw new Error(`Kora was not ready within 30 s:
-${output}`);
+${redactUrls(output)}`);
   } catch (error) {
     // Every failed start stops the child, if any, and removes the working directory.
     await stop?.();

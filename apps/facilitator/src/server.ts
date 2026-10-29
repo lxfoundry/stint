@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { address, createKeyPairSignerFromBytes, createSolanaRpc, type Address } from "@solana/kit";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
-import { HttpError, SCHEME, X402_VERSION, readJson, sendJson, type Network, type SupportedResponse } from "@lxfoundry/stint-x402";
+import { HttpError, SCHEME, X402_VERSION, readJson, sendJson, type Network, type RetryOptions, type SupportedResponse } from "@lxfoundry/stint-x402";
 import { createKoraClient } from "./kora.js";
 import { settlePayment } from "./settle.js";
 import { verifyPayment, type FacilitatorContext } from "./verify.js";
@@ -20,6 +20,8 @@ export interface FacilitatorConfig {
   /** One per resource server; required on `/verify` and `/settle` (spec §6.5). */
   readonly apiKeys: readonly string[];
   readonly confirmTimeoutMs?: number;
+  /** How a confirmed close's transaction is re-read while the node returns nothing (default 5 reads, 400 ms apart). */
+  readonly readRetry?: RetryOptions;
   readonly log?: (entry: Record<string, unknown>) => void;
 }
 
@@ -57,6 +59,7 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
     rentPayer,
     kora,
     confirmTimeoutMs: config.confirmTimeoutMs ?? 30_000,
+    readRetry: config.readRetry,
   };
   const host = config.host ?? "127.0.0.1";
   let url = "";

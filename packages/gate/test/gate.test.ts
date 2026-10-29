@@ -255,6 +255,68 @@ describe("gate", () => {
     expect(h.calls.settle).toHaveLength(1);
   });
 
+  it("reports a session's status from the chain, estimated at the session clock", async () => {
+    const { session } = await prepareOpen();
+    // Eight seconds into the session: the fake chain holds the stored session.
+    h.sessions.set(session, { ...h.sessions.get(session)!, startedAt: BigInt(NOW_MS / 1000 - 8) });
+
+    const response = await fetch(`${h.url}/sessions/${session}`);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      session,
+      paidUntil: NOW_MS / 1000 + 22,
+      startedAt: NOW_MS / 1000 - 8,
+      deposited: "30000",
+      claimed: "0",
+      rate: "1000",
+      minSeconds: 5,
+      maxSeconds: 120,
+      timeLeft: 22,
+      earned: "8000",
+      due: "8000",
+      refundable: "22000",
+      blockhash: "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N",
+      lastValidBlockHeight: "100",
+    });
+  });
+
+  it("reports no time left, and the whole deposit earned, once paid_until has passed", async () => {
+    const { session } = await prepareOpen();
+    h.sessions.set(session, { ...h.sessions.get(session)!, startedAt: BigInt(NOW_MS / 1000 - 100) });
+
+    const body = (await (await fetch(`${h.url}/sessions/${session}`)).json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({ timeLeft: 0, earned: "30000", due: "30000", refundable: "0" });
+  });
+
+  it("charges the minimum in the status of a session that has just opened", async () => {
+    const { session } = await prepareOpen();
+
+    const body = (await (await fetch(`${h.url}/sessions/${session}`)).json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({ timeLeft: 30, earned: "0", due: "5000", refundable: "25000" });
+  });
+
+  it("answers 404 for an address with no session, and for a session with other terms", async () => {
+    const unknown = await fetch(`${h.url}/sessions/${h.buyer.address}`);
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toEqual({ error: "unknown_session" });
+
+    const { session } = await prepareOpen();
+    h.sessions.set(session, { ...h.sessions.get(session)!, rate: 2_000n });
+    const foreign = await fetch(`${h.url}/sessions/${session}`);
+    expect(foreign.status).toBe(404);
+    expect(await foreign.json()).toEqual({ error: "unknown_session" });
+  });
+
+  it("serves the status without a token, and leaves other GET requests to the host", async () => {
+    const { session } = await prepareOpen();
+    expect((await fetch(`${h.url}/sessions/${session}`)).status).toBe(200);
+    expect((await fetch(`${h.url}/sessions/${session}/close`)).status).toBe(404);
+    expect((await fetch(`${h.url}/sessions`)).status).toBe(404);
+  });
+
   it("answers 402 with the facilitator's reason when verification fails, and settles nothing", async () => {
     h.verifyAnswer = { isValid: false, invalidReason: "invalid_amount" };
     const { status, body } = await open();

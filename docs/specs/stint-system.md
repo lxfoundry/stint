@@ -186,7 +186,7 @@ For readers who know EVM chains, the main differences:
 The facilitator (section 6) and the end-to-end harness (section 12) depend on how their tools
 behave. These facts were read in each tool's source or documentation, or observed at run time, at
 the version named. They are re-checked whenever the implementation plan pins another version, and
-the sections that depend on them cite them as (T1) to (T9).
+the sections that depend on them cite them as (T1) to (T10).
 
 - **T1. On Windows, Solana programs are built inside WSL.** The Solana and Anchor installation
   guides require it, and the official installer supports macOS, Linux and WSL. *Used in 3.5.*
@@ -217,6 +217,9 @@ the sections that depend on them cite them as (T1) to (T9).
 - **T9. Surfpool truncates a transaction's `preTokenBalances`** (v1.6.1). It keeps the lowest
   account indices, up to the length of `postTokenBalances`, so a transaction that closes a token
   account loses one pre balance. Inner instructions are reported completely. *Used in 12.2, 12.5.*
+- **T10. Devnet's slots take about 240 ms, so a blockhash, valid for 150 blocks, lasts about 36 s.**
+  Measured from devnet's own performance samples over half an hour: 7,502 slots in 1,800 s, with
+  238 to 243 ms per slot. The local network's 400 ms slots give a blockhash 60 s. *Used in 5.1, 12.6.*
 
 ## 3. Architecture
 
@@ -916,7 +919,7 @@ sessions it opens with itself. The API key and the limits per key bound that.
 | `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `202 {session, transaction}` while the settlement is pending; `400 invalid_duration` |
 | `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration` |
 | `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`, or `200 {transaction}` when the close is confirmed but its `Closed` event cannot be read; `202 {transaction}` while the settlement is pending (the client polls the status until `404`, for at most `closeWaitSeconds`: section 9.3); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
-| `GET /sessions/:id` | Status from the chain: `paidUntil`, deposited and a fresh blockhash. Earned so far and time left are estimates at the gate's session clock (section 7.3); the chain's clock decides the amounts (section 4.2) | `200`; `404` |
+| `GET /sessions/:id` | Status from the chain, public like the chain. Body: `session`, `paidUntil`, `startedAt`, `deposited`, `claimed`, `rate`, `minSeconds`, `maxSeconds`, a fresh `blockhash` with its `lastValidBlockHeight`, and, as estimates at the gate's session clock (section 7.3), `timeLeft`, `earned` (section 4.2), `due` (what a close then charges in total) and `refundable` (`deposited - max(claimed, due)`). `u64` values are decimal strings. The chain's clock decides the amounts (section 4.2). It works for a session the gate does not track yet. It reads the chain on every call and is not authenticated: a deployment rate-limits it like any public route | `200`; `404` for an address that holds no session, or a session with other terms (section 4.6) |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
 | `GET /.well-known/jwks.json` | The gate's assertion keys (section 7.7) | `200` |
 
@@ -1247,7 +1250,7 @@ server.
 | Tool | Input | Output |
 |---|---|---|
 | `stint_open_session` | `url`, `seconds?`, `reason` | `sessionId`, `paidUntil`, cost, remaining budget |
-| `stint_session_status` | `sessionId` | time left, spent, refundable now |
+| `stint_session_status` | `sessionId` | `paidUntil`, `timeLeftSeconds`, `spent` (what closing now would pay the seller, the minimum included), `refundable` (what it would return) |
 | `stint_top_up` | `sessionId`, `seconds` | `paidUntil`, cost |
 | `stint_close_session` | `sessionId` | paid, refunded, transaction |
 | `stint_send` | `sessionId`, `message` | ok |
@@ -1258,6 +1261,8 @@ server.
   message's top-level field of the same name.
 - Tool descriptions instruct agents to close sessions as soon as their task is done.
 - Policy refusals are returned as readable tool errors.
+- The runtime that holds the tools can close every session still open at once (`closeAll`), for a
+  process that is shutting down. No session can be opened after it.
 
 ### 9.6 MCP server
 
@@ -1266,12 +1271,17 @@ the key path, caps and allowlists.
 
 ### 9.7 Example agent
 
-A Claude (`claude-opus-5-5`) agent using the Anthropic TypeScript SDK's tool runner, at low effort,
-with `tool_choice: auto`; its system prompt directs it to open a session first. It handles the
-`refusal` stop reason, with server-side fallback enabled.
+A Claude (`claude-opus-5-5`) agent using the Anthropic TypeScript SDK's tool runner
+(`client.beta.messages.toolRunner`), at low effort (`output_config.effort: "low"`), with `tool_choice: auto`.
+Its system prompt directs it to open a session first and to close it as soon as its task is done. It
+asks for the API's default server-side fallback (`fallbacks: "default"`, under the beta header
+`server-side-fallback-2026-07-01`), so that a refusal by the first model is routed to the API's default fallback. If the
+response still ends with the `refusal` stop reason, the agent reports the refusal's explanation. Whatever happens, it closes every session still open before it
+returns.
 
-**Task:** watch a devnet token account until a payment arrives; report the amount received and the
-slot; close the session.
+**Task:** watch a devnet token account until payments arrive; report the amount of the last payment and
+its slot; close the session. The stream reports an account's balance after each change, so the agent
+takes the payment as the difference between two consecutive messages.
 
 **Untrusted input.** Stream messages reach the model as data. Every spending limit is enforced by
 the client's policy in code, so content in the stream cannot raise one.
@@ -1383,8 +1393,8 @@ run is repeatable.
 
 | Target | What the harness starts | Network | Capabilities | Runs |
 |---|---|---|---|---|
-| `local` | Surfpool (embedded) and Kora, then the facilitator, the gate and the example resource from this repository | Surfpool, offline, with the fixtures of section 12.3 | Chain control, stack control | On every change, and in continuous integration on every push and pull request |
-| `devnet` | Kora, the facilitator, the gate and the example resource | Devnet, with the deployed program and a funding key (section 12.6) | Stack control | On demand. Never a merge gate: the public network is shared and rate-limited, and its faucets cannot be scripted |
+| `local` | Surfpool (embedded) and Kora, then the facilitator, the gate and the example resource from this repository | Surfpool, offline, with the fixtures of section 12.3 | Chain control, stack control, facilitator API | On every change, and in continuous integration on every push and pull request |
+| `devnet` | Kora, the facilitator, the gate and the example resource | Devnet, with the deployed program and a funding key (section 12.6) | Stack control, facilitator API | On demand. Never a merge gate: the public network is shared and rate-limited, and its faucets cannot be scripted |
 | `external` | Nothing: `stint-conformance` targets a running gate, and optionally a facilitator (section 12.6) | The target's own | Allowance, when declared (below). Every scenario that needs chain control also needs stack control, so none runs here | Against any implementation |
 
 **Capabilities.**
@@ -1395,6 +1405,8 @@ run is repeatable.
 - **Stack control:** the harness runs the services, so it holds their keys (the seller's wallet,
   the receiver authorizer, the facilitator's API key, the resource's admin key) and can stop,
   restart or add instances of them.
+- **Facilitator API:** the harness can call the facilitator's `/verify` with an API key (section 6.5). Always
+  on `local` and `devnet`; on `external` only with `--facilitator` and `--facilitator-key`.
 - **Allowance:** the facilitator accepts an allowance pull as the funding instruction (section
   10), an optional mode. The `local` and `devnet` targets have it once this repository's
   facilitator supports allowance funding (section 14, question 3). On `external`,
@@ -1406,8 +1418,19 @@ reported as not applicable, not as failed.
 **The example agent's task, scripted** (scenario 22): `stint_open_session` → `stint_send`
 (subscribe to a watched account) → the harness sends a payment to that account →
 `stint_receive` with `match` returns the notification → `stint_close_session` → the `paid`
-reported by the close equals what the receiver gained in the session's claim and close
-transactions, and `refunded` what the buyer gained in the close.
+reported by the close (`claimed + owed + redirected`, section 5.5) equals what the receiver gained in the
+close, and `refunded` what the buyer gained in the close. The scenario makes no claim before it closes, so
+`claimed` is zero and the close is the only transaction that pays the receiver; a claim made earlier would
+have to be added to the receiver's gain.
+
+A scenario sends a payment through the context's `sendUsdc` (from a buyer's token account to any
+token account): the harness signs for the buyer and pays the fee. The scenario creates the watched
+account before it subscribes and waits the target's `subscriptionSettleMs` (the stream acknowledges a
+subscription with nothing), then reads `stint_receive` until a message about that account carries
+the payment's amount, because the node sends one message per change, the account's creation
+included. The stream's `slot` is asserted only on `devnet`: the local network reports the slot of the
+subscription (T6). The rent payer's balance change is read from the close transaction's lamport
+balances (`preBalances` and `postBalances`), which are not the token balances that T9 is about.
 
 **Status.** Every scenario is `required` or `pending`; the library records which, beside the
 scenario.
@@ -1516,7 +1539,7 @@ upgrade.
 | Difference | Effect on the scenarios | Covered by |
 |---|---|---|
 | Commitment levels are simulated: account reads and account subscriptions return the latest state at any commitment (T6) | The delay before `confirmed`, which the gate's margin and the facilitator's 10 s top-up margin allow for, does not occur | The `devnet` target |
-| Account notifications carry the slot at which the subscription was made (T6) | The `slot` of the example stream's `account` messages (section 8) is not meaningful locally; no scenario asserts on it | The `devnet` target |
+| Account notifications carry the slot at which the subscription was made (T6) | The `slot` of the example stream's `account` messages (section 8) is not meaningful locally; scenario 22 asserts on it, on the devnet target only | The `devnet` target |
 | One node, no network latency, no other traffic | Expired blockhashes, retries and rate limits are rare | The `devnet` target |
 | The USDC mint's authorities are harness keys | Freeze scenarios run locally only: on `devnet`, the mint's freeze authority (S10) is a key the harness does not hold | — |
 | A transaction's `preTokenBalances` is truncated to the length of its `postTokenBalances` (T9) | Balance metadata is not used: token balance changes are computed from the transfer instructions | The `devnet` target |
@@ -1534,16 +1557,28 @@ the target accepts allowance funding. It also has a client mode, run against a r
 
 **Prerequisites** for the `devnet` and `external` targets (the `local` target sets these up
 itself):
-- a gate configured with a test offer: `minSeconds` of 5 s or less, and a short
-  `idleCloseSeconds`;
-- a funding key with SOL and the offer's asset on the target network. The harness creates the
-  keys that each scenario, and on `devnet` each stack, needs, and funds them from this key. At the
-  end of the run, it first closes any of its sessions still open, including those left open when
-  a scenario stopped its stack. It holds every buyer key, so it closes each one at once with a
-  `Standard` close signed by the session's authority (section 4.3). The funding key is the fee
-  payer (S14), since some buyers hold no SOL. If a scenario closed a payout account that the close
-  pays (section 4.3), either the buyer's refund account or the seller's `receiver_token`, the
-  harness recreates it first (S7). It then returns what is left to the funding key;
+- a gate configured with a test offer: `minSeconds` of 5 s or less, a short `idleCloseSeconds`, and, on
+  a network whose blockhashes last less than 60 s, a `maxTimeoutSeconds` below that lifetime (T10);
+- a funding key with SOL and the offer's asset on the target network, which it uses for nothing but
+  funding and fees. The harness derives every other key it needs from one seed, so the keys of any
+  earlier run are known without a record. It creates the keys that each scenario, and on `devnet` each
+  stack, needs, and funds them from the funding key, which is the fee payer of its own transactions
+  (S14), since some buyers hold no SOL. Before a run, and again after it, the harness cleans up: it
+  closes every session still open, of the USDC mint, that one of its keys opened or paid the rent of, including
+  those left open when a scenario stopped its stack or a run ended abnormally, and returns what its keys
+  hold to the funding key. A session that names one of its keys only as its receiver is reported and left
+  alone: an open is signed by its `authority` and `rent_payer` only (section 4.3), so anyone may name the
+  seller, for as long as they choose to pay for, and such a session is its opener's to close. A close is a
+  `Standard` close (section 4.3) signed by the session's authority,
+  or, when the harness does not hold that key, by the session's `receiver_authorizer`. If the seller's
+  `receiver_token` has been closed, the same transaction recreates it first (S7, S13). It recreates the
+  buyer's refund account the same way, but only when the close is made before `paid_until`: from then on, a
+  residual owed to a closed refund account goes to the receiver (section 4.3). The clean-up
+  starts from the keys alone, so it is the same after any run, and after none. The harness holds neither
+  the authority nor the receiver authorizer of a session that an outside key opened with one of its keys as
+  rent payer: from the session's `paid_until` on, anyone may close it (section 4.3), so the funding key,
+  which pays the fees, signs that close. Before then the clean-up reports the session. A run does not
+  start when its start-up clean-up fails, unless it is given `--force`;
 - the network's RPC URL.
 
 **Timing tolerance:** a timed condition passes within 5 s (`confirmed` commitment plus the gate's
@@ -1577,7 +1612,7 @@ section 12.2.
 | 19 | *(on `external`, only with `--facilitator` and `--facilitator-key`; otherwise not applicable)* `/verify` of a valid open | — | No change on-chain |
 | 20 | A session opened directly on-chain with the gate's terms but another mint (S5) | — | `403` on connect; not adopted |
 | 21 | The buyer closes its refund account and sends one base unit to the vault, asks the gate to close, then lets the session expire | — | The close request gets `409 refund_account_closed`, and the gate does not retry it. Closed at expiry; the residual goes to the receiver; the rent returns to the rent payer |
-| 22 | The example agent's task, scripted (section 12.2) | Stack | `stint_receive` returns the payment to the watched account; `paid` and `refunded` equal the balance changes recorded in the session's transactions; the session account is closed and its rent returned to the rent payer |
+| 22 | The example agent's task, scripted (section 12.2) | Stack | `stint_receive` returns the payment to the watched account (on `devnet`, with a `slot` at or after the payment's); `paid` and `refunded` equal the balance changes recorded in the session's close; the session account is closed and the rent payer's balance rises by exactly what the session account and the vault held, read from the close's own metadata |
 | 23 | The gate restarts with a session open | Stack | Timers restored from the chain; the session is not closed early, and settles at `paidUntil` as in scenario 3 |
 | 24 | The gate is unreachable when the buyer closes | Stack | The client's fallback (section 9.3) closes through `closeUrl`; refund as in scenario 1 |
 | 25 | The gate and the facilitator are unreachable when the buyer closes | Stack | With SOL on the authority: a unilateral close, refunded as in scenario 1. Without: the session runs to expiry |

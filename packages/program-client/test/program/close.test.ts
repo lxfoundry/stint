@@ -1,4 +1,4 @@
-import { generateKeyPairSigner } from "@solana/kit";
+import { generateKeyPairSigner, lamports } from "@solana/kit";
 import { getTransferCheckedInstruction } from "@solana-program/token";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -144,27 +144,109 @@ describe("close (Standard)", () => {
       expect(fixture.tokenAmount(vault)).toBe(30_000n);
     });
 
-    // A known limit, pinned so that it cannot change unnoticed: spec section 4.3 sends a residual owed
-    // to a closed refund account to the receiver once the paid time has passed, and `close` does not do
-    // that yet. Until it does, the owner of the refund account can leave a session unclosable after
-    // expiry by closing that account and sending one base unit to the vault.
-    it("cannot yet redirect a residual owed to a closed refund account, even after paid_until", async () => {
-      const { session, vault } = await openAndWait(60n);
-      await fixture.send([
-        getTransferCheckedInstruction({
-          source: buyer.token,
-          mint: fixture.mint,
-          destination: vault,
-          authority: buyer.signer,
-          amount: 1n,
-          decimals: DECIMALS,
-        }),
-      ]);
-      fixture.removeAccount(buyer.token);
-      const sent = await fixture.close({ session, closer: await generateKeyPairSigner() });
-      expect(sent.ok).toBe(false);
-      expect(fixture.exists(session)).toBe(true);
-      expect(fixture.tokenAmount(vault)).toBe(30_001n);
+    // From paid_until on, a residual owed to a refund account that no longer exists goes to the
+    // receiver (spec section 4.3), so that account's owner cannot keep a session open by closing it
+    // and sending the vault one base unit.
+    describe("a residual owed to a refund account that no longer exists", () => {
+      /** Opens 30 s at 1,000 per second for `deposit`, adds `stray` base units to the vault, then closes the refund account. */
+      async function openWithClosedRefundAccount(deposit: bigint, stray: bigint) {
+        const opened = await fixture.open({ authority: buyer, deposit });
+        expect(opened.sent.ok, opened.sent.logs.join("\n")).toBe(true);
+        if (stray > 0n) {
+          await fixture.send([
+            getTransferCheckedInstruction({
+              source: buyer.token,
+              mint: fixture.mint,
+              destination: opened.vault,
+              authority: buyer.signer,
+              amount: stray,
+              decimals: DECIMALS,
+            }),
+          ]);
+        }
+        fixture.removeAccount(buyer.token);
+        return opened;
+      }
+
+      it("goes to the receiver once paid_until has passed, and the rent comes back", async () => {
+        const { session, vault } = await openWithClosedRefundAccount(30_000n, 1n);
+        fixture.setNow(startedAt + 60n);
+        const rentBefore = fixture.lamportsOf(fixture.rentPayer.address);
+        const deposits = fixture.lamportsOf(session) + fixture.lamportsOf(vault);
+
+        const sent = await fixture.close({ session, closer: await generateKeyPairSigner() });
+
+        expect(sent.ok, sent.logs.join("\n")).toBe(true);
+        expect(findClosedEvent(sent.inner)).toMatchObject({ owed: 30_000n, refunded: 0n, redirected: 1n });
+        expect(fixture.tokenAmount(fixture.seller.token)).toBe(30_001n);
+        expect(fixture.exists(session)).toBe(false);
+        expect(fixture.exists(vault)).toBe(false);
+        expect(fixture.lamportsOf(fixture.rentPayer.address) - rentBefore).toBe(deposits);
+      });
+
+      it("includes the rounding remainder, from paid_until itself", async () => {
+        const { session } = await openWithClosedRefundAccount(30_500n, 0n);
+        fixture.setNow(startedAt + 30n);
+
+        const sent = await fixture.close({ session, closer: await generateKeyPairSigner() });
+
+        expect(sent.ok, sent.logs.join("\n")).toBe(true);
+        expect(findClosedEvent(sent.inner)).toMatchObject({ owed: 30_000n, refunded: 0n, redirected: 500n });
+        expect(fixture.tokenAmount(fixture.seller.token)).toBe(30_500n);
+      });
+
+      it("still goes to the receiver when lamports were sent to the closed address (S12)", async () => {
+        const { session } = await openWithClosedRefundAccount(30_000n, 1n);
+        fixture.svm.airdrop(buyer.token, lamports(1_000_000n));
+        fixture.setNow(startedAt + 60n);
+
+        const sent = await fixture.close({ session, closer: await generateKeyPairSigner() });
+
+        expect(sent.ok, sent.logs.join("\n")).toBe(true);
+        expect(findClosedEvent(sent.inner)).toMatchObject({ refunded: 0n, redirected: 1n });
+      });
+
+      it("is paid to the refund account instead when that account exists again", async () => {
+        const { session } = await openWithClosedRefundAccount(30_000n, 1n);
+        fixture.writeTokenAccount(buyer.token, buyer.signer.address, 0n);
+        fixture.setNow(startedAt + 60n);
+
+        const sent = await fixture.close({ session, closer: await generateKeyPairSigner() });
+
+        expect(sent.ok, sent.logs.join("\n")).toBe(true);
+        expect(findClosedEvent(sent.inner)).toMatchObject({ owed: 30_000n, refunded: 1n, redirected: 0n });
+        expect(fixture.tokenAmount(buyer.token)).toBe(1n);
+      });
+
+      it("is not redirected before paid_until: the close fails and changes nothing", async () => {
+        const { session, vault } = await openWithClosedRefundAccount(30_500n, 0n);
+        fixture.setNow(startedAt + 29n);
+
+        const sent = await fixture.close({ session, closer: buyer.signer });
+
+        expect(sent.ok).toBe(false);
+        expect(fixture.exists(session)).toBe(true);
+        expect(fixture.tokenAmount(vault)).toBe(30_500n);
+        expect(fixture.tokenAmount(fixture.seller.token)).toBe(0n);
+
+        // The failure is the missing refund account and nothing else: with the account back, the same close goes through.
+        fixture.writeTokenAccount(buyer.token, buyer.signer.address, 0n);
+        const retried = await fixture.close({ session, closer: buyer.signer });
+        expect(retried.ok, retried.logs.join("\n")).toBe(true);
+        expect(fixture.exists(session)).toBe(false);
+      });
+
+      it("fails, and changes nothing, when the receiver's account is closed too", async () => {
+        const { session, vault } = await openWithClosedRefundAccount(30_000n, 1n);
+        fixture.removeAccount(fixture.seller.token);
+        fixture.setNow(startedAt + 60n);
+
+        const sent = await fixture.close({ session, closer: await generateKeyPairSigner() });
+
+        expect(sent.ok).toBe(false);
+        expect(fixture.exists(session)).toBe(true);
+        expect(fixture.tokenAmount(vault)).toBe(30_001n);
+      });
     });
   });
 

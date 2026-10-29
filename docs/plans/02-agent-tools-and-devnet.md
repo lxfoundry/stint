@@ -887,9 +887,13 @@ export interface SessionTools {
       const open = [...live.entries()].filter(([, state]) => !state.closed);
       await Promise.all(
         open.map(async ([sessionId, state]) => {
+          // A close already in flight is waited for, not repeated, and is not counted as this one's; if it fails, this tries once more.
+          if (state.closing) {
+            await state.closing.catch(() => undefined);
+            if (state.closed) return;
+          }
           try {
-            await state.session.close();
-            state.closed = true;
+            await closeSession(state);
             outcome.closed.push(sessionId);
           } catch (error) {
             outcome.failed.push({ sessionId, error: error instanceof Error ? error.message : String(error) });
@@ -943,6 +947,41 @@ Still in `packages/client/src/tools.ts`, in `createSessionTools`, declare `const
           return work.finally(() => opens.delete(work));
         },
 ```
+
+A session has at most one close in flight, shared by `stint_close_session` and `closeAll`, so that a session is
+never closed twice at once, whichever of them starts first: a second close is refused by the gate, and
+`closeAll` would report a session that did close as one it could not close. Still in
+`packages/client/src/tools.ts`:
+
+1. Import `type CloseReceipt` from `./client.js`, and add to `interface Live`:
+
+```ts
+  /** The close in flight, shared by every caller, so that a session is never closed twice at once. */
+  closing?: Promise<CloseReceipt>;
+```
+
+2. In `createSessionTools`, before `const matches`, add:
+
+```ts
+  function closeSession(state: Live): Promise<CloseReceipt> {
+    if (state.closing) return state.closing;
+    // Marked closed within the promise itself, so that whoever awaits it sees the session closed.
+    const attempt = state.session.close().then((receipt) => {
+      state.closed = true;
+      return receipt;
+    });
+    // Cleared once settled, so that a failed close can be tried again.
+    const clear = () => {
+      if (state.closing === attempt) state.closing = undefined;
+    };
+    attempt.then(clear, clear);
+    state.closing = attempt;
+    return attempt;
+  }
+```
+
+3. In `stint_close_session`, replace the start of `run`, up to its `return`, with
+   `const receipt = await closeSession(get(input.sessionId));`.
 
 Run: `pnpm --filter @lxfoundry/stint-client test`
 Expected: PASS, including the existing test that every tool has a strict schema and a description.
@@ -2001,8 +2040,11 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { ConfigError, loadConfig } from "./config.js";
 import { createMcpServer } from "./server.js";
 
-/** The longest the server waits to close sessions on its way out. */
-const CLOSE_LIMIT_MS = 30_000;
+/**
+ * The longest the server waits to close sessions on its way out. An open still in flight must finish before its
+ * session can be closed, and on a slow network that takes longer than a close does.
+ */
+const CLOSE_LIMIT_MS = 90_000;
 
 /**
  * The stdio entry point (spec §9.6). stdout is the protocol channel, so everything written for a
@@ -2575,9 +2617,11 @@ done
 
 [[ -n "$payer" ]] || die "--payer is required: a funded keypair file made for this"
 [[ -f "$payer" ]] || die "the payer keypair $payer does not exist"
+payer_address="$(solana-keygen pubkey "$payer")"
+# Compared by key, not by path: a copy of the default wallet is the same wallet.
 default_wallet="$HOME/.config/solana/id.json"
-if [[ "$(realpath -m "$payer")" == "$(realpath -m "$default_wallet")" && $allow_default_wallet -eq 0 ]]; then
-  die "$payer is the Solana CLI's default wallet: name a keypair made for this, or pass --allow-default-wallet"
+if [[ $allow_default_wallet -eq 0 && -f "$default_wallet" && "$payer_address" == "$(solana-keygen pubkey "$default_wallet")" ]]; then
+  die "$payer holds the key of the Solana CLI's default wallet: name a keypair made for this, or pass --allow-default-wallet"
 fi
 authority="${authority:-$payer}"
 [[ -f "$authority" ]] || die "the upgrade authority keypair $authority does not exist"
@@ -2600,7 +2644,6 @@ host="$(printf '%s' "$url" | sed -E 's#^([a-z]+://)([^/@?]*@)?([^/?]+).*#\1\3#')
 genesis="$(solana genesis-hash --url "$url" 2>/dev/null)" || die "cannot read the genesis hash from $host"
 [[ "$genesis" == "$DEVNET_GENESIS" ]] || die "the RPC at $host reports genesis hash $genesis, which is not devnet's"
 
-payer_address="$(solana-keygen pubkey "$payer")"
 balance_output="$(solana balance "$payer_address" --url "$url" --lamports 2>/dev/null)" || die "cannot read the balance of $payer_address from $host"
 balance="${balance_output%% *}"
 [[ "$balance" =~ ^[0-9]+$ ]] || die "cannot read the balance of $payer_address from $host (got '$balance_output')"
@@ -2625,8 +2668,16 @@ fi
 
 (( balance >= MIN_LAMPORTS )) || die "the payer holds $balance lamports; $MIN_LAMPORTS are needed (about 2.2 SOL): fund $payer_address on devnet first"
 
-"${command[@]}"
-solana program show "$program_id" --url "$url"
+# The CLI's errors quote the URL it was given, key included, and it prints a failed deploy's buffer
+# address and seed notice on stderr. Both streams are kept, each with every URL cut to scheme and
+# host. The match is a pattern: the CLI normalises the URL it prints, so the text may differ from $url,
+# and it also prints the WebSocket URL it derives from it, so any scheme is matched.
+redact() { sed -uE 's|([a-z][a-z0-9+.-]*://)([^/@ )]*@)?([^/?# )]+)[^ )]*|\1\3|g'; }
+# Runs a command, its stdout and stderr redacted and still on their own streams; its exit status stands.
+run_redacted() { { "$@" 2>&1 1>&3 3>&- | redact >&2; } 3>&1 | redact; }
+
+run_redacted "${command[@]}"
+run_redacted solana program show "$program_id" --url "$url"
 ```
 
 Create `scripts/verify-deployment.sh`:
@@ -2706,7 +2757,8 @@ scripts/verify-deployment.sh e2e/.cache/subscriptions.so De1egAFMkMWZSN5rYXRj9CA
 ```
 
 Expected: every refusal exits 1 with its reason (the default-wallet check needs `~/.config/solana/id.json` to
-exist, otherwise its reason is that the payer keypair does not exist); the dry run prints `solana program deploy ... --use-rpc
+exist, otherwise its reason is that the payer keypair does not exist; it compares public keys, so a copy of that
+wallet is refused too); the dry run prints `solana program deploy ... --use-rpc
 --max-sign-attempts 10` and exits 0; the last line prints `devnet program De1egAF… is
 e2e/.cache/subscriptions.so (sha256 2675ad1d…, 133280 bytes)` and exits 0. If the mainnet check does
 anything other than refuse, stop and report it.
@@ -2844,8 +2896,9 @@ in fees does not come back.
     the funding key, the stack's keys, a pool of buyer keys, and `holders`, every key but the funding key,
     by address.
   - `cleanUp(rpc, funding, holders, options): Promise<string[]>` in `e2e/src/devnet/funds.ts`: closes every
-    open session that one of the holders opened, receives or paid the rent of, then returns the holders'
-    USDC and SOL to the funding key. Idempotent; returns what went wrong and throws nothing.
+    open session of the USDC mint that one of the holders opened or paid the rent of, then returns the holders'
+    USDC and SOL to the funding key. A session that names a holder only as its receiver, or that is of another
+    mint, is reported as a note and left alone. Idempotent; returns what went wrong and throws nothing.
   - `startDevnetStack(options): Promise<DevnetStack>` with `target` (name `devnet`, capabilities
     `stack` and `facilitatorApi`), `context()` and an idempotent `stop()` that never throws. It cleans up
     before it starts anything, and does not start when that fails, unless `force` is set (`--force`).
@@ -3697,14 +3750,22 @@ Expected: FAIL: `../src/targets/devnet.js` does not exist.
 
 The clean-up has no memory of any run. It starts from the seed's keys, reads what is on the chain, and
 brings it to zero in a fixed order:
-1. Close every open session that one of the keys opened, receives or paid the rent of. Each close
-   creates, in its own transaction, the two accounts it pays if they are gone (the seller's
-   `receiver_token` and the buyer's refund account; spec §4.3, S7, S13), so a close that failed once, or
-   a payout account that someone closed, cannot make the next attempt fail. A session is signed by its
-   authority when the seed holds that key, and otherwise by its `receiver_authorizer`, which a `Standard`
-   close accepts before `paid_until` (and anyone after).
+1. Close every open session of the USDC mint that one of the keys opened or paid the rent of. Sessions
+   are found by the account's size and its discriminator. Only the authority and the rent payer sign an
+   `open`, so anyone may open a session that names the seller as its receiver, with a receiver authorizer of
+   their own and as much time as they pay for: the clean-up could not close it, and would refuse every run until it
+   ended. A session that names a key only as its receiver is therefore reported as a note and left to its
+   opener, and so is one of another mint. Each close creates, in its own transaction, the accounts it pays if
+   they are gone, so a close that failed once, or a payout account that someone closed, cannot make the next
+   attempt fail: the seller's `receiver_token` always, and the buyer's refund account only when the close is
+   made before `paid_until`, because from then on the program pays a residual owed to a missing refund
+   account to the receiver (spec §4.3, S7, S13). A session is signed by its authority when the seed holds
+   that key, and otherwise by its `receiver_authorizer`, which a `Standard` close accepts before
+   `paid_until` (and anyone after).
 2. Read what the keys hold, in two batches.
-3. Return each key's USDC and close its account, then its SOL.
+3. Return each key's USDC and close its account, then its SOL. A balance read before the closes returned
+   their rent, or by a node that lags, can be stale and make the transfer fail: a failed return reads the
+   balance again after a pause and tries once more.
 
 A step that fails is recorded and the others still run. Nothing is lost by that: the next clean-up starts
 from the same keys, and step 1 repairs what a failed close needs.
@@ -3723,8 +3784,10 @@ import {
 } from "@solana-program/token";
 import {
   fetchEncodedAccounts,
+  getBase58Decoder,
   getBase64Encoder,
   type Address,
+  type Base58EncodedBytes,
   type Instruction,
   type KeyPairSigner,
   type Rpc,
@@ -3733,14 +3796,17 @@ import {
 import { describeError } from "@lxfoundry/stint-conformance";
 import {
   CloseKind,
+  SESSION_DISCRIMINATOR,
   STINT_PROGRAM_ADDRESS,
   eventAccounts,
   fetchMaybeSession,
   getCloseInstruction,
   getSessionDecoder,
   getSessionSize,
+  paidUntil,
 } from "@lxfoundry/stint-program-client";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
+import { fetchSysvarClock } from "@solana/sysvars";
 import { USDC_DECIMALS, USDC_DEVNET_MINT } from "../fixtures/usdc.js";
 import { sendInstructions, type SendOptions } from "../network/transactions.js";
 
@@ -3851,26 +3917,91 @@ export async function returnUsdc(
   await sendInstructions(rpc, funding.signer, instructions, options);
 }
 
+/**
+ * `returnUsdc` for an amount that may be stale: a node that lags can report a smaller balance than the account
+ * holds, and then closing the account fails. If the first attempt fails, the balance is read again, after a
+ * pause, and the return is tried once more with it.
+ */
+export async function returnUsdcRetrying(
+  rpc: Rpc<SolanaRpcApi>,
+  funding: Funding,
+  owner: KeyPairSigner,
+  account: Address,
+  amount: bigint,
+  options: SendOptions,
+): Promise<void> {
+  try {
+    await returnUsdc(rpc, funding, owner, account, amount, options);
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, (options.pollMs ?? 400) * 2));
+    const [now] = await scanHolders(rpc, [owner.address]);
+    if (now?.usdc === undefined) return; // the account is gone: the first attempt landed after all
+    await returnUsdc(rpc, funding, owner, account, now.usdc, options);
+  }
+}
+
 /** Sends `lamports`, less the key's own fee, back to the funding key. */
 export async function returnSol(rpc: Rpc<SolanaRpcApi>, funding: Funding, from: KeyPairSigner, lamports: bigint, options: SendOptions): Promise<void> {
   if (lamports > FEE) await sendSol(rpc, from, funding.signer.address, lamports - FEE, options);
 }
 
 /**
- * The sessions on the program that one of `owners` opened, receives or paid the rent of. The clean-up
- * finds sessions here, on the chain, and not in the gate's log: a session whose open was answered
- * `settlement_pending` is on the chain too, and a start-up has no log at all.
+ * `returnSol` for a balance that may be stale: a node that lags can report another balance than the key holds,
+ * such as one read before a close returned rent to it. Then the transfer fails, for want of lamports or because it
+ * would leave the key below the rent-exempt minimum. If the first attempt fails, the balance is read again, after a
+ * pause, and the return is tried once more with it.
  */
-export async function findOpenSessions(rpc: Rpc<SolanaRpcApi>, owners: ReadonlySet<Address>): Promise<Address[]> {
+export async function returnSolRetrying(rpc: Rpc<SolanaRpcApi>, funding: Funding, from: KeyPairSigner, lamports: bigint, options: SendOptions): Promise<void> {
+  try {
+    await returnSol(rpc, funding, from, lamports, options);
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, (options.pollMs ?? 400) * 2));
+    const { value } = await rpc.getBalance(from.address, { commitment: "confirmed" }).send();
+    await returnSol(rpc, funding, from, value, options);
+  }
+}
+
+/** The sessions that name a held key: those the clean-up acts on, and those it leaves alone. */
+export interface FoundSessions {
+  /** Sessions of the configured USDC mint. */
+  readonly sessions: Address[];
+  /** Sessions of any other mint: the harness never opens one, closing it would create accounts it cannot recover, and it is not its to fix. */
+  readonly otherMint: Address[];
+  /**
+   * Sessions that name a held key only as their receiver. Only the authority and the rent payer sign an open, so
+   * anyone may name the seller: such a session is its opener's to close, and the seller is paid when it is.
+   */
+  readonly receiverOnly: Address[];
+}
+
+/**
+ * The sessions on the program that one of `owners` opened or paid the rent of. The clean-up finds sessions
+ * here, on the chain, and not in the gate's log: a session whose open was answered `settlement_pending` is on
+ * the chain too, and a start-up has no log at all. Only sessions of the USDC mint are for the clean-up to
+ * close; those of another mint, and those that name one of `owners` only as their receiver, are set apart, to
+ * be reported and left alone. Otherwise a session that anyone may open, naming the seller, paid for as long as
+ * they like, would stop every run that cannot close it.
+ */
+export async function findOpenSessions(rpc: Rpc<SolanaRpcApi>, owners: ReadonlySet<Address>): Promise<FoundSessions> {
+  // The size alone would also match another account type of the program that happened to have it.
+  const discriminator = getBase58Decoder().decode(SESSION_DISCRIMINATOR) as Base58EncodedBytes;
   const accounts = await rpc
-    .getProgramAccounts(STINT_PROGRAM_ADDRESS, { commitment: "confirmed", encoding: "base64", filters: [{ dataSize: BigInt(getSessionSize()) }] })
+    .getProgramAccounts(STINT_PROGRAM_ADDRESS, {
+      commitment: "confirmed",
+      encoding: "base64",
+      filters: [{ dataSize: BigInt(getSessionSize()) }, { memcmp: { offset: 0n, bytes: discriminator, encoding: "base58" } }],
+    })
     .send();
   const decoder = getSessionDecoder();
   const base64 = getBase64Encoder();
-  const found: Address[] = [];
+  const found: FoundSessions = { sessions: [], otherMint: [], receiverOnly: [] };
   for (const { pubkey, account } of accounts) {
     const session = decoder.decode(base64.encode(account.data[0]));
-    if (owners.has(session.authority) || owners.has(session.receiver) || owners.has(session.rentPayer)) found.push(pubkey);
+    if (!owners.has(session.authority) && !owners.has(session.rentPayer)) {
+      if (owners.has(session.receiver)) found.receiverOnly.push(pubkey);
+      continue;
+    }
+    (session.mint === USDC_DEVNET_MINT ? found.sessions : found.otherMint).push(pubkey);
   }
   return found;
 }
@@ -3885,10 +4016,11 @@ export interface CloseOutcome {
  * authority when `signers` holds that key, and otherwise its `receiver_authorizer`: before `paid_until`
  * the program accepts either, and from `paid_until` anyone. When the harness holds neither, the funding key
  * tries, which succeeds only from `paid_until` on; before that the session is reported. The funding key pays
- * the fee: a buyer holds no SOL. The two accounts the close pays are created first, in the same transaction,
- * if they are gone (spec §12.6; S7): a transaction is atomic (S13), so nothing is half done. The refund account
- * is created even when nothing is owed to it; for an owner outside the pool (the example agent) whose account
- * had been closed, that donates its rent, about 0.002 SOL.
+ * the fee: a buyer holds no SOL. The seller's account is created first, in the same transaction, if it is gone,
+ * and so is the buyer's refund account if the close is made before `paid_until` (spec §12.6; S7): a transaction
+ * is atomic (S13), so nothing is half done. From `paid_until` on, the program pays a residual owed to a missing
+ * refund account to the receiver (spec §4.3), so recreating it would only donate its rent, about 0.002 SOL, to
+ * an owner the harness may not hold.
  */
 export async function closeSessions(
   rpc: Rpc<SolanaRpcApi>,
@@ -3909,7 +4041,14 @@ export async function closeSessions(
       const closer = heldCloser ?? funding.signer;
       const instructions: Instruction[] = [
         await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: funding.signer, owner: stored.receiver, mint: stored.mint }),
-        await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: funding.signer, owner: stored.refundOwner, mint: stored.mint }),
+      ];
+      // The chain's clock only moves forward: a close read as before `paid_until` may land after it, which creates the
+      // account for nothing, but one read as after it cannot need the account.
+      const now = (await fetchSysvarClock(rpc, { commitment: "confirmed" })).unixTimestamp;
+      if (now < paidUntil(stored)) {
+        instructions.push(await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: funding.signer, owner: stored.refundOwner, mint: stored.mint }));
+      }
+      instructions.push(
         getCloseInstruction({
           closer,
           session,
@@ -3920,7 +4059,7 @@ export async function closeSessions(
           ...(await eventAccounts()),
           kind: CloseKind.Standard,
         }),
-      ];
+      );
       await sendInstructions(rpc, funding.signer, instructions, options);
       outcome.closed.push(session);
     } catch (error) {
@@ -3934,7 +4073,10 @@ export async function closeSessions(
 /**
  * Brings everything the `holders` keys have on the chain back to the funding key: closes their sessions,
  * then returns their USDC and SOL. Safe to run at any time and any number of times, after any run or
- * none. Returns what went wrong; throws nothing.
+ * none. Sessions of a mint other than USDC that name a held key are reported as a note and left alone: they
+ * do not stop a start, and closing one would create accounts for a mint the harness does not hold. So are
+ * sessions that name a held key only as their receiver: an outside key opened them, and they are its to close.
+ * A balance that was read stale, of USDC or SOL, is read again once. Returns what went wrong; throws nothing.
  */
 export async function cleanUp(
   rpc: Rpc<SolanaRpcApi>,
@@ -3951,7 +4093,13 @@ export async function cleanUp(
     }
   };
   await attempt("closing sessions", async () => {
-    const sessions = await findOpenSessions(rpc, new Set(holders.keys()));
+    const { sessions, otherMint, receiverOnly } = await findOpenSessions(rpc, new Set(holders.keys()));
+    if (otherMint.length > 0) {
+      console.error(`devnet target: note: ${otherMint.length} session(s) of another mint name a held key and are left alone: ${otherMint.join(", ")}`);
+    }
+    if (receiverOnly.length > 0) {
+      console.error(`devnet target: note: ${receiverOnly.length} session(s) opened by an outside key name a held key as receiver and are left alone: ${receiverOnly.join(", ")}`);
+    }
     const outcome = await closeSessions(rpc, funding, sessions, holders, options);
     for (const failure of outcome.failed) problems.push(`closing session ${failure.session}: ${failure.error}`);
   });
@@ -3961,10 +4109,10 @@ export async function cleanUp(
   });
   for (const { owner, usdcAccount, usdc } of held) {
     if (usdc === undefined) continue;
-    await attempt(`returning the USDC of ${owner}`, () => returnUsdc(rpc, funding, holders.get(owner)!, usdcAccount, usdc, options));
+    await attempt(`returning the USDC of ${owner}`, () => returnUsdcRetrying(rpc, funding, holders.get(owner)!, usdcAccount, usdc, options));
   }
   for (const { owner, lamports } of held) {
-    await attempt(`returning the SOL of ${owner}`, () => returnSol(rpc, funding, holders.get(owner)!, lamports, options));
+    await attempt(`returning the SOL of ${owner}`, () => returnSolRetrying(rpc, funding, holders.get(owner)!, lamports, options));
   }
   return problems;
 }
@@ -4369,12 +4517,18 @@ rate-limited. Create `.env.devnet` (git-ignored; `.env.example` lists the names)
 
 - `STINT_DEVNET_RPC_URL`: a devnet endpoint (and `STINT_DEVNET_WS_URL` if its WebSocket URL is not the
   same address with `ws` for `http`);
+- `STINT_DEVNET_SCAN_RPC_URL`, optional: the endpoint that lists the program's accounts, which is how the
+  clean-up finds open sessions. Some providers' free tiers refuse that method (Alchemy's does: the run's
+  start-up fails with `HTTP error (400)`); set this to another endpoint that answers it, such as
+  `https://api.devnet.solana.com`. It is asked three times per run (a devnet check, then the listing at
+  the start and at the end), and the rest goes to `STINT_DEVNET_RPC_URL`;
 - `STINT_DEVNET_SEED`: a recovery phrase of 12 to 24 words in quotes, or 64 hexadecimal characters
   (`openssl rand -hex 32`). Every key of the target derives from it, by the harness's own rule, so the
   addresses are not the ones a wallet shows for the same phrase. Use a phrase made for this, never one
   that holds funds elsewhere, and keep a copy off this machine.
 
-`pnpm e2e:devnet funds` prints the funding key's address and balances. Fund that address once, with at
+`pnpm e2e:devnet funds` prints the funding key's address and balances, then `✓ Funded` when it holds enough
+for a run, or what it still needs. Fund that address once, with at
 least 0.5 SOL from a devnet faucet and 5 USDC from Circle's (Solana Devnet). It is the only key to
 watch: it plays no part in any scenario, and the fees that runs spend are the only thing that does not
 come back to it.
@@ -4384,10 +4538,11 @@ every session that the seed's keys have open and returns what they hold to the f
 run there is nothing to do; after a run that was killed it repairs what that run left. Then it funds the
 keys it needs from the funding key, runs the scenarios, and cleans up again. `pnpm e2e:devnet clean`
 does the clean-up alone. Run one at a time per seed: the clean-up closes every session that the seed's
-keys have open, whichever run opened it. If the start-up clean-up fails, the run does not start; `pnpm e2e:devnet --force` goes
+keys have open, whichever run opened it. A session that an outside key opened, naming the seed's seller
+as its receiver, is reported and left alone. If the start-up clean-up fails, the run does not start; `pnpm e2e:devnet --force` goes
 on regardless. The report is written to `e2e/report/`. Kora is started with the RPC
-URL on its command line and writes it to its log, so a URL that carries an API key is visible to other users of the
-machine (`ps`) and in `e2e/report/kora.log` (git-ignored).
+URL on its command line, so a URL that carries an API key is visible to other users of the machine (`ps`).
+Its log, which a failed run writes to `e2e/report/kora.log` (git-ignored), has every URL cut to its scheme and host.
 ````
 
 In `CLAUDE.md`, in the "Toolchain" section, after the sentence `runs the end-to-end scenarios on the `local` target.`
@@ -4403,13 +4558,21 @@ In `docs/specs/stint-system.md`, §12.6, replace the bullet that begins `- a fun
   earlier run are known without a record. It creates the keys that each scenario, and on `devnet` each
   stack, needs, and funds them from the funding key, which is the fee payer of its own transactions
   (S14), since some buyers hold no SOL. Before a run, and again after it, the harness cleans up: it
-  closes every session still open that one of its keys opened, receives or paid the rent of, including
+  closes every session still open, of the USDC mint, that one of its keys opened or paid the rent of, including
   those left open when a scenario stopped its stack or a run ended abnormally, and returns what its keys
-  hold to the funding key. A close is a `Standard` close (section 4.3) signed by the session's authority,
-  or, when the harness does not hold that key, by the session's `receiver_authorizer`. If a payout
-  account that the close pays (section 4.3), either the buyer's refund account or the seller's
-  `receiver_token`, has been closed, the same transaction recreates it first (S7, S13). The clean-up
-  starts from the keys alone, so it is the same after any run, and after none;
+  hold to the funding key. A session that names one of its keys only as its receiver is reported and left
+  alone: an open is signed by its `authority` and `rent_payer` only (section 4.3), so anyone may name the
+  seller, for as long as they choose to pay for, and such a session is its opener's to close. A close is a
+  `Standard` close (section 4.3) signed by the session's authority,
+  or, when the harness does not hold that key, by the session's `receiver_authorizer`. If the seller's
+  `receiver_token` has been closed, the same transaction recreates it first (S7, S13). It recreates the
+  buyer's refund account the same way, but only when the close is made before `paid_until`: from then on, a
+  residual owed to a closed refund account goes to the receiver (section 4.3). The clean-up
+  starts from the keys alone, so it is the same after any run, and after none. The harness holds neither
+  the authority nor the receiver authorizer of a session that an outside key opened with one of its keys as
+  rent payer: from the session's `paid_until` on, anyone may close it (section 4.3), so the funding key,
+  which pays the fees, signs that close. Before then the clean-up reports the session. A run does not
+  start when its start-up clean-up fails, unless it is given `--force`;
 ```
 
 - [ ] **Step 15: Run everything and commit**
@@ -4461,9 +4624,9 @@ pnpm e2e:devnet funds
 scripts/verify-deployment.sh target/verifiable/stint.so
 ```
 
-Expected: `funds` prints the funding key's address, what it holds, and what a run needs. Fund that
-address from a devnet SOL faucet (at least 0.5 SOL) and from Circle's testnet faucet (Solana Devnet,
-at least 5 USDC), then run `funds` again until it shows both. The verification prints `devnet program
+Expected: `funds` prints the funding key's address and what it holds, then either `✓ Funded` or what a run
+needs. Fund that address from a devnet SOL faucet (at least 0.5 SOL) and from Circle's testnet faucet
+(Solana Devnet, at least 5 USDC), then run `funds` again until it prints `✓ Funded`. The verification prints `devnet program
 5iCYPq… is …`. If the program was deployed from `target/deploy/stint.so`, verify that file instead.
 The funding key is the only key to top up from now on: a run spends fees, and nothing else.
 
@@ -4484,6 +4647,7 @@ If it fails, the report names the scenario and the check, and `e2e/report/kora.l
 |---|---|---|
 | `The funding key is short` | The faucets have not delivered, or fees have used it up | Fund the key; the message names the address and the amounts (`pnpm e2e:devnet funds` prints them) |
 | HTTP 429, `rate limit` or `Too many requests` in an error or in Kora's log | The public endpoint's limits | Use a provider's devnet URL in `STINT_DEVNET_RPC_URL`; if it persists, raise `pollMs` in `startDevnetStack` |
+| `Cleaning up what earlier runs left failed:` with `closing sessions: HTTP error (400)`, at start-up, before anything runs | The provider refuses `getProgramAccounts` (Alchemy's free tier answers `not available on the Free tier`), which is how the clean-up lists sessions | Set `STINT_DEVNET_SCAN_RPC_URL=https://api.devnet.solana.com` in `.env.devnet`; the main URL stays the provider's |
 | `404 unknown_session` or `The gate reported another session` right after an open | A node answered a read with nothing | Raise `attempts` or `delayMs` in the `readRetry` literal of `startDevnetStack` |
 | `blockhash_expired`, or `settlement_pending` on an open | A slow confirmation, or an offer that outlasted its blockhash | Check the time between the offer and the settlement; lower `maxTimeoutSeconds` |
 | `simulation_failed` with an account or program error | The deployed program differs from the client | Run `scripts/verify-deployment.sh`; deploy again |
@@ -4504,8 +4668,9 @@ differ by less than 1,000,000 (fees only: a run sends some 30 to 40 transactions
 so a few hundred thousand is normal). Then check that no session is left open on the program:
 
 ```bash
-url="$(grep '^STINT_DEVNET_RPC_URL=' .env.devnet | cut -d= -f2- | sed 's/[[:space:]]#.*$//' | tr -d "'\"")"   # read from the file: typed in, the URL (which may carry an API key) would stay in the shell history
-: "${url:?STINT_DEVNET_RPC_URL is not set in .env.devnet}"
+env_value() { grep "^$1=" .env.devnet | cut -d= -f2- | sed 's/[[:space:]]#.*$//' | tr -d "'\"\r"; }
+url="$(env_value STINT_DEVNET_SCAN_RPC_URL)"; url="${url:-$(env_value STINT_DEVNET_RPC_URL)}"   # read from the file: typed in, the URL (which may carry an API key) would stay in the shell history; the scan endpoint if there is one, since this lists the program's accounts
+: "${url:?neither STINT_DEVNET_SCAN_RPC_URL nor STINT_DEVNET_RPC_URL is set in .env.devnet}"
 curl -s "$url" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getProgramAccounts","params":["5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr",{"commitment":"confirmed","dataSlice":{"offset":0,"length":0},"filters":[{"dataSize":250}]}]}'
 ```
 
@@ -4580,7 +4745,7 @@ Task 6's targets.
     nothing on it holds a keypair file that an agent could use.)
   - `runAgent(options): Promise<AgentResult>` in `@lxfoundry/stint-example-agent`, with
     `AgentOptions = { client: Anthropic; tools: SessionTools; gateUrl: string; account: string; model?: string;
-    fallbackModel?: string; maxIterations?: number; log?: (line: string) => void }` and
+    maxIterations?: number; log?: (line: string) => void }` and
     `AgentResult = { outcome: "answered" | "refused"; text: string }`. Whatever happens, every session
     still open is closed before it returns.
   - `pnpm --filter @lxfoundry/stint-example-agent start`.
@@ -4606,6 +4771,8 @@ live API: Step 7 is the first run, and Step 4's test uses a mocked `fetch`):
 - Effort: `output_config: { effort: "low" }`. The levels are `low`, `medium`, `high`, `xhigh` and `max`.
 - **Server-side fallback exists.** The request takes `fallbacks: [{ model, max_tokens?, output_config? }]`
   under the beta header `server-side-fallback-2026-07-01` (`betas: ["server-side-fallback-2026-07-01"]`).
+  `fallbacks` is also accepted as the string `"default"`, which asks the API for its own default fallback and
+  names no model: the agent sends that, so that it names no model that may be retired.
   When the first model refuses, the server retries with the next entry, and the response carries a
   `fallback` content block. A response that still ends with `stop_reason: "refusal"` has `stop_details`
   with the policy `category` (or `null`) and an `explanation`.
@@ -4693,7 +4860,8 @@ Create `examples/agent/package.json`:
   "dependencies": {
     "@anthropic-ai/sdk": "1.3.0",
     "@lxfoundry/stint-client": "workspace:*",
-    "@lxfoundry/stint-mcp": "workspace:*"
+    "@lxfoundry/stint-mcp": "workspace:*",
+    "@modelcontextprotocol/server": "2.4.0"
   }
 }
 ```
@@ -4710,7 +4878,7 @@ Create `examples/agent/tsconfig.json`:
 Create `examples/agent/src/index.ts`:
 
 ```ts
-export { FALLBACK_MODEL, MODEL, runAgent, type AgentOptions, type AgentResult } from "./agent.js";
+export { MODEL, runAgent, type AgentOptions, type AgentResult } from "./agent.js";
 export { SYSTEM_PROMPT, taskPrompt } from "./prompt.js";
 ```
 
@@ -4760,7 +4928,7 @@ Create `examples/agent/test/agent.test.ts`:
 import Anthropic from "@anthropic-ai/sdk";
 import { ToolError, type SessionTools } from "@lxfoundry/stint-client";
 import { describe, expect, it } from "vitest";
-import { FALLBACK_MODEL, MODEL, runAgent } from "../src/index.js";
+import { MODEL, runAgent } from "../src/index.js";
 
 const message = (content: unknown[], stopReason: string, extra: Record<string, unknown> = {}) => ({
   id: "msg_test",
@@ -4839,7 +5007,7 @@ describe("runAgent", () => {
     expect(first.body.model).toBe(MODEL);
     expect(first.body.output_config).toMatchObject({ effort: "low" });
     expect(first.body.tool_choice).toMatchObject({ type: "auto" });
-    expect(first.body.fallbacks).toEqual([expect.objectContaining({ model: FALLBACK_MODEL })]);
+    expect(first.body.fallbacks).toBe("default");
     expect(first.headers.get("anthropic-beta")).toContain("server-side-fallback-2026-07-01");
     expect(first.body.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
       "stint_close_session",
@@ -4903,23 +5071,26 @@ Create `examples/agent/src/agent.ts`:
 
 ```ts
 import type Anthropic from "@anthropic-ai/sdk";
+import type { BetaRunnableTool } from "@anthropic-ai/sdk/lib/tools/BetaRunnableTool";
 import type { SessionTools, Tool } from "@lxfoundry/stint-client";
+import { fromJsonSchema } from "@modelcontextprotocol/server";
 import { SYSTEM_PROMPT, taskPrompt } from "./prompt.js";
 
 export const MODEL = "claude-opus-5-5";
-/** Used by the API when the first model refuses (server-side fallback). */
-export const FALLBACK_MODEL = "claude-sonnet-5-5";
-/** The name the API gives the server-side fallback feature's beta header: an identifier, not a schedule. */
+/** The beta header under which a request may ask for the API's default server-side fallback. It names the feature, not a schedule. */
 export const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
 export interface AgentOptions {
   readonly client: Anthropic;
+  /**
+   * The session tools the model uses. `runAgent` closes every session still open before it returns, and
+   * the tools refuse to open one afterwards: they serve this run only.
+   */
   readonly tools: SessionTools;
   readonly gateUrl: string;
   /** The token account to watch. */
   readonly account: string;
   readonly model?: string;
-  readonly fallbackModel?: string;
   /** Most model turns. Default 20. */
   readonly maxIterations?: number;
   readonly log?: (line: string) => void;
@@ -4931,16 +5102,26 @@ export interface AgentResult {
   readonly text: string;
 }
 
-/** A session tool in the form the SDK's tool runner takes: a failure it throws is given back to the model. */
-function runnable(tool: Tool<any, unknown>, log: (line: string) => void) {
+/**
+ * A session tool in the form the SDK's tool runner takes. What the model sends is checked against the
+ * tool's JSON Schema before the tool runs, as the MCP server does: an input that does not match is given back
+ * to the model as an error result and the tool is not run. A failure the tool throws is given back too.
+ */
+function runnable(tool: Tool<any, unknown>, log: (line: string) => void): BetaRunnableTool<unknown> {
+  const schema = fromJsonSchema<unknown>(tool.inputSchema as never);
   return {
     name: tool.name,
     description: tool.description,
-    input_schema: tool.inputSchema,
-    parse: (content: unknown) => content,
-    async run(input: unknown): Promise<string> {
+    // The SDK types a tool's schema as an object schema; the session tools' schemas all are.
+    input_schema: tool.inputSchema as { type: "object" },
+    parse: (content) => content,
+    async run(input) {
       log(`${tool.name} ${JSON.stringify(input)}`);
-      return JSON.stringify(await tool.run(input));
+      const checked = await schema["~standard"].validate(input);
+      if (checked.issues) {
+        throw new Error(`Invalid input for ${tool.name}: ${checked.issues.map((issue) => issue.message).join("; ")}`);
+      }
+      return JSON.stringify(await tool.run(checked.value));
     },
   };
 }
@@ -4958,18 +5139,22 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       max_tokens: 4096,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: taskPrompt(options.gateUrl, options.account) }],
-      tools: Object.values(options.tools.tools).map((tool) => runnable(tool as Tool<any, unknown>, log)) as never,
+      tools: Object.values(options.tools.tools).map((tool) => runnable(tool as Tool<any, unknown>, log)),
       tool_choice: { type: "auto" },
       output_config: { effort: "low" },
       betas: [FALLBACK_BETA],
       thread: false,
-      fallbacks: [{ model: options.fallbackModel ?? FALLBACK_MODEL }],
+      fallbacks: "default",
       max_iterations: options.maxIterations ?? 20,
-    } as never);
+    });
     const final = await runner;
     if (final.stop_reason === "refusal") {
       const details = (final as { stop_details?: { explanation?: string } }).stop_details;
       return { outcome: "refused", text: details?.explanation ?? "The model declined the task." };
+    }
+    // Anything but a finished turn (the iteration limit, the token limit, a paused turn) is a failure, not an answer.
+    if (final.stop_reason !== "end_turn" && final.stop_reason !== "stop_sequence") {
+      throw new Error(`The model stopped before it was done (stop reason: ${final.stop_reason})`);
     }
     const text = final.content
       .filter((block): block is Extract<typeof block, { type: "text" }> => block.type === "text")
@@ -5127,9 +5312,9 @@ and replace the first paragraph with:
 A Claude (`claude-opus-5-5`) agent using the Anthropic TypeScript SDK's tool runner
 (`client.beta.messages.toolRunner`), at low effort (`output_config.effort: "low"`), with `tool_choice: auto`.
 Its system prompt directs it to open a session first and to close it as soon as its task is done. It
-asks for server-side fallback (`fallbacks`, under the beta header `server-side-fallback-2026-07-01`), so that
-a refusal by the first model is retried on the next. If the response still ends with the `refusal` stop reason,
-the agent reports the refusal's explanation. Whatever happens, it closes every session still open before it
+asks for the API's default server-side fallback (`fallbacks: "default"`, under the beta header
+`server-side-fallback-2026-07-01`), so that a refusal by the first model is routed to the API's default fallback. If the
+response still ends with the `refusal` stop reason, the agent reports the refusal's explanation. Whatever happens, it closes every session still open before it
 returns.
 ```
 
@@ -5144,6 +5329,46 @@ git commit -m "Add the example agent and a serve mode for the harness's targets"
 ```
 
 ---
+
+## Where the code goes beyond the sketches
+
+The repository is authoritative where a sketch and the code differ. The sketches above are corrected for the
+clean-up, `closeAll`, the MCP server's shutdown wait, the deploy script and the agent. What follows is in the
+code and in no sketch:
+
+- **Reading a session from the chain** returns `undefined` unless the account is owned by the program, has a
+  session's size and carries the session discriminator, so that a wallet, a short account or another program's
+  account at the address is "no session" and not a decoding failure. A node that cannot be reached still rejects.
+- **The runner** fails a scenario that runs past a timeout and names it (the work is not cancelled), takes a status
+  poll interval and a read retry from the target, and sends transactions with preflight at `confirmed`. The
+  scenarios 1 and 22 read the chain through the context's read retry (one attempt locally; 20 reads 500 ms apart on
+  devnet, as the services use), and the transaction readers of `@lxfoundry/stint-x402` take an optional retry.
+- **The stack's services** (Kora, the facilitator, the example stream) start from one function that takes the
+  network's URLs and the service keys, so that the local and devnet targets run the same stack.
+- **An RPC URL never reaches output.** A URL that carries credentials is refused (`fetch` quotes it in its error).
+  Every URL in Kora's start-up errors and kept log, in a scenario outcome's error before it is printed or
+  written to the report, and in an error the facilitator relays from Kora, is cut to its scheme and host, by one
+  function, `redactUrls` in `@lxfoundry/stint-x402`, which the facilitator and the harness share (the deploy
+  script has a shell version of its own). The devnet
+  configuration validates its URLs by parsing them (`http` or `https` for the RPC URL, `ws` or `wss` for an explicit
+  WebSocket URL), and no message quotes either. The verification script does not show the dump's output.
+- **The clean-up closes only sessions of the configured USDC mint.** One of another mint that names a held key is
+  reported as a note and left alone, since closing it would create accounts for a mint the harness cannot recover.
+- **The sessions can be listed through a second endpoint.** A provider's free tier may refuse `getProgramAccounts`
+  (Alchemy's does, with an HTTP 400), which the clean-up needs to find open sessions. `STINT_DEVNET_SCAN_RPC_URL`
+  (`scanRpcUrl` in the configuration and in both option types) names the endpoint for that listing alone; absent,
+  the main one is asked. With the preflight on, the scan endpoint must report devnet's genesis hash as well, since
+  it decides which sessions are closed. The three start, end and failure clean-ups and `clean` all use it.
+- **`funds` says whether the key is funded.** After the funding key's balances it prints `✓ Funded` when it holds
+  at least the minimum of both SOL and USDC, and otherwise the minimums and the address to fund. It takes the same
+  `preflight` option as the clean-up, so that it can run against the local network.
+- **Tests beyond the sketches:** a close that starts while `closeAll` is closing others, and a second attempt after
+  a failed close in flight (Task 2); the refusal of a cluster that is not devnet and of a copy of the default wallet,
+  both before a deploy is sent, against a stand-in CLI (Task 5); a stale SOL balance read again, the session
+  search by discriminator, a session that names a held key only as its receiver, and a refund account recreated
+  only before `paid_until`, `funds` at, below and above the minimums, and the clean-up through a node that refuses
+  the listing of the program's accounts, with a scan endpoint (Task 6); an input that does not match a tool's schema, a turn that ends before it is
+  done, and a request that carries the whole conversation without a server-side thread (Task 8).
 
 ## Done when
 

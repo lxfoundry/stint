@@ -7,7 +7,9 @@
     "generate:client": "pnpm --filter @lxfoundry/stint-program-client run generate",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
-    "e2e:local": "pnpm --filter @lxfoundry/stint-e2e run local"
+    "e2e:local": "pnpm --filter @lxfoundry/stint-e2e run local",
+    "e2e:devnet": "pnpm --filter @lxfoundry/stint-e2e run devnet",
+    "e2e:serve:devnet": "pnpm --filter @lxfoundry/stint-e2e run serve:devnet"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

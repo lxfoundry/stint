@@ -1,4 +1,5 @@
 import { openConnectCloseEarly } from "./scenarios/01-open-connect-close.js";
+import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
 import type { Capability, IsolationGroup, Scenario } from "./types.js";
 
 /** The scenarios of spec section 12.7. Each is pending until a stage builds it. */
@@ -43,7 +44,7 @@ export const catalogue: readonly Scenario[] = [
   pending(19, "/verify of a valid open", ["facilitatorApi"]),
   pending(20, "Session opened on-chain with the gate's terms but another mint"),
   pending(21, "Refund account closed, a stray base unit, then expiry"),
-  pending(22, "The example agent's task, scripted", ["stack"]),
+  required(22, "The example agent's task, scripted", exampleAgentTask, ["stack"]),
   pending(23, "The gate restarts with a session open", ["stack"], "ownStack"),
   pending(24, "The gate is unreachable when the buyer closes", ["stack"], "ownStack"),
   pending(25, "The gate and the facilitator are unreachable when the buyer closes", ["stack"], "ownStack"),

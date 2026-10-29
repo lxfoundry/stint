@@ -1,5 +1,19 @@
 import type { Scenario, ScenarioContext, ScenarioOutcome, Target } from "./types.js";
 
+export interface RunOptions {
+  /** A scenario that runs longer than this fails: a hung run must not hang whoever started it. Its work is not cancelled. */
+  readonly timeoutMs?: number;
+}
+
+function withTimeout<T>(work: Promise<T>, timeoutMs: number | undefined, id: number): Promise<T> {
+  if (timeoutMs === undefined) return work;
+  let timer: NodeJS.Timeout | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`scenario ${id} timed out after ${timeoutMs} ms`)), timeoutMs);
+  });
+  return Promise.race([work, limit]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Runs scenarios one after another, in the order of their numbers. Concurrency and the isolation
  * groups of spec section 12.2 arrive with the first scenarios that need them.
@@ -9,6 +23,7 @@ export async function runScenarios(
   target: Target,
   makeContext: (scenario: Scenario) => ScenarioContext | Promise<ScenarioContext>,
   now: () => number = () => performance.now(),
+  options: RunOptions = {},
 ): Promise<ScenarioOutcome[]> {
   const ids = new Set<number>();
   for (const scenario of scenarios) {
@@ -39,7 +54,7 @@ export async function runScenarios(
 
     const started = now();
     try {
-      await scenario.run(await makeContext(scenario));
+      await withTimeout(Promise.resolve(makeContext(scenario)).then((context) => scenario.run!(context)), options.timeoutMs, scenario.id);
       outcomes.push({
         ...base,
         result: "pass",

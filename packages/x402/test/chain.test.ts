@@ -8,7 +8,7 @@ import {
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import { generateKeyPairSigner, getBase58Decoder, type Address, type Instruction, type TransactionSigner } from "@solana/kit";
 import { beforeAll, describe, expect, it } from "vitest";
-import { tokenTransferChanges, type RecordedTransaction } from "../src/index.js";
+import { fetchClosedEvent, lamportBalances, tokenBalanceChanges, tokenTransferChanges, type RecordedTransaction } from "../src/index.js";
 
 const SYSTEM_PROGRAM = "11111111111111111111111111111111" as Address;
 
@@ -162,5 +162,40 @@ describe("tokenTransferChanges (spec §12.2, T9)", () => {
     const compiled = compile(transfer(buyer, vault, 1n));
     const broken = { ...compiled, accounts: [compiled.accounts[0]!, 99, compiled.accounts[2]!] };
     expect(() => tokenTransferChanges({ accountKeys, instructions: [broken] })).toThrow(/index 99/);
+  });
+});
+
+describe("readers of a confirmed transaction (spec §12.2)", () => {
+  const signature = getBase58Decoder().decode(new Uint8Array(64).fill(1));
+  const key = "11111111111111111111111111111112" as Address;
+  const fetched = {
+    slot: 1n,
+    meta: { err: null, preBalances: [5], postBalances: [7], innerInstructions: [] },
+    transaction: { message: { accountKeys: [key], instructions: [] } },
+  };
+  /** An RPC whose `getTransaction` finds nothing for the first `empty` reads, as a lagging node does. */
+  const laggingRpc = (empty: number) => {
+    const state = { reads: 0 };
+    const rpc = { getTransaction: () => ({ send: async () => (++state.reads <= empty ? null : fetched) }) } as never;
+    return { rpc, state };
+  };
+  const retry = { attempts: 3, delayMs: 1 };
+
+  it("retries a read that finds nothing when given a retry, for the balance readers and the event reader", async () => {
+    const tokens = laggingRpc(1);
+    expect((await tokenBalanceChanges(tokens.rpc, signature, retry)).size).toBe(0);
+    expect(tokens.state.reads).toBe(2);
+    const lamports = laggingRpc(2);
+    expect((await lamportBalances(lamports.rpc, signature, retry)).get(key)).toEqual({ pre: 5n, post: 7n });
+    expect(lamports.state.reads).toBe(3);
+    const events = laggingRpc(1);
+    expect(await fetchClosedEvent(events.rpc, signature, retry)).toBeUndefined();
+    expect(events.state.reads).toBe(2);
+  });
+
+  it("reads once without a retry, and says so when nothing is found", async () => {
+    const { rpc, state } = laggingRpc(1);
+    await expect(tokenBalanceChanges(rpc, signature)).rejects.toThrow(/not found/);
+    expect(state.reads).toBe(1);
   });
 });

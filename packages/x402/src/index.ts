@@ -8,3 +8,4 @@ export * from "./inspect.js";
 export * from "./checks.js";
 export * from "./chain.js";
 export * from "./http.js";
+export * from "./redact.js";

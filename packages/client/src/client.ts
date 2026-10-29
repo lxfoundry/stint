@@ -9,6 +9,7 @@ import {
   readElapsedRequirements,
   type PaymentPayload,
   type PaymentRequired,
+  type SessionStatus,
   type TokenPurpose,
 } from "@lxfoundry/stint-x402";
 import { WebSocket } from "ws";
@@ -41,6 +42,8 @@ export interface StintSession {
   /** The deposit, in base units. */
   readonly cost: bigint;
   connect(): Promise<WebSocket>;
+  /** The status the gate reports from the chain (spec §7.1): estimates use the gate's clock. */
+  status(): Promise<SessionStatus>;
   close(): Promise<CloseReceipt>;
   [Symbol.asyncDispose](): Promise<void>;
 }
@@ -98,6 +101,13 @@ export function createStintClient(options: ClientOptions): StintClient {
           socket.once("error", reject);
         });
         return socket;
+      },
+      async status() {
+        const response = await fetch(`${gateUrl}/sessions/${opened.session}`);
+        const body = await readBody(response);
+        if (response.status === 404) throw new StintError("The session is closed, or was never opened", 404, body);
+        if (response.status !== 200) throw new StintError(`Status failed (HTTP ${response.status}): ${describeBody(body)}`, response.status, body);
+        return body as SessionStatus;
       },
       async close() {
         const response = await fetch(`${gateUrl}/sessions/${opened.session}/close`, {

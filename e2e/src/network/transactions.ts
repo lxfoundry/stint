@@ -18,11 +18,17 @@ import {
 const json = (value: unknown) =>
   JSON.stringify(value, (_, inner) => (typeof inner === "bigint" ? inner.toString() : inner));
 
+export interface SendOptions {
+  /** Milliseconds between status reads while waiting for `confirmed`. Default 100: raise it on a shared network. */
+  readonly pollMs?: number;
+}
+
 /** Builds, signs and sends a version 0 transaction (spec section 3.5), then waits for `confirmed`. */
 export async function sendInstructions(
   rpc: Rpc<SolanaRpcApi>,
   feePayer: TransactionSigner,
   instructions: readonly Instruction[],
+  options: SendOptions = {},
 ): Promise<Signature> {
   const { value: latestBlockhash } = await rpc.getLatestBlockhash({ commitment: "confirmed" }).send();
   const message = pipe(
@@ -33,8 +39,8 @@ export async function sendInstructions(
   );
   const transaction = await signTransactionMessageWithSigners(message);
   const signature = getSignatureFromTransaction(transaction);
-  await rpc.sendTransaction(getBase64EncodedWireTransaction(transaction), { encoding: "base64" }).send();
-  await confirmSignature(rpc, signature);
+  await rpc.sendTransaction(getBase64EncodedWireTransaction(transaction), { encoding: "base64", preflightCommitment: "confirmed" }).send();
+  await confirmSignature(rpc, signature, 15_000, options.pollMs);
   return signature;
 }
 
@@ -43,6 +49,7 @@ export async function confirmSignature(
   rpc: Rpc<SolanaRpcApi>,
   signature: Signature,
   timeoutMs = 15_000,
+  pollMs = 100,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -50,7 +57,7 @@ export async function confirmSignature(
     const status = value[0];
     if (status?.err) throw new Error(`Transaction ${signature} failed: ${json(status.err)}`);
     if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
   throw new Error(`Transaction ${signature} was not confirmed within ${timeoutMs} ms`);
 }

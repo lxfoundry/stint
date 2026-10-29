@@ -12,6 +12,11 @@ const context = (target: Target) => (): ScenarioContext => ({
   newBuyer: async () => {
     throw new Error("no buyers in unit tests");
   },
+  sendUsdc: async () => {
+    throw new Error("no payments in unit tests");
+  },
+  subscriptionSettleMs: 0,
+  readRetry: { attempts: 1, delayMs: 0 },
 });
 
 function scenario(overrides: Partial<Scenario>): Scenario {
@@ -24,6 +29,24 @@ const fails = async () => {
 };
 
 describe("runScenarios", () => {
+  it("fails a required scenario that outlasts the timeout, naming it, and leaves a pending one pending", async () => {
+    const slow = () => new Promise<void>((resolve) => setTimeout(resolve, 300));
+    const outcomes = await runScenarios(
+      [scenario({ id: 1, status: "required", run: slow }), scenario({ id: 2, status: "pending", run: slow })],
+      local,
+      context(local),
+      undefined,
+      { timeoutMs: 30 },
+    );
+    expect(outcomes.map((outcome) => outcome.result)).toEqual(["fail", "pending"]);
+    expect(outcomes[0]?.error).toBe("scenario 1 timed out after 30 ms");
+  });
+
+  it("runs without a limit when no timeout is given", async () => {
+    const [outcome] = await runScenarios([scenario({ run: () => new Promise((resolve) => setTimeout(resolve, 50)) })], local, context(local));
+    expect(outcome?.result).toBe("pass");
+  });
+
   it("reports a scenario whose needs the target lacks as not applicable", async () => {
     const [outcome] = await runScenarios([scenario({ needs: ["stack"], run: fails })], external, context(external));
     expect(outcome?.result).toBe("not applicable");

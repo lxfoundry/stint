@@ -15,9 +15,9 @@ describe("scenario catalogue", () => {
     );
   });
 
-  it("has scenario 1 required with its implementation, and every other scenario pending without one", () => {
+  it("has scenarios 1 and 22 required with their implementations, and every other scenario pending without one", () => {
     for (const scenario of catalogue) {
-      if (scenario.id === 1) {
+      if (scenario.id === 1 || scenario.id === 22) {
         expect(scenario.status).toBe("required");
         expect(scenario.run).toBeDefined();
       } else {

@@ -63,12 +63,28 @@ pub fn close_handler(ctx: Context<Close>, kind: CloseKind) -> Result<()> {
     let charged = maths::charged(session.min_seconds, elapsed, false);
     let due = maths::due(session.deposited, session.rate, charged);
     let owed = maths::owed(session.claimed, due);
-    let refunded = ctx
+    let residual = ctx
         .accounts
         .vault
         .amount
         .checked_sub(owed)
         .ok_or_else(|| error!(StintError::MathOverflow))?;
+
+    // From `paid_until` on, a residual owed to a refund account that no longer exists goes to the
+    // receiver (spec section 4.3), so the account's owner cannot keep a session open by closing it
+    // and sending the vault one base unit. "No longer exists" means owned by the System program,
+    // whatever its lamports (S12): anyone can send lamports to a closed address, so a balance check
+    // would let them block the redirect.
+    let refund_account_gone = *ctx.accounts.refund_to.owner == System::id();
+    let (to_receiver, refunded, redirected) =
+        if maths::redirects(residual, now, paid_until, refund_account_gone) {
+            let to_receiver = owed
+                .checked_add(residual)
+                .ok_or_else(|| error!(StintError::MathOverflow))?;
+            (to_receiver, 0, residual)
+        } else {
+            (owed, residual, 0)
+        };
 
     let authority = session.authority;
     let seed = session.seed.to_le_bytes();
@@ -76,14 +92,11 @@ pub fn close_handler(ctx: Context<Close>, kind: CloseKind) -> Result<()> {
     let signer_seeds: &[&[&[u8]]] = &[&[SESSION_SEED, authority.as_ref(), &seed, &bump]];
     let token_program = ctx.accounts.token_program.key();
 
-    // A transfer of zero is skipped: its destination need not exist (spec section 4.3).
-    //
-    // Limit: a missing `refund_to` or `receiver_token` fails the close whenever an amount is owed to
-    // it. Spec section 4.3 redirects a residual owed to a closed refund account to the receiver once
-    // `paid_until` has passed; that is not implemented yet, so until it is, the refund account's owner
-    // can keep a session open by closing that account and sending the vault one base unit.
+    // A transfer of zero is skipped: its destination need not exist (spec section 4.3). An account
+    // that a close pays must exist (S4), so a close that pays a missing `receiver_token`, or a
+    // missing `refund_to` before `paid_until`, fails and changes nothing.
     for (amount, destination) in [
-        (owed, ctx.accounts.receiver_token.to_account_info()),
+        (to_receiver, ctx.accounts.receiver_token.to_account_info()),
         (refunded, ctx.accounts.refund_to.to_account_info()),
     ] {
         if amount > 0 {
@@ -119,7 +132,7 @@ pub fn close_handler(ctx: Context<Close>, kind: CloseKind) -> Result<()> {
         claimed,
         owed,
         refunded,
-        redirected: 0,
+        redirected,
         closed_by: closer,
         paid_until,
         at: now,

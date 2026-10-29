@@ -1,4 +1,5 @@
 import type { Address, KeyPairSigner, Rpc, SolanaRpcApi } from "@solana/kit";
+import type { RetryOptions } from "@lxfoundry/stint-x402";
 
 /**
  * What a target offers a scenario (spec section 12.2). `facilitatorApi` is the ability to call
@@ -33,6 +34,23 @@ export interface ScenarioContext {
   /** The network's RPC, for reading what the scenario's own transactions did (spec §12.2). */
   readonly rpc: Rpc<SolanaRpcApi>;
   newBuyer(usdc: bigint): Promise<Buyer>;
+  /**
+   * Sends USDC from a buyer's token account to any token account, and returns the transaction's
+   * signature. The harness pays the fee: a buyer holds no SOL (spec §9.1, §12.6).
+   */
+  sendUsdc(from: Buyer, to: Address, amount: bigint): Promise<string>;
+  /**
+   * Milliseconds a scenario waits after subscribing before it causes the change it expects to hear
+   * about. The stream acknowledges a subscription with nothing, so the wait is the only evidence that
+   * the node has it; how long that takes is the target's to say, not the scenario's (spec §12.2).
+   */
+  readonly subscriptionSettleMs: number;
+  /**
+   * How patiently a scenario reads the chain for what its own transaction just did: a node behind a load
+   * balancer can answer from behind right after it reported the transaction `confirmed`. One attempt
+   * where the node is ours; several on a network that is not (spec §12.2).
+   */
+  readonly readRetry: RetryOptions;
 }
 
 export interface Scenario {

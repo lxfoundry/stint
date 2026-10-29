@@ -45,6 +45,12 @@ pub fn owed(claimed: u64, due: u64) -> u64 {
     claimed.max(due) - claimed
 }
 
+/// Whether a close sends the residual to the receiver: from `paid_until` on (`now >= paid_until`),
+/// when there is a residual and the refund account no longer exists.
+pub fn redirects(residual: u64, now: i64, paid_until: i64, refund_account_gone: bool) -> bool {
+    residual > 0 && now >= paid_until && refund_account_gone
+}
+
 /// `rate × seconds`, for the deposit bounds of `open`.
 pub fn cost(rate: u64, seconds: u32) -> u128 {
     u128::from(rate) * u128::from(seconds)
@@ -104,5 +110,15 @@ mod tests {
     #[test]
     fn cost_does_not_overflow() {
         assert_eq!(cost(u64::MAX, u32::MAX), u128::from(u64::MAX) * u128::from(u32::MAX));
+    }
+
+    #[test]
+    fn redirects_only_from_paid_until_with_a_residual_and_a_missing_refund_account() {
+        assert!(redirects(1, 1_030, 1_030, true));
+        assert!(redirects(1, 5_000, 1_030, true));
+        // One second early, no residual, or an account that exists: the refund is paid as before.
+        assert!(!redirects(1, 1_029, 1_030, true));
+        assert!(!redirects(0, 1_030, 1_030, true));
+        assert!(!redirects(1, 1_030, 1_030, false));
     }
 }
