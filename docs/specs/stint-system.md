@@ -1561,12 +1561,15 @@ itself):
   earlier run are known without a record. It creates the keys that each scenario, and on `devnet` each
   stack, needs, and funds them from the funding key, which is the fee payer of its own transactions
   (S14), since some buyers hold no SOL. Before a run, and again after it, the harness cleans up: it
-  closes every session still open, of the USDC mint, that one of its keys opened, receives or paid the rent of, including
+  closes every session still open, of the USDC mint, that one of its keys opened or paid the rent of, including
   those left open when a scenario stopped its stack or a run ended abnormally, and returns what its keys
-  hold to the funding key. A close is a `Standard` close (section 4.3) signed by the session's authority,
-  or, when the harness does not hold that key, by the session's `receiver_authorizer`. If a payout
-  account that the close pays (section 4.3), either the buyer's refund account or the seller's
-  `receiver_token`, has been closed, the same transaction recreates it first (S7, S13). The clean-up
+  hold to the funding key. A session that names one of its keys only as its receiver is reported and left
+  alone: an open is signed by its `authority` and `rent_payer` only (section 4.3), so anyone may name the
+  seller, for as long as they pay for, and such a session is its opener's to close. A close is a `Standard` close (section 4.3) signed by the session's authority,
+  or, when the harness does not hold that key, by the session's `receiver_authorizer`. If the seller's
+  `receiver_token` has been closed, the same transaction recreates it first (S7, S13). It recreates the
+  buyer's refund account the same way, but only when the close is made before `paid_until`: from then on, a
+  residual owed to a closed refund account goes to the receiver (section 4.3). The clean-up
   starts from the keys alone, so it is the same after any run, and after none. The harness holds neither
   the authority nor the receiver authorizer of a session that an outside key opened with one of its keys as
   rent payer: from the session's `paid_until` on, anyone may close it (section 4.3), so the funding key,

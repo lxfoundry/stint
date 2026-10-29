@@ -120,7 +120,8 @@ every session that the seed's keys have open and returns what they hold to the f
 run there is nothing to do; after a run that was killed it repairs what that run left. Then it funds the
 keys it needs from the funding key, runs the scenarios, and cleans up again. `pnpm e2e:devnet clean`
 does the clean-up alone. Run one at a time per seed: the clean-up closes every session that the seed's
-keys have open, whichever run opened it. If the start-up clean-up fails, the run does not start; `pnpm e2e:devnet --force` goes
+keys have open, whichever run opened it. A session that an outside key opened, naming the seed's seller
+as its receiver, is reported and left alone. If the start-up clean-up fails, the run does not start; `pnpm e2e:devnet --force` goes
 on regardless. The report is written to `e2e/report/`. Kora is started with the RPC
 URL on its command line and writes it to its log, so a URL that carries an API key is visible to other users of the
 machine (`ps`) and in `e2e/report/kora.log` (git-ignored).

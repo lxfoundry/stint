@@ -1,9 +1,22 @@
-import { fetchToken, getCloseAccountInstruction } from "@solana-program/token";
+import {
+  fetchToken,
+  getCloseAccountInstruction,
+  getCreateAssociatedTokenIdempotentInstructionAsync,
+  getTransferCheckedInstruction,
+} from "@solana-program/token";
 import { catalogue, runScenarios, type Target } from "@lxfoundry/stint-conformance";
 import { createSessionTools, createStintClient } from "@lxfoundry/stint-client";
-import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
+import {
+  CloseKind,
+  STINT_PROGRAM_ADDRESS,
+  eventAccounts,
+  findSessionPda,
+  getCloseInstruction,
+  getOpenInstruction,
+} from "@lxfoundry/stint-program-client";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import type { Address } from "@solana/kit";
+import { fetchSysvarClock } from "@solana/sysvars";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanUp, returnUsdc, returnUsdcRetrying } from "../src/devnet/funds.js";
 import { deriveKeys } from "../src/devnet/keys.js";
@@ -209,6 +222,108 @@ describe("the devnet target, run against the local network", () => {
     expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC + 1_000_000n);
     expect((await chain.network.rpc.getAccountInfo(buyer.usdcAccount, { commitment: "confirmed", encoding: "base64" }).send()).value).toBeNull();
   }, 60_000);
+
+  it("starts, and leaves alone, a session that an outside key opened naming the seller as its receiver", async () => {
+    const { seed } = await fundedSeed();
+    const keys = await deriveKeys(seed, 0);
+    const seller = keys.stack.seller.signer.address;
+    // Only the authority and the rent payer sign an open, so anyone may name the seller as receiver. This outsider is its
+    // own rent payer and receiver authorizer, at 1 base unit per second: its session is paid for about eleven days.
+    const outsider = await newBuyer(chain.network.rpc, chain.keys.mintAuthority.signer, 1_000_000n);
+    fundSol(chain.network, outsider.signer.address, 1);
+    await waitForNewSlot(chain.network.rpc);
+    const [session] = await findSessionPda(outsider.signer.address, 1n);
+    const vault = await associatedTokenAddress(session, USDC_DEVNET_MINT);
+    const sellerToken = await associatedTokenAddress(seller, USDC_DEVNET_MINT);
+    await sendInstructions(
+      chain.network.rpc,
+      outsider.signer,
+      [
+        await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: outsider.signer, owner: session, mint: USDC_DEVNET_MINT }),
+        getTransferCheckedInstruction({
+          source: outsider.usdcAccount,
+          mint: USDC_DEVNET_MINT,
+          destination: vault,
+          authority: outsider.signer,
+          amount: 1_000_000n,
+          decimals: 6,
+        }),
+        getOpenInstruction({
+          authority: outsider.signer,
+          rentPayer: outsider.signer,
+          session,
+          mint: USDC_DEVNET_MINT,
+          vault,
+          receiver: seller,
+          receiverAuthorizer: outsider.signer.address,
+          refundOwner: outsider.signer.address,
+          ...(await eventAccounts()),
+          seed: 1n,
+          rate: 1n,
+          minSeconds: 1,
+          maxSeconds: 1_000_000,
+        }),
+      ],
+      { pollMs: 100 },
+    );
+
+    const running = await start(seed);
+
+    // Not the harness's to close: the start-up neither closed it nor refused to start because it could not.
+    expect(await sessionsOnChain()).toBe(1);
+    // The outsider closes it, while the running stack holds the seller's account that the close pays.
+    await sendInstructions(
+      chain.network.rpc,
+      outsider.signer,
+      [
+        getCloseInstruction({
+          closer: outsider.signer,
+          session,
+          vault,
+          receiverToken: sellerToken,
+          refundTo: outsider.usdcAccount,
+          rentPayer: outsider.signer.address,
+          ...(await eventAccounts()),
+          kind: CloseKind.Standard,
+        }),
+      ],
+      { pollMs: 100 },
+    );
+    expect(await sessionsOnChain()).toBe(0);
+    await running.stop();
+  }, 120_000);
+
+  it("closes a session from its paid time on without recreating its buyer's refund account, which the close no longer pays", async () => {
+    const { seed, fundingUsdc } = await fundedSeed();
+    const keys = await deriveKeys(seed, 0);
+    const funding = { signer: keys.funding.signer, usdcAccount: fundingUsdc };
+    const dying = await start(seed);
+    // A buyer of its own, as the example agent is: the clean-up returns nothing to its keys, so an account created for it
+    // would stay, paid for by the funding key.
+    const outsider = await newBuyer(chain.network.rpc, chain.keys.mintAuthority.signer, 1_000_000n);
+    const { tools } = createSessionTools(
+      createStintClient({
+        signer: outsider.signer,
+        policy: { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } },
+      }),
+    );
+    const { paidUntil } = await tools.stint_open_session.run({ url: dying.context().gateUrl, seconds: 5, reason: "runs to its end" });
+    await dying.services.stop();
+    // The buyer empties its USDC account into the funding key's and closes it.
+    await returnUsdc(chain.network.rpc, funding, outsider.signer, outsider.usdcAccount, await usdcOf(outsider.usdcAccount), { pollMs: 100 });
+    await expect
+      .poll(async () => (await fetchSysvarClock(chain.network.rpc)).unixTimestamp >= BigInt(paidUntil), { timeout: 30_000, interval: 500 })
+      .toBe(true);
+
+    const next = await start(seed);
+
+    expect(await sessionsOnChain()).toBe(0);
+    expect((await chain.network.rpc.getAccountInfo(outsider.usdcAccount, { commitment: "confirmed", encoding: "base64" }).send()).value).toBeNull();
+    await next.stop();
+    // All of the buyer's USDC is at the funding key: what it did not deposit when it closed its account, and the deposit
+    // through the seller, which earned all of it.
+    expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC + 1_000_000n);
+  }, 120_000);
 
   it("reports a session that no held key may close yet, then closes it once its paid time has passed", async () => {
     const { seed } = await fundedSeed();

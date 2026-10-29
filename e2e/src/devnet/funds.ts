@@ -25,8 +25,10 @@ import {
   getCloseInstruction,
   getSessionDecoder,
   getSessionSize,
+  paidUntil,
 } from "@lxfoundry/stint-program-client";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
+import { fetchSysvarClock } from "@solana/sysvars";
 import { USDC_DECIMALS, USDC_DEVNET_MINT } from "../fixtures/usdc.js";
 import { sendInstructions, type SendOptions } from "../network/transactions.js";
 
@@ -165,19 +167,26 @@ export async function returnSol(rpc: Rpc<SolanaRpcApi>, funding: Funding, from: 
   if (lamports > FEE) await sendSol(rpc, from, funding.signer.address, lamports - FEE, options);
 }
 
-/** The sessions that name a held key: those the clean-up acts on, and those of another mint, which it leaves alone. */
+/** The sessions that name a held key: those the clean-up acts on, and those it leaves alone. */
 export interface FoundSessions {
   /** Sessions of the configured USDC mint. */
   readonly sessions: Address[];
   /** Sessions of any other mint: the harness never opens one, closing it would create accounts it cannot recover, and it is not its to fix. */
   readonly otherMint: Address[];
+  /**
+   * Sessions that name a held key only as their receiver. Only the authority and the rent payer sign an open, so
+   * anyone may name the seller: such a session is its opener's to close, and the seller is paid when it is.
+   */
+  readonly receiverOnly: Address[];
 }
 
 /**
- * The sessions on the program that one of `owners` opened, receives or paid the rent of. The clean-up
- * finds sessions here, on the chain, and not in the gate's log: a session whose open was answered
- * `settlement_pending` is on the chain too, and a start-up has no log at all. Only sessions of the USDC mint
- * are for the clean-up to close; those of another mint are set apart, to be reported and left alone.
+ * The sessions on the program that one of `owners` opened or paid the rent of. The clean-up finds sessions
+ * here, on the chain, and not in the gate's log: a session whose open was answered `settlement_pending` is on
+ * the chain too, and a start-up has no log at all. Only sessions of the USDC mint are for the clean-up to
+ * close; those of another mint, and those that name one of `owners` only as their receiver, are set apart, to
+ * be reported and left alone. Otherwise a session that anyone may open, naming the seller, paid for as long as
+ * they like, would stop every run that cannot close it.
  */
 export async function findOpenSessions(rpc: Rpc<SolanaRpcApi>, owners: ReadonlySet<Address>): Promise<FoundSessions> {
   const accounts = await rpc
@@ -185,10 +194,13 @@ export async function findOpenSessions(rpc: Rpc<SolanaRpcApi>, owners: ReadonlyS
     .send();
   const decoder = getSessionDecoder();
   const base64 = getBase64Encoder();
-  const found: FoundSessions = { sessions: [], otherMint: [] };
+  const found: FoundSessions = { sessions: [], otherMint: [], receiverOnly: [] };
   for (const { pubkey, account } of accounts) {
     const session = decoder.decode(base64.encode(account.data[0]));
-    if (!owners.has(session.authority) && !owners.has(session.receiver) && !owners.has(session.rentPayer)) continue;
+    if (!owners.has(session.authority) && !owners.has(session.rentPayer)) {
+      if (owners.has(session.receiver)) found.receiverOnly.push(pubkey);
+      continue;
+    }
     (session.mint === USDC_DEVNET_MINT ? found.sessions : found.otherMint).push(pubkey);
   }
   return found;
@@ -204,10 +216,11 @@ export interface CloseOutcome {
  * authority when `signers` holds that key, and otherwise its `receiver_authorizer`: before `paid_until`
  * the program accepts either, and from `paid_until` anyone. When the harness holds neither, the funding key
  * tries, which succeeds only from `paid_until` on; before that the session is reported. The funding key pays
- * the fee: a buyer holds no SOL. The two accounts the close pays are created first, in the same transaction,
- * if they are gone (spec §12.6; S7): a transaction is atomic (S13), so nothing is half done. The refund account
- * is created even when nothing is owed to it; for an owner outside the pool (the example agent) whose account
- * had been closed, that donates its rent, about 0.002 SOL.
+ * the fee: a buyer holds no SOL. The seller's account is created first, in the same transaction, if it is gone,
+ * and so is the buyer's refund account if the close is made before `paid_until` (spec §12.6; S7): a transaction
+ * is atomic (S13), so nothing is half done. From `paid_until` on, the program pays a residual owed to a missing
+ * refund account to the receiver (spec §4.3), so recreating it would only donate its rent, about 0.002 SOL, to
+ * an owner the harness may not hold.
  */
 export async function closeSessions(
   rpc: Rpc<SolanaRpcApi>,
@@ -228,7 +241,14 @@ export async function closeSessions(
       const closer = heldCloser ?? funding.signer;
       const instructions: Instruction[] = [
         await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: funding.signer, owner: stored.receiver, mint: stored.mint }),
-        await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: funding.signer, owner: stored.refundOwner, mint: stored.mint }),
+      ];
+      // The chain's clock only moves forward: a close read as before `paid_until` may land after it, which creates the
+      // account for nothing, but one read as after it cannot need the account.
+      const now = (await fetchSysvarClock(rpc, { commitment: "confirmed" })).unixTimestamp;
+      if (now < paidUntil(stored)) {
+        instructions.push(await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: funding.signer, owner: stored.refundOwner, mint: stored.mint }));
+      }
+      instructions.push(
         getCloseInstruction({
           closer,
           session,
@@ -239,7 +259,7 @@ export async function closeSessions(
           ...(await eventAccounts()),
           kind: CloseKind.Standard,
         }),
-      ];
+      );
       await sendInstructions(rpc, funding.signer, instructions, options);
       outcome.closed.push(session);
     } catch (error) {
@@ -254,8 +274,9 @@ export async function closeSessions(
  * Brings everything the `holders` keys have on the chain back to the funding key: closes their sessions,
  * then returns their USDC and SOL. Safe to run at any time and any number of times, after any run or
  * none. Sessions of a mint other than USDC that name a held key are reported as a note and left alone: they
- * do not stop a start, and closing one would create accounts for a mint the harness does not hold. A USDC
- * balance that was read stale is read again once. Returns what went wrong; throws nothing.
+ * do not stop a start, and closing one would create accounts for a mint the harness does not hold. So are
+ * sessions that name a held key only as their receiver: an outside key opened them, and they are its to close.
+ * A USDC balance that was read stale is read again once. Returns what went wrong; throws nothing.
  */
 export async function cleanUp(
   rpc: Rpc<SolanaRpcApi>,
@@ -272,9 +293,12 @@ export async function cleanUp(
     }
   };
   await attempt("closing sessions", async () => {
-    const { sessions, otherMint } = await findOpenSessions(rpc, new Set(holders.keys()));
+    const { sessions, otherMint, receiverOnly } = await findOpenSessions(rpc, new Set(holders.keys()));
     if (otherMint.length > 0) {
       console.error(`devnet target: note: ${otherMint.length} session(s) of another mint name a held key and are left alone: ${otherMint.join(", ")}`);
+    }
+    if (receiverOnly.length > 0) {
+      console.error(`devnet target: note: ${receiverOnly.length} session(s) opened by an outside key name a held key as receiver and are left alone: ${receiverOnly.join(", ")}`);
     }
     const outcome = await closeSessions(rpc, funding, sessions, holders, options);
     for (const failure of outcome.failed) problems.push(`closing session ${failure.session}: ${failure.error}`);
