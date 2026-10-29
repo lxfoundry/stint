@@ -123,5 +123,5 @@ does the clean-up alone. Run one at a time per seed: the clean-up closes every s
 keys have open, whichever run opened it. A session that an outside key opened, naming the seed's seller
 as its receiver, is reported and left alone. If the start-up clean-up fails, the run does not start; `pnpm e2e:devnet --force` goes
 on regardless. The report is written to `e2e/report/`. Kora is started with the RPC
-URL on its command line and writes it to its log, so a URL that carries an API key is visible to other users of the
-machine (`ps`) and in `e2e/report/kora.log` (git-ignored).
+URL on its command line, so a URL that carries an API key is visible to other users of the machine (`ps`).
+Its log, which a failed run writes to `e2e/report/kora.log` (git-ignored), has every URL cut to its scheme and host.

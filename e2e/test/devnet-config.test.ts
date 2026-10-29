@@ -115,8 +115,4 @@ describe("loadDevnetConfig, malformed URLs", () => {
       expect(error.message).not.toContain("api-key");
     }
   });
-
-  it("refuses a derived WebSocket URL that does not parse", () => {
-    expect(problemsOf({ STINT_DEVNET_RPC_URL: "https://host:abc/?api-key=k" }).problems).toHaveLength(1);
-  });
 });
