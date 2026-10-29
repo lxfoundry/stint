@@ -186,7 +186,7 @@ For readers who know EVM chains, the main differences:
 The facilitator (section 6) and the end-to-end harness (section 12) depend on how their tools
 behave. These facts were read in each tool's source or documentation, or observed at run time, at
 the version named. They are re-checked whenever the implementation plan pins another version, and
-the sections that depend on them cite them as (T1) to (T9).
+the sections that depend on them cite them as (T1) to (T10).
 
 - **T1. On Windows, Solana programs are built inside WSL.** The Solana and Anchor installation
   guides require it, and the official installer supports macOS, Linux and WSL. *Used in 3.5.*
@@ -217,6 +217,9 @@ the sections that depend on them cite them as (T1) to (T9).
 - **T9. Surfpool truncates a transaction's `preTokenBalances`** (v1.6.1). It keeps the lowest
   account indices, up to the length of `postTokenBalances`, so a transaction that closes a token
   account loses one pre balance. Inner instructions are reported completely. *Used in 12.2, 12.5.*
+- **T10. Devnet's slots take about 240 ms, so a blockhash, valid for 150 blocks, lasts about 36 s.**
+  Measured from devnet's own performance samples over half an hour: 7,502 slots in 1,800 s, with
+  238 to 243 ms per slot. The local network's 400 ms slots give a blockhash 60 s. *Used in 5.1, 12.6.*
 
 ## 3. Architecture
 
@@ -1554,8 +1557,8 @@ the target accepts allowance funding. It also has a client mode, run against a r
 
 **Prerequisites** for the `devnet` and `external` targets (the `local` target sets these up
 itself):
-- a gate configured with a test offer: `minSeconds` of 5 s or less, and a short
-  `idleCloseSeconds`;
+- a gate configured with a test offer: `minSeconds` of 5 s or less, a short `idleCloseSeconds`, and, on
+  a network whose blockhashes last less than 60 s, a `maxTimeoutSeconds` below that lifetime (T10);
 - a funding key with SOL and the offer's asset on the target network, which it uses for nothing but
   funding and fees. The harness derives every other key it needs from one seed, so the keys of any
   earlier run are known without a record. It creates the keys that each scenario, and on `devnet` each

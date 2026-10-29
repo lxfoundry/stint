@@ -96,6 +96,11 @@ mainnet deployment it must move to a multisig or be revoked.
 
 The program's ID is in `Anchor.toml`; its keypair is `target/deploy/stint-keypair.json` and is never
 committed. Back it up.
+
+On devnet the program is `5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr`, its upgrade authority is
+`3DjL1cy8rLGXbNrHRDHUrUk1RuEsxSLGybL6kMY1oWgZ`, and `scripts/verify-deployment.sh` confirmed that its bytes are
+`target/verifiable/stint.so` as `anchor build --verifiable` built it: 176,952 bytes, sha256
+`f49cbdfa582921e51ac557ea52fd33ae2c07e9c644acd2409fccf250f019246f`. An upgrade changes the hash.
 ## Running the scenarios on devnet
 
 `pnpm e2e:devnet` runs the end-to-end scenarios against devnet, with the program deployed by
@@ -119,6 +124,8 @@ for a run, or what it still needs. Fund that address once, with at
 least 0.5 SOL from a devnet faucet and 5 USDC from Circle's (Solana Devnet). It is the only key to
 watch: it plays no part in any scenario, and the fees that runs spend are the only thing that does not
 come back to it.
+
+Scenarios 1 and 22 pass on devnet.
 
 A run checks that the endpoint is devnet and that the program is deployed, then cleans up: it closes
 every session that the seed's keys have open and returns what they hold to the funding key. On a first
