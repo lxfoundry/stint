@@ -1,0 +1,13 @@
+# The configuration of `gitleaks detect --config .gitleaks.toml`: the default rules, and two public strings that the
+# generic-api-key rule takes for secrets. Nothing else is allowed: a finding anywhere else is real until shown otherwise.
+title = "Stint"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public strings that look like keys"
+regexes = [
+  '''dGhlIHNhbXBsZSBub25jZQ==''', # the example Sec-WebSocket-Key of RFC 6455 ("the sample nonce"), in a gate test
+  '''4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU''', # Circle's USDC mint on devnet, a public address, in the plans
+]
