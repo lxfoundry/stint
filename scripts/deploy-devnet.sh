@@ -43,9 +43,11 @@ done
 
 [[ -n "$payer" ]] || die "--payer is required: a funded keypair file made for this"
 [[ -f "$payer" ]] || die "the payer keypair $payer does not exist"
+payer_address="$(solana-keygen pubkey "$payer")"
+# Compared by key, not by path: a copy of the default wallet is the same wallet.
 default_wallet="$HOME/.config/solana/id.json"
-if [[ "$(realpath -m "$payer")" == "$(realpath -m "$default_wallet")" && $allow_default_wallet -eq 0 ]]; then
-  die "$payer is the Solana CLI's default wallet: name a keypair made for this, or pass --allow-default-wallet"
+if [[ $allow_default_wallet -eq 0 && -f "$default_wallet" && "$payer_address" == "$(solana-keygen pubkey "$default_wallet")" ]]; then
+  die "$payer holds the key of the Solana CLI's default wallet: name a keypair made for this, or pass --allow-default-wallet"
 fi
 authority="${authority:-$payer}"
 [[ -f "$authority" ]] || die "the upgrade authority keypair $authority does not exist"
@@ -68,7 +70,6 @@ host="$(printf '%s' "$url" | sed -E 's#^([a-z]+://)([^/@?]*@)?([^/?]+).*#\1\3#')
 genesis="$(solana genesis-hash --url "$url" 2>/dev/null)" || die "cannot read the genesis hash from $host"
 [[ "$genesis" == "$DEVNET_GENESIS" ]] || die "the RPC at $host reports genesis hash $genesis, which is not devnet's"
 
-payer_address="$(solana-keygen pubkey "$payer")"
 balance_output="$(solana balance "$payer_address" --url "$url" --lamports 2>/dev/null)" || die "cannot read the balance of $payer_address from $host"
 balance="${balance_output%% *}"
 [[ "$balance" =~ ^[0-9]+$ ]] || die "cannot read the balance of $payer_address from $host (got '$balance_output')"
@@ -95,8 +96,9 @@ fi
 
 # The CLI's errors quote the URL it was given, key included, and it prints a failed deploy's buffer
 # address and seed notice on stderr. Both streams are kept, each with every URL cut to scheme and
-# host. The match is a pattern: the CLI normalises the URL it prints, so the text may differ from $url.
-redact() { sed -uE 's|(https?://)([^/@ )]*@)?([^/?# )]+)[^ )]*|\1\3|g'; }
+# host. The match is a pattern: the CLI normalises the URL it prints, so the text may differ from $url,
+# and it also prints the WebSocket URL it derives from it, so any scheme is matched.
+redact() { sed -uE 's|([a-z][a-z0-9+.-]*://)([^/@ )]*@)?([^/?# )]+)[^ )]*|\1\3|g'; }
 # Runs a command, its stdout and stderr redacted and still on their own streams; its exit status stands.
 run_redacted() { { "$@" 2>&1 1>&3 3>&- | redact >&2; } 3>&1 | redact; }
 
