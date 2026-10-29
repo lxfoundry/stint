@@ -53,6 +53,7 @@ export async function startLocalStack(): Promise<LocalStack> {
         newBuyer: (usdc) => newBuyer(chain.network.rpc, chain.keys.mintAuthority.signer, usdc),
         sendUsdc: (from, to, amount) => sendUsdc(chain.network.rpc, chain.keys.mintAuthority.signer, from, to, amount),
         subscriptionSettleMs: 1_500,
+        readRetry: { attempts: 1, delayMs: 0 },
       }),
       stop: () => stopAll(stops),
     };

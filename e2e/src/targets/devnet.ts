@@ -19,6 +19,8 @@ const STACK_LAMPORTS = 50_000_000n;
  * acknowledge; this is a measured value, not a guarantee: raise it if a provider is slower.
  */
 const SUBSCRIPTION_SETTLE_MS = 5_000;
+/** How a scenario reads the chain for what its own transaction did: the services' read retry, since the same node answers. */
+const READ_RETRY = { attempts: 20, delayMs: 500 };
 
 export interface DevnetStackOptions {
   readonly rpcUrl: string;
@@ -121,7 +123,7 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
       keys: keys.stack,
       // Devnet's blockhashes last about 36 s: an offer may not outlast its own (spec §5.1).
       maxTimeoutSeconds: 30,
-      readRetry: { attempts: 20, delayMs: 500 },
+      readRetry: READ_RETRY,
     });
   } catch (error) {
     report(await cleanUp(rpc, funding, keys.holders, send));
@@ -148,6 +150,7 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
       },
       sendUsdc: (from, to, amount) => sendUsdc(rpc, funding.signer, from, to, amount, send),
       subscriptionSettleMs: SUBSCRIPTION_SETTLE_MS,
+      readRetry: READ_RETRY,
     }),
     stop: () => {
       stopping ??= (async () => {

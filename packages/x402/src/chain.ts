@@ -18,10 +18,10 @@ import { findClosedEvent, type ClosedEvent, type ProgramInstruction } from "@lxf
 
 const json = (value: unknown) => JSON.stringify(value, (_, inner) => (typeof inner === "bigint" ? inner.toString() : inner));
 
-async function fetchConfirmed(rpc: Rpc<SolanaRpcApi>, signature: string) {
-  return rpc
-    .getTransaction(toSignature(signature), { commitment: "confirmed", encoding: "json", maxSupportedTransactionVersion: 0 })
-    .send();
+async function fetchConfirmed(rpc: Rpc<SolanaRpcApi>, signature: string, retry?: RetryOptions) {
+  const read = () =>
+    rpc.getTransaction(toSignature(signature), { commitment: "confirmed", encoding: "json", maxSupportedTransactionVersion: 0 }).send();
+  return retry ? ((await readUntilFound(read, retry)) ?? null) : read();
 }
 
 /** Every account key of a fetched transaction, lookup-table addresses included, in index order. */
@@ -30,9 +30,16 @@ function accountKeysOf(transaction: NonNullable<Awaited<ReturnType<typeof fetchC
   return [...transaction.transaction.message.accountKeys, ...(loaded?.writable ?? []), ...(loaded?.readonly ?? [])];
 }
 
-/** The inner instructions of a confirmed transaction, with their program address. */
-export async function fetchProgramInstructions(rpc: Rpc<SolanaRpcApi>, signature: string): Promise<ProgramInstruction[] | undefined> {
-  const transaction = await fetchConfirmed(rpc, signature);
+/**
+ * The inner instructions of a confirmed transaction, with their program address. With `retry`, a read that
+ * finds nothing is repeated: a node can answer `null` just after reporting the transaction `confirmed`.
+ */
+export async function fetchProgramInstructions(
+  rpc: Rpc<SolanaRpcApi>,
+  signature: string,
+  retry?: RetryOptions,
+): Promise<ProgramInstruction[] | undefined> {
+  const transaction = await fetchConfirmed(rpc, signature, retry);
   if (!transaction) return undefined;
   const keys = accountKeysOf(transaction);
   const base58 = getBase58Encoder();
@@ -42,8 +49,8 @@ export async function fetchProgramInstructions(rpc: Rpc<SolanaRpcApi>, signature
 }
 
 /** The `Closed` event a confirmed close emitted (spec §4.4). */
-export async function fetchClosedEvent(rpc: Rpc<SolanaRpcApi>, signature: string): Promise<ClosedEvent | undefined> {
-  const instructions = await fetchProgramInstructions(rpc, signature);
+export async function fetchClosedEvent(rpc: Rpc<SolanaRpcApi>, signature: string, retry?: RetryOptions): Promise<ClosedEvent | undefined> {
+  const instructions = await fetchProgramInstructions(rpc, signature, retry);
   return instructions && findClosedEvent(instructions);
 }
 
@@ -117,10 +124,11 @@ export function tokenTransferChanges(transaction: RecordedTransaction): Map<Addr
  * from the transaction's token transfer instructions, not read from its `preTokenBalances` and
  * `postTokenBalances`: Surfpool truncates `preTokenBalances` to the length of `postTokenBalances`,
  * so a transaction that closes a token account loses one pre balance (T9). A token account that no
- * transfer moved is absent from the map. Throws if the transaction failed.
+ * transfer moved is absent from the map. Throws if the transaction failed. With `retry`, a read that finds
+ * nothing is repeated.
  */
-export async function tokenBalanceChanges(rpc: Rpc<SolanaRpcApi>, signature: string): Promise<Map<Address, bigint>> {
-  const transaction = await fetchConfirmed(rpc, signature);
+export async function tokenBalanceChanges(rpc: Rpc<SolanaRpcApi>, signature: string, retry?: RetryOptions): Promise<Map<Address, bigint>> {
+  const transaction = await fetchConfirmed(rpc, signature, retry);
   if (!transaction?.meta) throw new Error(`Transaction ${signature} not found at confirmed`);
   return tokenTransferChanges({
     accountKeys: accountKeysOf(transaction),
@@ -161,10 +169,11 @@ export function lamportBalancesFrom(transaction: RecordedBalances): Map<Address,
 
 /**
  * The lamport balances of a confirmed transaction (spec §12.2): they come from the transaction's own
- * metadata, so a concurrent transaction that also moves the same accounts cannot disturb them.
+ * metadata, so a concurrent transaction that also moves the same accounts cannot disturb them. With `retry`, a
+ * read that finds nothing is repeated.
  */
-export async function lamportBalances(rpc: Rpc<SolanaRpcApi>, signature: string): Promise<Map<Address, LamportBalance>> {
-  const transaction = await fetchConfirmed(rpc, signature);
+export async function lamportBalances(rpc: Rpc<SolanaRpcApi>, signature: string, retry?: RetryOptions): Promise<Map<Address, LamportBalance>> {
+  const transaction = await fetchConfirmed(rpc, signature, retry);
   if (!transaction?.meta) throw new Error(`Transaction ${signature} not found at confirmed`);
   return lamportBalancesFrom({
     accountKeys: accountKeysOf(transaction),

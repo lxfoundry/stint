@@ -16,6 +16,7 @@ const context = (target: Target) => (): ScenarioContext => ({
     throw new Error("no payments in unit tests");
   },
   subscriptionSettleMs: 0,
+  readRetry: { attempts: 1, delayMs: 0 },
 });
 
 function scenario(overrides: Partial<Scenario>): Scenario {

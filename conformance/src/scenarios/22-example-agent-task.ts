@@ -3,6 +3,7 @@ import { fetchMaybeSession } from "@lxfoundry/stint-program-client";
 import { createSessionTools, createStintClient, type SessionTools } from "@lxfoundry/stint-client";
 import { associatedTokenAddress, lamportBalances, tokenBalanceChanges, type LamportBalance } from "@lxfoundry/stint-x402";
 import { expectEqual, expectTrue, sleep } from "../assert.js";
+import { readUntil } from "../reads.js";
 import type { ScenarioContext } from "../types.js";
 
 /** The stream's `account` message about a token account (spec §8), as the node sends it with `jsonParsed`. */
@@ -80,7 +81,8 @@ export async function exampleAgentTask(context: ScenarioContext): Promise<void> 
 
   const opened = await tools.stint_open_session.run({ url: context.gateUrl, seconds: 30, reason: "conformance scenario 22" });
   const session = address(opened.sessionId);
-  const account = await fetchMaybeSession(context.rpc, session, { commitment: "confirmed" });
+  const readSession = () => fetchMaybeSession(context.rpc, session, { commitment: "confirmed" });
+  const account = await readUntil(context.readRetry, readSession, (read) => read.exists);
   expectTrue(account.exists, "the session exists on-chain after the open");
   const stored = account.data;
   const deposit = BigInt(opened.cost);
@@ -95,23 +97,28 @@ export async function exampleAgentTask(context: ScenarioContext): Promise<void> 
 
   if (context.target.name === "devnet") {
     // A real network reports the slot of the change; the local network reports the subscription's (T6).
-    const transaction = await context.rpc
-      .getTransaction(toSignature(paymentSignature), { commitment: "confirmed", encoding: "json", maxSupportedTransactionVersion: 0 })
-      .send();
+    const transaction = await readUntil(
+      context.readRetry,
+      () =>
+        context.rpc
+          .getTransaction(toSignature(paymentSignature), { commitment: "confirmed", encoding: "json", maxSupportedTransactionVersion: 0 })
+          .send(),
+      (read) => read !== null,
+    );
     expectTrue(transaction, "the payment is on-chain");
     expectTrue(BigInt(message.slot) >= transaction.slot, "the message's slot is at or after the payment's slot");
   }
 
   const receipt = await tools.stint_close_session.run({ sessionId: opened.sessionId });
   expectTrue(receipt.paid !== undefined && receipt.refunded !== undefined, "the gate reported the close's amounts");
-  const changes = await tokenBalanceChanges(context.rpc, receipt.transaction);
+  const changes = await tokenBalanceChanges(context.rpc, receipt.transaction, context.readRetry);
   const receiverToken = await associatedTokenAddress(stored.receiver, stored.mint);
   expectEqual(BigInt(receipt.paid), changes.get(receiverToken) ?? 0n, "paid = what the receiver gained in the close");
   expectEqual(BigInt(receipt.refunded), changes.get(agent.usdcAccount) ?? 0n, "refunded = what the buyer gained in the close");
   expectEqual(BigInt(receipt.paid) + BigInt(receipt.refunded), deposit, "paid + refunded = the deposit");
 
-  assertRentReturned(await lamportBalances(context.rpc, receipt.transaction), { rentPayer: stored.rentPayer, session, vault });
-  expectTrue(!(await fetchMaybeSession(context.rpc, session, { commitment: "confirmed" })).exists, "the session account is closed");
+  assertRentReturned(await lamportBalances(context.rpc, receipt.transaction, context.readRetry), { rentPayer: stored.rentPayer, session, vault });
+  expectTrue(!(await readUntil(context.readRetry, readSession, (read) => !read.exists)).exists, "the session account is closed");
   expectEqual(await waitForClose(() => closeCode(opened.sessionId)), 4410, "the connection is dropped with 4410");
 }
 

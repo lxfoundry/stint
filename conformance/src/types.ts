@@ -1,4 +1,5 @@
 import type { Address, KeyPairSigner, Rpc, SolanaRpcApi } from "@solana/kit";
+import type { RetryOptions } from "@lxfoundry/stint-x402";
 
 /**
  * What a target offers a scenario (spec section 12.2). `facilitatorApi` is the ability to call
@@ -44,6 +45,12 @@ export interface ScenarioContext {
    * the node has it; how long that takes is the target's to say, not the scenario's (spec §12.2).
    */
   readonly subscriptionSettleMs: number;
+  /**
+   * How patiently a scenario reads the chain for what its own transaction just did: a node behind a load
+   * balancer can answer from behind right after it reported the transaction `confirmed`. One attempt
+   * where the node is ours; several on a network that is not (spec §12.2).
+   */
+  readonly readRetry: RetryOptions;
 }
 
 export interface Scenario {
