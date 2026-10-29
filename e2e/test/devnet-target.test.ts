@@ -17,7 +17,10 @@ import {
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import type { Address } from "@solana/kit";
 import { fetchSysvarClock } from "@solana/sysvars";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { DEVNET_GENESIS_HASH } from "../src/devnet/config.js";
 import { cleanUp, returnSol, returnSolRetrying, returnUsdc, returnUsdcRetrying } from "../src/devnet/funds.js";
 import { deriveKeys } from "../src/devnet/keys.js";
 import { newBuyer } from "../src/fixtures/buyers.js";
@@ -26,9 +29,40 @@ import { USDC_DEVNET_MINT, mintUsdc } from "../src/fixtures/usdc.js";
 import { sendInstructions } from "../src/network/transactions.js";
 import { waitForNewSlot } from "../src/network/surfnet.js";
 import { startLocalChain, type LocalChain } from "../src/targets/chain.js";
-import { cleanDevnet, startDevnetStack, type DevnetStack, type DevnetStackOptions } from "../src/targets/devnet.js";
+import { cleanDevnet, devnetFunds, startDevnetStack, type DevnetStack, type DevnetStackOptions } from "../src/targets/devnet.js";
 
 const FUNDING_USDC = 10_000_000n;
+
+interface RpcStub {
+  readonly url: string;
+  close(): Promise<void>;
+}
+
+/** A JSON-RPC endpoint at a local address that answers each request as `answer` says: a provider, as far as a test cares. */
+async function serveRpc(answer: (method: string, body: string) => Promise<{ status: number; reply: object }>): Promise<RpcStub> {
+  const server = createServer((request, response) => {
+    void (async () => {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      const { id, method } = JSON.parse(body) as { id: unknown; method: string };
+      const { status, reply } = await answer(method, body);
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id, ...reply }));
+    })().catch(() => {
+      response.writeHead(500).end();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
+  };
+}
 
 interface FundedSeed {
   readonly seed: Uint8Array;
@@ -116,6 +150,30 @@ describe("the devnet target, run against the local network", () => {
     expect(lamportsBefore - lamportsAfter).toBeLessThan(5_000_000n);
     await stack.stop(); // stopping twice is harmless
   }, 120_000);
+
+  // The minimums are 500,000,000 lamports and 5,000,000 USDC base units: a key must hold both.
+  it.each([
+    { holds: "exactly the minimum of both", sol: 0.5, lamports: 500_000_000, usdc: 5_000_000n, funded: true },
+    { holds: "more than the minimum of both", sol: 5, lamports: 5_000_000_000, usdc: 10_000_000n, funded: true },
+    { holds: "less SOL than the minimum, and enough USDC", sol: 0.4, lamports: 400_000_000, usdc: 10_000_000n, funded: false },
+    { holds: "enough SOL, and one base unit less USDC than the minimum", sol: 5, lamports: 5_000_000_000, usdc: 4_999_999n, funded: false },
+    { holds: "no account at all", sol: 0, lamports: 0, usdc: 0n, funded: false },
+  ])("tells whether the funding key is funded, as $funded, when it holds $holds", async ({ sol, lamports, usdc, funded }) => {
+    const seed = crypto.getRandomValues(new Uint8Array(32));
+    const { funding } = await deriveKeys(seed, 0);
+    const address = funding.signer.address;
+    if (sol > 0) {
+      fundSol(chain.network, address, sol);
+      await waitForNewSlot(chain.network.rpc);
+    }
+    if (usdc > 0n) await mintUsdc(chain.network.rpc, chain.keys.mintAuthority.signer, address, usdc);
+
+    const message = await devnetFunds({ rpcUrl: chain.network.rpcUrl, seed, preflight: false });
+
+    const [holdings, verdict] = message.split("\n");
+    expect(holdings).toBe(`funding key ${address} holds ${lamports} lamports and ${usdc} USDC base units`);
+    expect(verdict).toBe(funded ? "✓ Funded" : `A run needs at least 500000000 lamports and 5000000 USDC base units there: fund ${address} from the SOL and USDC faucets.`);
+  }, 60_000);
 
   it("does nothing, and says nothing is wrong, when there is nothing to clean up", async () => {
     const fresh = await fundedSeed();
@@ -372,6 +430,67 @@ describe("the devnet target, run against the local network", () => {
     await expect.poll(() => cleanUp(chain.network.rpc, funding, held, { pollMs: 100 }), { timeout: 60_000, interval: 3_000 }).toEqual([]);
     expect(await sessionsOnChain()).toBe(0);
   }, 120_000);
+
+  /** Like the free tier of a provider: the local network answers every method but the listing of a program's accounts. */
+  const nodeThatCannotListProgramAccounts = () =>
+    serveRpc(async (method, body) =>
+      method === "getProgramAccounts"
+        ? { status: 400, reply: { error: { code: -32600, message: "getProgramAccounts is not available on the Free tier" } } }
+        : {
+            status: 200,
+            reply: (await (await fetch(chain.network.rpcUrl, { method: "POST", headers: { "content-type": "application/json" }, body })).json()) as object,
+          },
+    );
+
+  it("finds the sessions to close through the scan endpoint when the main one cannot list the program's accounts", async () => {
+    const { seed, fundingUsdc } = await fundedSeed();
+    const dying = await start(seed);
+    await openSession(dying, "left open, behind a node that cannot list the program's accounts");
+    await dying.services.stop();
+    const provider = await nodeThatCannotListProgramAccounts();
+    try {
+      // Without a scan endpoint the session cannot be found: the one problem is the scan.
+      const refused = await cleanDevnet({ rpcUrl: provider.url, seed, preflight: false, pollMs: 100 });
+      expect(refused).toHaveLength(1);
+      expect(refused[0]).toMatch(/^closing sessions: /);
+      expect(await sessionsOnChain()).toBe(1);
+
+      const problems = await cleanDevnet({ rpcUrl: provider.url, scanRpcUrl: chain.network.rpcUrl, seed, preflight: false, pollMs: 100 });
+
+      expect(problems).toEqual([]);
+      expect(await sessionsOnChain()).toBe(0);
+      expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC);
+    } finally {
+      await provider.close();
+    }
+  }, 120_000);
+
+  it("starts, and closes what is left open at the end, through a main endpoint that cannot list the program's accounts", async () => {
+    const { seed, fundingUsdc } = await fundedSeed();
+    const provider = await nodeThatCannotListProgramAccounts();
+    try {
+      const running = await start(seed, { rpcUrl: provider.url, scanRpcUrl: chain.network.rpcUrl });
+      await openSession(running, "left open at the end, behind a node that cannot list the program's accounts");
+      expect(await sessionsOnChain()).toBe(1);
+
+      await running.stop();
+
+      expect(await sessionsOnChain()).toBe(0);
+      expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC);
+    } finally {
+      await provider.close();
+    }
+  }, 120_000);
+
+  it("refuses a scan endpoint that is not devnet's before it cleans up anything", async () => {
+    const seed = crypto.getRandomValues(new Uint8Array(32));
+    const devnet = await serveRpc(async () => ({ status: 200, reply: { result: DEVNET_GENESIS_HASH } }));
+    try {
+      await expect(cleanDevnet({ rpcUrl: devnet.url, scanRpcUrl: chain.network.rpcUrl, seed, pollMs: 100 })).rejects.toThrow(/not devnet's/);
+    } finally {
+      await devnet.close();
+    }
+  }, 60_000);
 
   it("does not start when the start-up clean-up cannot read the chain", async () => {
     const seed = crypto.getRandomValues(new Uint8Array(32));

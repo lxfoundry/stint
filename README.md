@@ -96,7 +96,6 @@ mainnet deployment it must move to a multisig or be revoked.
 
 The program's ID is in `Anchor.toml`; its keypair is `target/deploy/stint-keypair.json` and is never
 committed. Back it up.
-
 ## Running the scenarios on devnet
 
 `pnpm e2e:devnet` runs the end-to-end scenarios against devnet, with the program deployed by
@@ -105,12 +104,18 @@ rate-limited. Create `.env.devnet` (git-ignored; `.env.example` lists the names)
 
 - `STINT_DEVNET_RPC_URL`: a devnet endpoint (and `STINT_DEVNET_WS_URL` if its WebSocket URL is not the
   same address with `ws` for `http`);
+- `STINT_DEVNET_SCAN_RPC_URL`, optional: the endpoint that lists the program's accounts, which is how the
+  clean-up finds open sessions. Some providers' free tiers refuse that method (Alchemy's does: the run's
+  start-up fails with `HTTP error (400)`); set this to another endpoint that answers it, such as
+  `https://api.devnet.solana.com`. It is asked three times per run (a devnet check, then the listing at
+  the start and at the end), and the rest goes to `STINT_DEVNET_RPC_URL`;
 - `STINT_DEVNET_SEED`: a recovery phrase of 12 to 24 words in quotes, or 64 hexadecimal characters
   (`openssl rand -hex 32`). Every key of the target derives from it, by the harness's own rule, so the
   addresses are not the ones a wallet shows for the same phrase. Use a phrase made for this, never one
   that holds funds elsewhere, and keep a copy off this machine.
 
-`pnpm e2e:devnet funds` prints the funding key's address and balances. Fund that address once, with at
+`pnpm e2e:devnet funds` prints the funding key's address and balances, then `✓ Funded` when it holds enough
+for a run, or what it still needs. Fund that address once, with at
 least 0.5 SOL from a devnet faucet and 5 USDC from Circle's (Solana Devnet). It is the only key to
 watch: it plays no part in any scenario, and the fees that runs spend are the only thing that does not
 come back to it.

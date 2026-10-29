@@ -36,7 +36,7 @@ async function start(name: string, forced: boolean): Promise<Running> {
   }
   if (name === "devnet") {
     const config = devnetSettings();
-    const stack = await startDevnetStack({ rpcUrl: config.rpcUrl, wsUrl: config.wsUrl, seed: config.seed, force: forced });
+    const stack = await startDevnetStack({ ...config, force: forced });
     return { target: stack.target, context: () => stack.context(), stop: () => stack.stop(), logs: () => stack.services.kora.logs() };
   }
   throw new Error(`Unknown target "${name}": use local or devnet`);

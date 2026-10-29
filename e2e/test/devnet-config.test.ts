@@ -23,6 +23,13 @@ describe("loadDevnetConfig", () => {
     expect(config.wsUrl).toBe("wss://b.example");
   });
 
+  it("reads an optional endpoint for scanning the program's accounts, and has none when it is not set", () => {
+    const env = { STINT_DEVNET_RPC_URL: "https://a.example", STINT_DEVNET_SEED: SEED };
+    expect(loadDevnetConfig({ ...env, STINT_DEVNET_SCAN_RPC_URL: " https://api.devnet.solana.com " }).scanRpcUrl).toBe("https://api.devnet.solana.com");
+    expect(loadDevnetConfig(env).scanRpcUrl).toBeUndefined();
+    expect(loadDevnetConfig({ ...env, STINT_DEVNET_SCAN_RPC_URL: "" }).scanRpcUrl).toBeUndefined();
+  });
+
   it("takes the seed of a recovery phrase as BIP-39 does, without checking its words, and ignores case and spacing", () => {
     const phrase = `${"abandon ".repeat(23)}art`;
     const config = loadDevnetConfig({ STINT_DEVNET_RPC_URL: "https://a.example", STINT_DEVNET_SEED: phrase });
@@ -106,6 +113,14 @@ describe("loadDevnetConfig, malformed URLs", () => {
     expect(error.problems).toEqual(["STINT_DEVNET_RPC_URL must be an http or https URL"]);
     expect(error.message).not.toContain("KEYKEY");
     expect(error.message).not.toContain("pass");
+  });
+
+  it("refuses a scan URL that is not an http or https URL, or carries credentials, without quoting any of it", () => {
+    for (const scan of ["ftp://host.example/?api-key=k", "https://host:abc/?api-key=k", "https://user:pass@host.example/KEYKEY"]) {
+      const error = problemsOf({ STINT_DEVNET_RPC_URL: "https://a.example", STINT_DEVNET_SCAN_RPC_URL: scan });
+      expect(error.problems).toEqual(["STINT_DEVNET_SCAN_RPC_URL must be an http or https URL"]);
+      expect(error.message).not.toMatch(/api-key|KEYKEY|pass|host/);
+    }
   });
 
   it("requires a ws or wss URL for the WebSocket endpoint, without quoting it", () => {

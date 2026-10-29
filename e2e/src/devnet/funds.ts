@@ -302,12 +302,15 @@ export async function closeSessions(
  * do not stop a start, and closing one would create accounts for a mint the harness does not hold. So are
  * sessions that name a held key only as their receiver: an outside key opened them, and they are its to close.
  * A balance that was read stale, of USDC or SOL, is read again once. Returns what went wrong; throws nothing.
+ * The sessions are listed through `scanRpc`, which is `rpc` unless the caller names another endpoint: a provider's
+ * free tier may refuse the listing of a program's accounts, which nothing else here needs.
  */
 export async function cleanUp(
   rpc: Rpc<SolanaRpcApi>,
   funding: Funding,
   holders: ReadonlyMap<Address, KeyPairSigner>,
   options: SendOptions,
+  scanRpc: Rpc<SolanaRpcApi> = rpc,
 ): Promise<string[]> {
   const problems: string[] = [];
   const attempt = async (what: string, work: () => Promise<unknown>) => {
@@ -318,7 +321,7 @@ export async function cleanUp(
     }
   };
   await attempt("closing sessions", async () => {
-    const { sessions, otherMint, receiverOnly } = await findOpenSessions(rpc, new Set(holders.keys()));
+    const { sessions, otherMint, receiverOnly } = await findOpenSessions(scanRpc, new Set(holders.keys()));
     if (otherMint.length > 0) {
       console.error(`devnet target: note: ${otherMint.length} session(s) of another mint name a held key and are left alone: ${otherMint.join(", ")}`);
     }

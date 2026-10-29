@@ -9,6 +9,11 @@ export interface DevnetConfig {
   readonly rpcUrl: string;
   readonly wsUrl: string;
   /**
+   * Where the clean-up lists the program's accounts, for an RPC URL whose provider refuses that method (a free
+   * tier may). Absent, the clean-up asks `rpcUrl`.
+   */
+  readonly scanRpcUrl?: string;
+  /**
    * The bytes that every key of the devnet target derives from, the funding key included: 32 from a
    * hexadecimal seed, or 64 from a recovery phrase, as BIP-39 turns a phrase into a seed.
    */
@@ -50,6 +55,8 @@ export function loadDevnetConfig(env: Readonly<Record<string, string | undefined
   else if (!isUrl(rpcUrl, ["http:", "https:"])) problems.push("STINT_DEVNET_RPC_URL must be an http or https URL");
   const explicitWsUrl = env.STINT_DEVNET_WS_URL?.trim();
   if (explicitWsUrl && !isUrl(explicitWsUrl, ["ws:", "wss:"])) problems.push("STINT_DEVNET_WS_URL must be a ws or wss URL");
+  const scanRpcUrl = env.STINT_DEVNET_SCAN_RPC_URL?.trim();
+  if (scanRpcUrl && !isUrl(scanRpcUrl, ["http:", "https:"])) problems.push("STINT_DEVNET_SCAN_RPC_URL must be an http or https URL");
   let seed: Uint8Array | undefined;
   if (!seedText) problems.push("STINT_DEVNET_SEED is required: a recovery phrase of 12 to 24 words, or 64 hexadecimal characters (openssl rand -hex 32)");
   else if (/^[0-9a-fA-F]{64}$/.test(seedText)) seed = Uint8Array.from(Buffer.from(seedText, "hex"));
@@ -59,7 +66,7 @@ export function loadDevnetConfig(env: Readonly<Record<string, string | undefined
     else problems.push("STINT_DEVNET_SEED must be a recovery phrase of 12 to 24 words, or 64 hexadecimal characters");
   }
   if (problems.length > 0 || !rpcUrl || !seed) throw new DevnetConfigError(problems);
-  return { rpcUrl, wsUrl: explicitWsUrl || rpcUrl.replace(/^http/, "ws"), seed };
+  return { rpcUrl, wsUrl: explicitWsUrl || rpcUrl.replace(/^http/, "ws"), ...(scanRpcUrl ? { scanRpcUrl } : {}), seed };
 }
 
 /** Refuses to go on unless the RPC is devnet's: no transaction of this harness may reach another network. */

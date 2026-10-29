@@ -25,6 +25,8 @@ const READ_RETRY = { attempts: 20, delayMs: 500 };
 export interface DevnetStackOptions {
   readonly rpcUrl: string;
   readonly wsUrl: string;
+  /** Where the clean-up lists the program's accounts, if `rpcUrl` refuses that (a provider's free tier may). Default `rpcUrl`. */
+  readonly scanRpcUrl?: string;
   /** The seed that every key derives from (`deriveKeys`), the funding key included. */
   readonly seed: Uint8Array;
   /** Check the genesis hash, the deployed program and the funds before starting. Default true. */
@@ -47,14 +49,33 @@ export interface DevnetStack {
   stop(): Promise<void>;
 }
 
+/**
+ * The endpoint that lists the program's accounts: `rpc`, or the scan endpoint when one is named. A scan endpoint
+ * decides which sessions the clean-up closes, so with `preflight` it must be devnet's too.
+ */
+async function scanRpcOf(rpc: Rpc<SolanaRpcApi>, scanRpcUrl: string | undefined, preflight: boolean): Promise<Rpc<SolanaRpcApi>> {
+  if (!scanRpcUrl) return rpc;
+  const scanRpc = createSolanaRpc(scanRpcUrl);
+  if (preflight) await assertDevnet(scanRpc);
+  return scanRpc;
+}
+
 async function fundingOf(keys: Pick<DevnetKeys, "funding">): Promise<Funding> {
   return { signer: keys.funding.signer, usdcAccount: await associatedTokenAddress(keys.funding.signer.address, USDC_DEVNET_MINT) };
 }
 
-async function assertFunds(rpc: Rpc<SolanaRpcApi>, funding: Funding): Promise<void> {
+/** What the funding key holds: lamports, and USDC base units in its token account (none when the account does not exist). */
+async function readFunds(rpc: Rpc<SolanaRpcApi>, funding: Funding): Promise<{ lamports: bigint; usdc: bigint }> {
   const lamports = (await rpc.getBalance(funding.signer.address, { commitment: "confirmed" }).send()).value;
   const token = await fetchMaybeToken(rpc, funding.usdcAccount, { commitment: "confirmed" });
-  const usdc = token.exists ? token.data.amount : 0n;
+  return { lamports, usdc: token.exists ? token.data.amount : 0n };
+}
+
+const holdsLine = (funding: Funding, held: { lamports: bigint; usdc: bigint }): string =>
+  `funding key ${funding.signer.address} holds ${held.lamports} lamports and ${held.usdc} USDC base units`;
+
+async function assertFunds(rpc: Rpc<SolanaRpcApi>, funding: Funding): Promise<void> {
+  const { lamports, usdc } = await readFunds(rpc, funding);
   const short: string[] = [];
   if (lamports < MINIMUM_FUNDS.lamports) {
     short.push(`${funding.signer.address} holds ${lamports} lamports and needs ${MINIMUM_FUNDS.lamports}: use a devnet SOL faucet`);
@@ -68,9 +89,7 @@ async function assertFunds(rpc: Rpc<SolanaRpcApi>, funding: Funding): Promise<vo
 /** One line for the log: what the funding key holds, so that a run's start and end can be compared. Never throws. */
 async function fundsLine(rpc: Rpc<SolanaRpcApi>, funding: Funding): Promise<string> {
   try {
-    const lamports = (await rpc.getBalance(funding.signer.address, { commitment: "confirmed" }).send()).value;
-    const token = await fetchMaybeToken(rpc, funding.usdcAccount, { commitment: "confirmed" });
-    return `funding key ${funding.signer.address} holds ${lamports} lamports and ${token.exists ? token.data.amount : 0n} USDC base units`;
+    return holdsLine(funding, await readFunds(rpc, funding));
   } catch (error) {
     return `funding key ${funding.signer.address}: balances unavailable (${describeError(error)})`;
   }
@@ -98,7 +117,8 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
     await assertDevnet(rpc);
     await assertProgramDeployed(rpc);
   }
-  const left = await cleanUp(rpc, funding, keys.holders, send);
+  const scanRpc = await scanRpcOf(rpc, options.scanRpcUrl, options.preflight !== false);
+  const left = await cleanUp(rpc, funding, keys.holders, send, scanRpc);
   if (left.length > 0) {
     const problems = `Cleaning up what earlier runs left failed:\n- ${left.join("\n- ")}`;
     if (!options.force) {
@@ -126,7 +146,7 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
       readRetry: READ_RETRY,
     });
   } catch (error) {
-    report(await cleanUp(rpc, funding, keys.holders, send));
+    report(await cleanUp(rpc, funding, keys.holders, send, scanRpc));
     throw error;
   }
 
@@ -160,7 +180,7 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
         } catch (error) {
           problems.push(`stopping the services: ${describeError(error)}`);
         }
-        problems.push(...(await cleanUp(rpc, funding, keys.holders, send)));
+        problems.push(...(await cleanUp(rpc, funding, keys.holders, send, scanRpc)));
         if (options.preflight !== false) console.error(`after clean-up, ${await fundsLine(rpc, funding)}`);
         report(problems);
       })();
@@ -171,6 +191,8 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
 
 export interface CleanOptions {
   readonly rpcUrl: string;
+  /** Where the program's accounts are listed, if `rpcUrl` refuses that. Default `rpcUrl`. */
+  readonly scanRpcUrl?: string;
   readonly seed: Uint8Array;
   readonly preflight?: boolean;
   readonly pollMs?: number;
@@ -181,17 +203,27 @@ export interface CleanOptions {
 export async function cleanDevnet(options: CleanOptions): Promise<string[]> {
   const rpc = createSolanaRpc(options.rpcUrl);
   if (options.preflight !== false) await assertDevnet(rpc);
+  const scanRpc = await scanRpcOf(rpc, options.scanRpcUrl, options.preflight !== false);
   const keys = await deriveKeys(options.seed, options.buyerPool);
   const funding = await fundingOf(keys);
-  const problems = await cleanUp(rpc, funding, keys.holders, { pollMs: options.pollMs ?? 400 });
+  const problems = await cleanUp(rpc, funding, keys.holders, { pollMs: options.pollMs ?? 400 }, scanRpc);
   if (options.preflight !== false) console.error(`after clean-up, ${await fundsLine(rpc, funding)}`);
   return problems;
 }
 
-/** The funding key's address and balances, and what a run needs there (`pnpm e2e:devnet funds`). */
-export async function devnetFunds(options: Pick<CleanOptions, "rpcUrl" | "seed">): Promise<string> {
+/**
+ * The funding key's address and balances (`pnpm e2e:devnet funds`), then "✓ Funded" when it holds the minimum
+ * that a run needs of both SOL and USDC, or else what it needs and where to get it.
+ */
+export async function devnetFunds(options: Pick<CleanOptions, "rpcUrl" | "seed" | "preflight">): Promise<string> {
   const rpc = createSolanaRpc(options.rpcUrl);
-  await assertDevnet(rpc);
+  if (options.preflight !== false) await assertDevnet(rpc);
   const funding = await fundingOf({ funding: await deriveKey(options.seed, KEY_INDEX.funding) });
-  return `${await fundsLine(rpc, funding)}\nA run needs at least ${MINIMUM_FUNDS.lamports} lamports and ${MINIMUM_FUNDS.usdc} USDC base units there: fund ${funding.signer.address} from the SOL and USDC faucets.`;
+  const held = await readFunds(rpc, funding);
+  const funded = held.lamports >= MINIMUM_FUNDS.lamports && held.usdc >= MINIMUM_FUNDS.usdc;
+  return `${holdsLine(funding, held)}\n${
+    funded
+      ? "✓ Funded"
+      : `A run needs at least ${MINIMUM_FUNDS.lamports} lamports and ${MINIMUM_FUNDS.usdc} USDC base units there: fund ${funding.signer.address} from the SOL and USDC faucets.`
+  }`;
 }

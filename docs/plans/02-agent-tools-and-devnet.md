@@ -4517,12 +4517,18 @@ rate-limited. Create `.env.devnet` (git-ignored; `.env.example` lists the names)
 
 - `STINT_DEVNET_RPC_URL`: a devnet endpoint (and `STINT_DEVNET_WS_URL` if its WebSocket URL is not the
   same address with `ws` for `http`);
+- `STINT_DEVNET_SCAN_RPC_URL`, optional: the endpoint that lists the program's accounts, which is how the
+  clean-up finds open sessions. Some providers' free tiers refuse that method (Alchemy's does: the run's
+  start-up fails with `HTTP error (400)`); set this to another endpoint that answers it, such as
+  `https://api.devnet.solana.com`. It is asked three times per run (a devnet check, then the listing at
+  the start and at the end), and the rest goes to `STINT_DEVNET_RPC_URL`;
 - `STINT_DEVNET_SEED`: a recovery phrase of 12 to 24 words in quotes, or 64 hexadecimal characters
   (`openssl rand -hex 32`). Every key of the target derives from it, by the harness's own rule, so the
   addresses are not the ones a wallet shows for the same phrase. Use a phrase made for this, never one
   that holds funds elsewhere, and keep a copy off this machine.
 
-`pnpm e2e:devnet funds` prints the funding key's address and balances. Fund that address once, with at
+`pnpm e2e:devnet funds` prints the funding key's address and balances, then `✓ Funded` when it holds enough
+for a run, or what it still needs. Fund that address once, with at
 least 0.5 SOL from a devnet faucet and 5 USDC from Circle's (Solana Devnet). It is the only key to
 watch: it plays no part in any scenario, and the fees that runs spend are the only thing that does not
 come back to it.
@@ -4618,9 +4624,9 @@ pnpm e2e:devnet funds
 scripts/verify-deployment.sh target/verifiable/stint.so
 ```
 
-Expected: `funds` prints the funding key's address, what it holds, and what a run needs. Fund that
-address from a devnet SOL faucet (at least 0.5 SOL) and from Circle's testnet faucet (Solana Devnet,
-at least 5 USDC), then run `funds` again until it shows both. The verification prints `devnet program
+Expected: `funds` prints the funding key's address and what it holds, then either `✓ Funded` or what a run
+needs. Fund that address from a devnet SOL faucet (at least 0.5 SOL) and from Circle's testnet faucet
+(Solana Devnet, at least 5 USDC), then run `funds` again until it prints `✓ Funded`. The verification prints `devnet program
 5iCYPq… is …`. If the program was deployed from `target/deploy/stint.so`, verify that file instead.
 The funding key is the only key to top up from now on: a run spends fees, and nothing else.
 
@@ -4641,6 +4647,7 @@ If it fails, the report names the scenario and the check, and `e2e/report/kora.l
 |---|---|---|
 | `The funding key is short` | The faucets have not delivered, or fees have used it up | Fund the key; the message names the address and the amounts (`pnpm e2e:devnet funds` prints them) |
 | HTTP 429, `rate limit` or `Too many requests` in an error or in Kora's log | The public endpoint's limits | Use a provider's devnet URL in `STINT_DEVNET_RPC_URL`; if it persists, raise `pollMs` in `startDevnetStack` |
+| `Cleaning up what earlier runs left failed:` with `closing sessions: HTTP error (400)`, at start-up, before anything runs | The provider refuses `getProgramAccounts` (Alchemy's free tier answers `not available on the Free tier`), which is how the clean-up lists sessions | Set `STINT_DEVNET_SCAN_RPC_URL=https://api.devnet.solana.com` in `.env.devnet`; the main URL stays the provider's |
 | `404 unknown_session` or `The gate reported another session` right after an open | A node answered a read with nothing | Raise `attempts` or `delayMs` in the `readRetry` literal of `startDevnetStack` |
 | `blockhash_expired`, or `settlement_pending` on an open | A slow confirmation, or an offer that outlasted its blockhash | Check the time between the offer and the settlement; lower `maxTimeoutSeconds` |
 | `simulation_failed` with an account or program error | The deployed program differs from the client | Run `scripts/verify-deployment.sh`; deploy again |
@@ -4661,8 +4668,9 @@ differ by less than 1,000,000 (fees only: a run sends some 30 to 40 transactions
 so a few hundred thousand is normal). Then check that no session is left open on the program:
 
 ```bash
-url="$(grep '^STINT_DEVNET_RPC_URL=' .env.devnet | cut -d= -f2- | sed 's/[[:space:]]#.*$//' | tr -d "'\"")"   # read from the file: typed in, the URL (which may carry an API key) would stay in the shell history
-: "${url:?STINT_DEVNET_RPC_URL is not set in .env.devnet}"
+env_value() { grep "^$1=" .env.devnet | cut -d= -f2- | sed 's/[[:space:]]#.*$//' | tr -d "'\"\r"; }
+url="$(env_value STINT_DEVNET_SCAN_RPC_URL)"; url="${url:-$(env_value STINT_DEVNET_RPC_URL)}"   # read from the file: typed in, the URL (which may carry an API key) would stay in the shell history; the scan endpoint if there is one, since this lists the program's accounts
+: "${url:?neither STINT_DEVNET_SCAN_RPC_URL nor STINT_DEVNET_RPC_URL is set in .env.devnet}"
 curl -s "$url" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getProgramAccounts","params":["5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr",{"commitment":"confirmed","dataSlice":{"offset":0,"length":0},"filters":[{"dataSize":250}]}]}'
 ```
 
@@ -5344,11 +5352,20 @@ code and in no sketch:
   WebSocket URL), and no message quotes either. The verification script does not show the dump's output.
 - **The clean-up closes only sessions of the configured USDC mint.** One of another mint that names a held key is
   reported as a note and left alone, since closing it would create accounts for a mint the harness cannot recover.
+- **The sessions can be listed through a second endpoint.** A provider's free tier may refuse `getProgramAccounts`
+  (Alchemy's does, with an HTTP 400), which the clean-up needs to find open sessions. `STINT_DEVNET_SCAN_RPC_URL`
+  (`scanRpcUrl` in the configuration and in both option types) names the endpoint for that listing alone; absent,
+  the main one is asked. With the preflight on, the scan endpoint must report devnet's genesis hash as well, since
+  it decides which sessions are closed. The three start, end and failure clean-ups and `clean` all use it.
+- **`funds` says whether the key is funded.** After the funding key's balances it prints `✓ Funded` when it holds
+  at least the minimum of both SOL and USDC, and otherwise the minimums and the address to fund. It takes the same
+  `preflight` option as the clean-up, so that it can run against the local network.
 - **Tests beyond the sketches:** a close that starts while `closeAll` is closing others, and a second attempt after
   a failed close in flight (Task 2); the refusal of a cluster that is not devnet and of a copy of the default wallet,
   both before a deploy is sent, against a stand-in CLI (Task 5); a stale SOL balance read again, the session
   search by discriminator, a session that names a held key only as its receiver, and a refund account recreated
-  only before `paid_until` (Task 6); an input that does not match a tool's schema, a turn that ends before it is
+  only before `paid_until`, `funds` at, below and above the minimums, and the clean-up through a node that refuses
+  the listing of the program's accounts, with a scan endpoint (Task 6); an input that does not match a tool's schema, a turn that ends before it is
   done, and a request that carries the whole conversation without a server-side thread (Task 8).
 
 ## Done when
