@@ -139,10 +139,10 @@ export async function startServices(options: ServicesOptions): Promise<Services>
       const current = running;
       running = undefined;
       await current?.stop();
-      // A client's keep-alive socket to the old gate only learns that it was closed when the event loop next polls for I/O. A
-      // timer lets that poll run, so that the next request opens a new connection instead of going out on the dead socket once
-      // the gate is back on the same port.
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // A client's keep-alive socket to the old gate is seen to be closed only when the event loop polls for I/O. One has to run
+      // between the old gate's sockets being destroyed and the next request, or that request goes out on the dead socket once the
+      // gate is back on the same port. Two hops through the check phase always have a poll between them; a timer does not.
+      for (let hop = 0; hop < 2; hop++) await new Promise((resolve) => setImmediate(resolve));
     };
     let stopped = false;
     const startGate = async (): Promise<void> => {
