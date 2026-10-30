@@ -1,4 +1,5 @@
 import { openConnectCloseEarly } from "./scenarios/01-open-connect-close.js";
+import { closeBeforeMinSeconds } from "./scenarios/02-close-before-min-seconds.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
 import type { Capability, IsolationGroup, Scenario } from "./types.js";
 
@@ -8,8 +9,9 @@ function pending(
   title: string,
   needs: readonly Capability[] = [],
   group: IsolationGroup = "shared",
+  run?: Scenario["run"],
 ): Scenario {
-  return { id, title, needs, group, status: "pending" };
+  return { id, title, needs, group, status: "pending", ...(run ? { run } : {}) };
 }
 
 function required(
@@ -24,7 +26,7 @@ function required(
 
 export const catalogue: readonly Scenario[] = [
   required(1, "Open, connect, close early", openConnectCloseEarly),
-  pending(2, "Close before minSeconds"),
+  required(2, "Close before minSeconds", closeBeforeMinSeconds),
   pending(3, "Expiry"),
   pending(4, "Top-up before and after expiry"),
   pending(5, "Payment with wrong terms, a wrong amount, or a Memo instruction"),
