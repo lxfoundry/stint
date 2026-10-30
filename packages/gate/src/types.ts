@@ -27,8 +27,10 @@ export interface Timers {
 
 /**
  * Spec §7.6. `provision` once when the open settles, `attach` per connection, `teardown` once. At the end of the paid
- * time the gate stops forwarding by replacing each socket's `send`: only sends made through `socket.send` at send
- * time are dropped, so an adapter that captured the method earlier is not muted.
+ * time the gate stops forwarding, both ways, by replacing each socket's `send` and `emit`: only sends made through
+ * `socket.send` at send time are dropped, so an adapter that captured the method earlier is not muted. The buyer's
+ * frames are withheld from the socket's `message` listeners while the session is muted, dropped and not queued; the
+ * socket's other events, its `close` included, are delivered as usual. Both come back if the session continues.
  */
 export interface ResourceAdapter<U = unknown> {
   provision(session: SessionInfo): Promise<U>;

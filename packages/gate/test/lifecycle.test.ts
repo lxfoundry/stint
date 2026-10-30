@@ -182,6 +182,60 @@ describe("the gate's lifecycle", () => {
       expect(frames.filter((frame) => frame.startsWith("tick:"))).toEqual(["tick:before"]);
     });
 
+    it("stops forwarding the other way too: a frame the buyer sends afterwards does not reach the adapter's message listener", async () => {
+      const { socket, server, closed } = await openConnected();
+      const received: string[] = [];
+      server.on("message", (data) => received.push(String(data))); // as an adapter listens for the buyer's commands
+      socket.send("cmd:before");
+      await expect.poll(() => received).toContain("cmd:before");
+      const release = holdClose();
+
+      h.timers.fire(pendingDue(END_DUE));
+      await expect.poll(() => closes()).toHaveLength(1); // the close is waiting at the facilitator: forwarding has stopped
+      socket.send("cmd:after");
+      await settleDown(); // the frame has had time to arrive
+      release();
+
+      expect(await closed).toBe(4402);
+      expect(received).toEqual(["cmd:before"]);
+    });
+
+    it("forwards the buyer's frames again when it resumes, and drops the ones sent while forwarding was stopped", async () => {
+      const { session, socket, server } = await openConnected();
+      const received: string[] = [];
+      server.on("message", (data) => received.push(String(data)));
+      h.sessions.set(session, { ...h.sessions.get(session)!, deposited: 60_000n }); // paid for 60 s in all
+      let release!: () => void;
+      h.hold.readSession = new Promise<void>((resolve) => (release = resolve));
+      const reads = h.reads.session;
+
+      h.timers.fire(pendingDue(END_DUE));
+      await expect.poll(() => h.reads.session).toBe(reads + 1); // the re-read is waiting: forwarding has stopped
+      socket.send("cmd:muted");
+      await settleDown();
+      release();
+      await expect.poll(() => h.timers.pending.map((timer) => timer.dueMs)).toEqual([NOW_MS + 60_000]); // it has resumed
+      socket.send("cmd:resumed");
+
+      await expect.poll(() => received).toContain("cmd:resumed");
+      expect(received).toEqual(["cmd:resumed"]);
+    });
+
+    it("still delivers the buyer's own close to the adapter's close listener while forwarding is stopped", async () => {
+      const { socket, server } = await openConnected();
+      const release = holdClose();
+      h.timers.fire(pendingDue(END_DUE));
+      await expect.poll(() => closes()).toHaveLength(1);
+
+      const seen = once(server, "close");
+      socket.close(1000, "bye");
+      const [code] = await seen;
+      release();
+
+      expect(code).toBe(1000);
+      await expect.poll(() => h.calls.teardown).toEqual(["expired"]);
+    });
+
     it("settles an AtExpiry close, then drops the connection with 4402 and tears down once with the reason expired", async () => {
       const { session, closed } = await openConnected();
 

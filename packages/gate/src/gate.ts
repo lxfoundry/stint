@@ -66,8 +66,8 @@ interface Tracked<U> {
   paidUntil: bigint;
   /** Cancels each pending timer. */
   readonly pending: Partial<Record<TimerSlot, () => void>>;
-  /** While forwarding is stopped: each socket's own `send`, which `resume` puts back. */
-  muted?: Map<WebSocket, WebSocket["send"]>;
+  /** While forwarding is stopped: each socket's own `send` and `emit`, which `resume` puts back. */
+  muted?: Map<WebSocket, { send: WebSocket["send"]; emit: WebSocket["emit"] }>;
 }
 
 interface CloseOutcome {
@@ -124,6 +124,17 @@ const systemTimers: Timers = {
 function discard(...args: unknown[]): void {
   const done = args.at(-1);
   if (typeof done === "function") done();
+}
+
+/**
+ * Stands in for a muted socket's `emit`: `ws` delivers a frame the buyer sent by emitting `"message"`, and here that
+ * reaches no listener (the frame is dropped, not queued). Every other event, such as `"close"`, `"error"`, `"ping"` and
+ * `"pong"`, goes to the socket's own `emit` unchanged.
+ */
+function withholdMessages(emit: WebSocket["emit"]): WebSocket["emit"] {
+  return function (this: WebSocket, event: string | symbol, ...args: unknown[]): boolean {
+    return event === "message" ? false : emit.call(this, event, ...args);
+  } as WebSocket["emit"];
 }
 
 function parseUrl(request: IncomingMessage, origin: string): URL | undefined {
@@ -271,22 +282,31 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   }
 
   /**
-   * Stops forwarding: each socket's `send` drops what the adapter sends. The adapter is not asked to do anything. The idle
-   * timer is cleared too: the end close decides how the session ends from here on, and `resume` arms the idle timer again.
+   * Stops forwarding, both ways: each socket's `send` drops what the adapter sends, and its `emit` withholds the buyer's
+   * frames from the socket's `message` listeners, dropped and not queued. Control frames and every other event, the
+   * buyer's own close included, go through. The adapter is not asked to do anything. The idle timer is cleared too: the
+   * end close decides how the session ends from here on, and `resume` arms the idle timer again.
    */
   function mute(tracked: Tracked<U>): void {
     if (tracked.muted) return;
     disarm(tracked, "idle");
     tracked.muted = new Map();
     for (const socket of tracked.connections) {
-      tracked.muted.set(socket, socket.send);
+      const { send, emit } = socket;
+      tracked.muted.set(socket, { send, emit });
       socket.send = discard as WebSocket["send"];
+      socket.emit = withholdMessages(emit);
     }
   }
 
-  /** The session was paid for longer: forwarding resumes, and the end timer is set for the new end of the paid time. */
+  /** The session was paid for longer: forwarding resumes in both directions, and the end timer is set for the new end of the paid time. */
   function resume(tracked: Tracked<U>, until: bigint): void {
-    if (tracked.muted) for (const [socket, send] of tracked.muted) socket.send = send;
+    if (tracked.muted) {
+      for (const [socket, original] of tracked.muted) {
+        socket.send = original.send;
+        socket.emit = original.emit;
+      }
+    }
     tracked.muted = undefined;
     tracked.paidUntil = until;
     armEnd(tracked);
