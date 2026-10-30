@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { generateKeyPairSigner, type Address } from "@solana/kit";
 import type { WebSocket } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
@@ -316,6 +317,94 @@ describe("session tools (spec §9.5)", () => {
     await expect(refused).rejects.toBeInstanceOf(ToolError);
     await expect(refused).rejects.toThrow(text);
     expect(session.settlements()).toBe(before);
+  });
+
+  /**
+   * A session whose close the test holds in flight, over a socket the test can drop with a code.
+   * `settle` answers the oldest close the tools sent. The gate is not used: it cannot hold a settlement.
+   */
+  async function heldSession() {
+    const id = (await generateKeyPairSigner()).address;
+    const socket = Object.assign(new EventEmitter(), { OPEN: 1, readyState: 1, send: () => {}, close: () => {} });
+    const pending: ((receipt: CloseReceipt) => void)[] = [];
+    let sent = 0;
+    const client: StintClient = {
+      remainingBudget: () => 0n,
+      async open() {
+        return {
+          id,
+          gateUrl: "http://seller.test",
+          paidUntil: 0,
+          wsUrl: "ws://seller.test",
+          cost: 0n,
+          connect: async () => socket as unknown as WebSocket,
+          status: () => Promise.reject(new Error("not used")),
+          close: () =>
+            new Promise<CloseReceipt>((resolve) => {
+              sent++;
+              pending.push(resolve);
+            }),
+          [Symbol.asyncDispose]: async () => {},
+        };
+      },
+    };
+    const runtime = createSessionTools(client);
+    const { sessionId } = await runtime.tools.stint_open_session.run({ url: "http://seller.test", reason: "test" });
+    await runtime.tools.stint_send.run({ sessionId, message: "hello" });
+    return {
+      ...runtime,
+      sessionId,
+      /** The closes the tools have sent to the session, answered or not. */
+      closesSent: () => sent,
+      settle: () => pending.shift()?.({ transaction: "sig" }),
+      async dropWith(code: number) {
+        socket.emit("close", code, "test");
+        await expect.poll(() => runtime.closeCode(sessionId)).toBe(code);
+      },
+    };
+  }
+
+  it("does not refuse a close of the buyer's own still in flight, though the gate's 4410 has arrived", async () => {
+    const session = await heldSession();
+    const closing = session.tools.stint_close_session.run({ sessionId: session.sessionId });
+    await session.dropWith(4410);
+
+    const second = session.tools.stint_close_session.run({ sessionId: session.sessionId });
+    session.settle();
+
+    expect(await closing).toEqual({ transaction: "sig" });
+    expect(await second).toEqual({ transaction: "sig" });
+    expect(session.closesSent()).toBe(1);
+  });
+
+  it("makes closeAll wait for the buyer's own close in flight, though the gate's 4410 has arrived, and reports neither", async () => {
+    const session = await heldSession();
+    const closing = session.tools.stint_close_session.run({ sessionId: session.sessionId });
+    await session.dropWith(4410);
+
+    let finished = false;
+    const all = session.closeAll().then((outcome) => {
+      finished = true;
+      return outcome;
+    });
+    await tick();
+    expect(finished).toBe(false);
+
+    session.settle();
+    expect(await all).toEqual({ closed: [], failed: [] });
+    expect(await closing).toEqual({ transaction: "sig" });
+    expect(session.closesSent()).toBe(1);
+  });
+
+  it("names 4410 when a second close follows the buyer's own close, and sends no second close", async () => {
+    const session = await heldSession();
+    const closing = session.tools.stint_close_session.run({ sessionId: session.sessionId });
+    session.settle();
+    expect(await closing).toEqual({ transaction: "sig" });
+    await session.dropWith(4410);
+
+    await expect(session.tools.stint_close_session.run({ sessionId: session.sessionId })).rejects.toThrow("The session was closed (4410)");
+    expect(session.closesSent()).toBe(1);
   });
 
   it("still treats a session whose connection dropped with another code as open: closeAll closes it", async () => {
