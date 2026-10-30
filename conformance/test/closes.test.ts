@@ -32,14 +32,21 @@ function closeTransaction(session: Address, closedBy: Address) {
 const listed = (signature: string, err: unknown = null) => ({ signature, err, slot: 1n, blockTime: null, confirmationStatus: "confirmed", memo: null });
 
 /**
- * A node that answers each listing with the next of `listings` (the last repeating), and knows `transactions` by signature: a
- * transaction, or a function that answers each read of it (`null` is a node that cannot return it yet). `fetched` records every read.
+ * A node that answers each listing with the next of `listings` (the last repeating; an error is a listing that the node rejects),
+ * and knows `transactions` by signature: a transaction, or a function that answers each read of it (`null` is a node that cannot
+ * return it yet). `fetched` records every read.
  */
-function fakeRpc(listings: readonly (readonly ReturnType<typeof listed>[])[], transactions: Record<string, unknown>) {
+function fakeRpc(listings: readonly (readonly ReturnType<typeof listed>[] | Error)[], transactions: Record<string, unknown>) {
   const fetched: string[] = [];
   let lists = 0;
   const rpc = {
-    getSignaturesForAddress: () => ({ send: async () => listings[Math.min(lists++, listings.length - 1)] }),
+    getSignaturesForAddress: () => ({
+      send: async () => {
+        const next = listings[Math.min(lists++, listings.length - 1)]!;
+        if (next instanceof Error) throw next;
+        return next;
+      },
+    }),
     getTransaction: (read: string) => ({
       send: async () => {
         fetched.push(read);
@@ -99,6 +106,19 @@ describe("the close of a session that someone else closed", () => {
     const { rpc, fetched } = fakeRpc([[listed(CLOSE)]], { [CLOSE]: () => (reads++ === 0 ? null : closeTransaction(session, other)) });
     expect((await awaitClose(rpc, session, retry, 5_000, "the close shows up", 1)).signature).toBe(CLOSE);
     expect(fetched).toEqual([CLOSE, CLOSE]);
+  });
+
+  it("is waited for through a listing that the node rejects, such as a rate limit, and looked for again", async () => {
+    const { rpc } = fakeRpc([new Error("HTTP error (429): Too Many Requests"), [listed(CLOSE)]], { [CLOSE]: closeTransaction(session, other) });
+    expect((await awaitClose(rpc, session, retry, 5_000, "the close shows up", 1)).signature).toBe(CLOSE);
+  });
+
+  it("is waited for no longer than the limit when every listing is rejected, and the error names what was awaited and why the last look failed", async () => {
+    const rejected = new Error("HTTP error (429): Too Many Requests");
+    const error = await awaitClose(fakeRpc([rejected], {}).rpc, session, retry, 30, "the sweeper closes the session", 5).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("the sweeper closes the session: not within 30 ms");
+    expect((error as Error).cause).toBe(rejected);
   });
 
   it("is waited for no longer than the limit, and the error names what was awaited", async () => {
