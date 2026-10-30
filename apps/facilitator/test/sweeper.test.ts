@@ -60,6 +60,8 @@ interface Node {
   refuse: Set<Address>;
   /** Makes every listing fail with this message. */
   listingError?: string;
+  /** Makes every listing hold all the accounts, as an endpoint that does not apply the filters would. */
+  ignoreFilters?: boolean;
   /** Holds every submission until it settles. */
   hold?: Promise<void>;
   /** Runs after a listing has been answered. */
@@ -97,7 +99,7 @@ function createChain(): { node: Node; rpc: Rpc<SolanaRpcApi>; scanRpc: Rpc<Solan
         node.listings.push({ program, config });
         if (node.listingError) throw new Error(node.listingError);
         const listed = [...node.accounts]
-          .filter(([, data]) => config.filters.every((filter) => matches(data, filter)))
+          .filter(([, data]) => node.ignoreFilters || config.filters.every((filter) => matches(data, filter)))
           .map(([pubkey, data]) => ({ pubkey, account: rpcAccount(data) }));
         node.onListed?.();
         return listed;
@@ -243,6 +245,19 @@ describe("the sweeper (spec §6.4)", () => {
     ]);
     // The fake applied those filters to the real layout: the other rent payer's session was never listed, so never read.
     expect(fake.node.reads).toEqual([ours]);
+  });
+
+  it("closes only the sessions that name its rent payer, whatever the listing holds: it checks the account it reads", async () => {
+    const ours = await addSession();
+    const theirs = await addSession({ rentPayer: stranger.address });
+    fake.node.ignoreFilters = true; // a scan endpoint that lists every session, expired or not, whoever pays its rent
+
+    expect(await sweeper().sweepOnce()).toEqual({ closed: [ours], failed: [] });
+
+    expect(fake.node.reads).toEqual([ours, theirs]);
+    expect(fake.node.sent.map(({ session }) => session)).toEqual([ours]);
+    expect(fake.node.accounts.has(theirs)).toBe(true);
+    expect(logs).toEqual([{ event: "sweep", closed: [ours], failed: [] }]);
   });
 
   it("closes an expired session with AtExpiry, signed by the rent payer and by Kora's fee payer", async () => {

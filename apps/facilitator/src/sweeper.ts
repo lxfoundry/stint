@@ -102,11 +102,12 @@ export function createSweeper(deps: SweeperDeps): Sweeper {
       .map(({ pubkey }) => pubkey);
   }
 
-  /** Closes one session; throws when the close fails. "skipped": it is gone, or no longer expired. */
+  /** Closes one session; throws when the close fails. "skipped": it is gone, no longer expired, or not ours to close. */
   async function closeOne(session: Address, now: bigint): Promise<"closed" | "skipped"> {
-    // The listing may be old, or from another node: the gate or another instance may have closed the session since.
+    // The listing may be old, or from another node: the gate or another instance may have closed the session since. The scan
+    // endpoint may be a third party's, too: the filters it was asked for are not taken on trust, because a close costs a fee.
     const current = await fetchMaybeSession(ctx.rpc, session, { commitment: "confirmed" });
-    if (!current.exists || paidUntil(current.data) > now) return "skipped";
+    if (!current.exists || current.data.rentPayer !== ctx.keys.rentPayer || paidUntil(current.data) > now) return "skipped";
     const stored = current.data;
 
     const { value: lifetime } = await ctx.rpc.getLatestBlockhash({ commitment: "confirmed" }).send();
