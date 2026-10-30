@@ -6,5 +6,6 @@
  * @see https://github.com/codama-idl/codama
  */
 
+export * from "./claim.js";
 export * from "./close.js";
 export * from "./open.js";

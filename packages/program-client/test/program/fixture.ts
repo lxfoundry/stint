@@ -34,6 +34,7 @@ import {
   STINT_PROGRAM_ADDRESS,
   eventAccounts,
   findSessionPda,
+  getClaimInstruction,
   getCloseInstruction,
   getOpenInstruction,
   getSessionDecoder,
@@ -82,6 +83,12 @@ export interface CloseOptions {
   readonly receiverToken?: Address;
   readonly refundTo?: Address;
   readonly rentPayer?: Address;
+}
+
+export interface ClaimOptions {
+  readonly session: Address;
+  readonly vault?: Address;
+  readonly receiverToken?: Address;
 }
 
 export interface Opened {
@@ -276,6 +283,23 @@ export class Fixture {
     });
     const sent = await this.send([...fund, open]);
     return { session, vault, sent };
+  }
+
+  /**
+   * `claim`, with each account derived from the stored session unless overridden. The instruction has no signer: the
+   * fixture's payer signs as the fee payer and nothing else.
+   */
+  async claim(options: ClaimOptions): Promise<Sent> {
+    const account = this.svm.getAccount(options.session);
+    if (!account.exists) throw new Error(`no session at ${options.session}`);
+    const stored = getSessionDecoder().decode(account.data);
+    const instruction = getClaimInstruction({
+      session: options.session,
+      vault: options.vault ?? (await this.ata(options.session)),
+      receiverToken: options.receiverToken ?? (await this.ata(stored.receiver)),
+      ...(await eventAccounts()),
+    });
+    return this.send([instruction]);
   }
 
   /** `close`, with each account derived from the stored session unless overridden. */

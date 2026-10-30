@@ -40,12 +40,16 @@ import {
   type SessionArgs,
 } from "../accounts/index.js";
 import {
+  getClaimInstruction,
   getCloseInstruction,
   getOpenInstructionAsync,
+  parseClaimInstruction,
   parseCloseInstruction,
   parseOpenInstruction,
+  type ClaimInput,
   type CloseInput,
   type OpenAsyncInput,
+  type ParsedClaimInstruction,
   type ParsedCloseInstruction,
   type ParsedOpenInstruction,
 } from "../instructions/index.js";
@@ -140,6 +144,7 @@ export function identifyStintEvent(
 }
 
 export enum StintInstruction {
+  Claim,
   Close,
   Open,
 }
@@ -148,6 +153,17 @@ export function identifyStintInstruction(
   instruction: { data: ReadonlyUint8Array } | ReadonlyUint8Array,
 ): StintInstruction {
   const data = "data" in instruction ? instruction.data : instruction;
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([62, 198, 214, 193, 213, 159, 108, 210]),
+      ),
+      0,
+    )
+  ) {
+    return StintInstruction.Claim;
+  }
   if (
     containsBytes(
       data,
@@ -180,6 +196,9 @@ export type ParsedStintInstruction<
   TProgram extends string = "5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr",
 > =
   | ({
+      instructionType: StintInstruction.Claim;
+    } & ParsedClaimInstruction<TProgram>)
+  | ({
       instructionType: StintInstruction.Close;
     } & ParsedCloseInstruction<TProgram>)
   | ({
@@ -191,6 +210,13 @@ export function parseStintInstruction<TProgram extends string>(
 ): ParsedStintInstruction<TProgram> {
   const instructionType = identifyStintInstruction(instruction);
   switch (instructionType) {
+    case StintInstruction.Claim: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: StintInstruction.Claim,
+        ...parseClaimInstruction(instruction),
+      };
+    }
     case StintInstruction.Close: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -228,6 +254,10 @@ export type StintPluginAccounts = {
 };
 
 export type StintPluginInstructions = {
+  claim: (
+    input: ClaimInput,
+    config?: { programAddress?: Address | HasAddress },
+  ) => ReturnType<typeof getClaimInstruction> & SelfPlanAndSendFunctions;
   close: (
     input: CloseInput,
     config?: { programAddress?: Address | HasAddress },
@@ -256,6 +286,14 @@ export function stintProgram(
       stint: <StintPlugin>{
         accounts: { session: addSelfFetchFunctions(client, getSessionCodec()) },
         instructions: {
+          claim: (input, instructionConfig) =>
+            addSelfPlanAndSendFunctions(
+              client,
+              getClaimInstruction(input, {
+                programAddress:
+                  instructionConfig?.programAddress ?? config.programAddress,
+              }),
+            ),
           close: (input, instructionConfig) =>
             addSelfPlanAndSendFunctions(
               client,
