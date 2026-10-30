@@ -92,7 +92,10 @@ async function expectStandardClose({ context }: Shared, buyer: Buyer, stored: Se
   expectEqual(changes.get(buyer.usdcAccount), closed.refunded, "the buyer's refund in the close");
 }
 
-/** (a) Connect, drop, stay away past the grace period: the gate closes the session, no sooner than the grace period after the drop. */
+/**
+ * (a) Connect, drop, stay away past the grace period: the gate closes the session, no sooner than the grace period after the drop,
+ * and within 5 s of the end of the grace period.
+ */
 async function disconnectedPastGrace(shared: Shared, buyer: Buyer): Promise<void> {
   const { context, grace } = shared;
   const { session, stored } = await openSession(shared, buyer);
@@ -139,7 +142,10 @@ async function reconnectedWithinGrace(shared: Shared, buyer: Buyer): Promise<voi
   await waitFor(() => second.seen.code === 4410, 5_000, "the connection is dropped with 4410");
 }
 
-/** (c) Never connect: the gate closes the session, no sooner than the grace period after the open. */
+/**
+ * (c) Never connect: the gate closes the session, no sooner than the grace period after the open, and within 5 s of the end of the
+ * grace period.
+ */
 async function neverConnected(shared: Shared, buyer: Buyer): Promise<void> {
   const { context, grace } = shared;
   const { session, stored, openedAt } = await openSession(shared, buyer);
