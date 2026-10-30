@@ -270,9 +270,13 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     arm(tracked, "end", Number(tracked.paidUntil) * 1000, expire);
   }
 
-  /** Stops forwarding: each socket's `send` drops what the adapter sends. The adapter is not asked to do anything. */
+  /**
+   * Stops forwarding: each socket's `send` drops what the adapter sends. The adapter is not asked to do anything. The idle
+   * timer is cleared too: the end close decides how the session ends from here on, and `resume` arms the idle timer again.
+   */
   function mute(tracked: Tracked<U>): void {
     if (tracked.muted) return;
+    disarm(tracked, "idle");
     tracked.muted = new Map();
     for (const socket of tracked.connections) {
       tracked.muted.set(socket, socket.send);
@@ -322,7 +326,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   /**
    * Re-reads the session at `confirmed`, once. True when that settles the matter: the session ended meanwhile; or its
    * account is gone or holds another session, so it ends here with 4402; or `paid_until` moved later on the same
-   * session, so it runs on. A read that fails settles nothing.
+   * session, so it runs on. A read that fails settles nothing, and neither does one that returns while a close is in
+   * flight: that close ends the session, with its own reason and code.
    *
    * One read, not `readRetry`'s several: the account was read when the open settled, so finding nothing now means it has
    * closed, not that the RPC has yet to see it. An account at the address that started at another moment, or on other
@@ -333,6 +338,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     try {
       const stored = await upstream(() => config.chain.readSession(tracked.info.session));
       if (tracked.ended) return true;
+      // A close that started during the read decides: it is the reason the account may be gone, and it ends the session.
+      if (tracked.closing) return false;
       if (!stored || stored.startedAt !== tracked.stored.startedAt || !sessionMatches(stored, seller)) {
         await end(tracked, "expired", CLOSE_CODES.PAID_TIME_ENDED);
         return true;

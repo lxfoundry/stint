@@ -244,6 +244,28 @@ describe("the gate's lifecycle", () => {
       expect(h.calls.teardown).toEqual(["closed"]);
     });
 
+    it("ends the session as closed, with 4410, when a buyer's close starts during its re-read and lands before the read returns", async () => {
+      const { session, closed } = await openConnected();
+      let release!: () => void;
+      h.hold.readSession = new Promise<void>((resolve) => (release = resolve));
+      const reads = h.reads.session;
+
+      h.timers.fire(pendingDue(END_DUE));
+      await expect.poll(() => h.reads.session).toBe(reads + 1); // the re-read is waiting
+      // The close lands on the chain, and the re-read returns while the gate still reads the close's event.
+      h.missing.closedEvent = 1;
+      h.onSettleClose = () => {
+        h.sessions.delete(session);
+        release();
+      };
+      const buyer = await closeWith(session);
+
+      expect(buyer.status).toBe(200);
+      expect(await closed).toBe(4410);
+      expect(h.calls.teardown).toEqual(["closed"]);
+      expect(closes()).toHaveLength(1);
+    });
+
     it("does not arm the idle timer when the last connection drops while forwarding is stopped", async () => {
       const { socket } = await openConnected();
       const release = holdClose();
@@ -255,6 +277,26 @@ describe("the gate's lifecycle", () => {
       release();
 
       await expect.poll(() => h.calls.teardown).toEqual(["expired"]);
+    });
+
+    it("clears an idle timer that was waiting, so that the end close decides how the session ends", async () => {
+      const { socket } = await openConnected();
+      h.clock.now = NOW_MS + 25_000;
+      await drop(socket, h.attached[0]!);
+      const idle = pendingDue(NOW_MS + 25_000 + IDLE_MS); // it would fire at 35 s, after the paid time ran out and while the end close is retried
+      h.fail.settleClose = true;
+
+      h.timers.fire(pendingDue(END_DUE));
+
+      await expect.poll(() => h.timers.pending.some((timer) => timer.delayMs === 3_000)).toBe(true); // the end close failed, and is tried again
+      expect(closes()).toHaveLength(1);
+      expect(idle.cleared).toBe(true);
+      expect(idleTimers()).toEqual([]);
+      h.fail.settleClose = false;
+      h.timers.fire(h.timers.pending[0]!);
+
+      await expect.poll(() => h.calls.teardown).toEqual(["expired"]);
+      expect(closes().map(closeKindOf)).toEqual([CloseKind.AtExpiry, CloseKind.AtExpiry]);
     });
 
     it("ends the session with 4402, with no close, when the account is already gone, after a single read", async () => {
@@ -447,6 +489,7 @@ describe("a gate with no timings configured", () => {
 
     d.timers.fire(d.timers.pending.find((timer) => timer.delayMs === 30_000)!);
 
-    await expect.poll(() => d.timers.pending.map((timer) => timer.delayMs).sort((a, b) => a - b)).toEqual([2_000, 60_000]);
+    // The 60 s idle timer is not among them: the end timer's firing cleared it.
+    await expect.poll(() => d.timers.pending.map((timer) => timer.delayMs)).toEqual([2_000]);
   });
 });

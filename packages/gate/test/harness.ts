@@ -77,7 +77,7 @@ export interface Harness {
   sessions: Map<Address, Session>;
   /** Faults and pauses a test switches on. */
   fail: { supported: boolean; settleClose: boolean; closedEvent: boolean; provision: boolean; teardown: boolean };
-  hold: { provision?: Promise<void>; settleClose?: Promise<void> };
+  hold: { provision?: Promise<void>; settleClose?: Promise<void>; readSession?: Promise<void> };
   /** Runs inside the fake facilitator's close, after `hold` and before `fail`: a test changes the chain here. */
   onSettleClose?: () => void;
   /** How many reads the fake chain answers with nothing before the real answer, and the reads made. */
@@ -127,7 +127,12 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
 
   const chain: GateChain = {
     latestBlockhash: async () => ({ blockhash: "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N", lastValidBlockHeight: 100n }),
-    readSession: async (session) => (harness.reads.session++ < harness.missing.session ? undefined : harness.sessions.get(session)),
+    // A held read is counted when it starts and answers with the chain as it is when it is released.
+    readSession: async (session) => {
+      const missing = harness.reads.session++ < harness.missing.session;
+      await harness.hold.readSession;
+      return missing ? undefined : harness.sessions.get(session);
+    },
     closedEvent: async () => {
       if (harness.fail.closedEvent) throw new Error("rpc down");
       if (harness.reads.closedEvent++ < harness.missing.closedEvent) return undefined;
