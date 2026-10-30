@@ -1,4 +1,5 @@
-import { fetchMaybeSession } from "@lxfoundry/stint-program-client";
+import { findClose } from "@lxfoundry/stint-conformance";
+import { CloseKind, fetchMaybeSession } from "@lxfoundry/stint-program-client";
 import type { Address } from "@solana/kit";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sendSol } from "../src/devnet/funds.js";
@@ -58,5 +59,15 @@ describe("the lookup of a close, on the local node (spec §7.3)", () => {
     expect(entries.length).toBeGreaterThanOrEqual(3);
     expect(entries[0]?.signature).not.toBe(signature);
     expect(entries[1]?.signature).toBe(signature);
+  });
+
+  it("finds the close with the helper the scenarios use, below a later transfer", async () => {
+    const { buyer, opened, signature } = await closedSession();
+    await sendLamportsTo(opened.session);
+
+    const found = await findClose(stack.network.rpc, opened.session, { attempts: 1, delayMs: 0 });
+
+    expect(found?.signature).toBe(signature);
+    expect(found?.event).toMatchObject({ session: opened.session, kind: CloseKind.Standard, closedBy: buyer.signer.address });
   });
 });
