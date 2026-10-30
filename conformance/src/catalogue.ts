@@ -1,5 +1,6 @@
 import { openConnectCloseEarly } from "./scenarios/01-open-connect-close.js";
 import { closeBeforeMinSeconds } from "./scenarios/02-close-before-min-seconds.js";
+import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
 import type { Capability, IsolationGroup, Scenario } from "./types.js";
@@ -34,7 +35,7 @@ export const catalogue: readonly Scenario[] = [
   pending(6, "Failed payment"),
   pending(7, "Unilateral on-chain close"),
   pending(8, "Token: expired, wrong aud, wrong purpose, replayed"),
-  pending(9, "Disconnect past the grace period; reconnect within it; never connect"),
+  required(9, "Disconnect past the grace period; reconnect within it; never connect", disconnectAndGrace),
   pending(10, "Resource outage", ["stack"], "ownStack"),
   pending(11, "Two gate instances, reconnecting elsewhere", ["stack"], "ownStack"),
   pending(12, "Allowance funding", ["allowance"]),
