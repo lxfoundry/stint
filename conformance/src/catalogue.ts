@@ -1,5 +1,6 @@
 import { openConnectCloseEarly } from "./scenarios/01-open-connect-close.js";
 import { closeBeforeMinSeconds } from "./scenarios/02-close-before-min-seconds.js";
+import { expiry } from "./scenarios/03-expiry.js";
 import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
@@ -29,7 +30,7 @@ function required(
 export const catalogue: readonly Scenario[] = [
   required(1, "Open, connect, close early", openConnectCloseEarly),
   required(2, "Close before minSeconds", closeBeforeMinSeconds),
-  pending(3, "Expiry"),
+  required(3, "Expiry", expiry),
   pending(4, "Top-up before and after expiry"),
   pending(5, "Payment with wrong terms, a wrong amount, or a Memo instruction"),
   pending(6, "Failed payment"),
