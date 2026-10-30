@@ -5,6 +5,7 @@ import {
   CloseKind,
   STINT_ERROR__ACCOUNT_MISMATCH,
   STINT_ERROR__INVALID_TERMS,
+  STINT_ERROR__NOT_EXPIRED,
   STINT_ERROR__UNAUTHORIZED,
   findClosedEvent,
 } from "../../src/index.js";
@@ -261,9 +262,135 @@ describe("close (Standard)", () => {
     },
   );
 
-  it.each([CloseKind.AtExpiry, CloseKind.WaiveMinimum])("does not support kind %s yet", async (kind) => {
-    const { session } = await openAndWait(30n);
-    const sent = await fixture.close({ session, closer: fixture.receiverAuthorizer, kind });
+  it.each([8n, 30n])("refuses kind WaiveMinimum with InvalidTerms, %s s after the start", async (seconds) => {
+    const { session } = await openAndWait(seconds);
+    const sent = await fixture.close({ session, closer: fixture.receiverAuthorizer, kind: CloseKind.WaiveMinimum });
     expect(sent.errorCode).toBe(STINT_ERROR__INVALID_TERMS);
+  });
+});
+
+describe("close (AtExpiry)", () => {
+  let fixture: Fixture;
+  let buyer: Wallet;
+  let startedAt: bigint;
+
+  beforeEach(async () => {
+    fixture = await Fixture.create();
+    buyer = await fixture.wallet(1_000_000n);
+    startedAt = fixture.now();
+  });
+
+  /** Opens `deposit` at 1,000 per second (minimum 5 s), then moves the clock `seconds` forward. */
+  async function openAndWait(seconds: bigint, deposit = 30_000n) {
+    const opened = await fixture.open({ authority: buyer, deposit });
+    expect(opened.sent.ok, opened.sent.logs.join("\n")).toBe(true);
+    fixture.setNow(startedAt + seconds);
+    return opened;
+  }
+
+  it.each([29n, -100n])("fails with NotExpired %s s after the start, for any signer, and changes nothing", async (seconds) => {
+    const { session, vault } = await openAndWait(seconds);
+    const stranger = await generateKeyPairSigner();
+
+    for (const closer of [buyer.signer, fixture.receiverAuthorizer, stranger]) {
+      const sent = await fixture.close({ session, closer, kind: CloseKind.AtExpiry });
+      expect(sent.errorCode).toBe(STINT_ERROR__NOT_EXPIRED);
+    }
+
+    expect(fixture.exists(session)).toBe(true);
+    expect(fixture.tokenAmount(vault)).toBe(30_000n);
+    expect(fixture.tokenAmount(fixture.seller.token)).toBe(0n);
+  });
+
+  it.each(["stranger", "authority", "receiverAuthorizer"] as const)(
+    "accepts the %s at paid_until, charges the whole covered time and returns the rent",
+    async (who) => {
+      const { session, vault } = await openAndWait(30n);
+      const closer =
+        who === "authority" ? buyer.signer : who === "receiverAuthorizer" ? fixture.receiverAuthorizer : await generateKeyPairSigner();
+      const rentBefore = fixture.lamportsOf(fixture.rentPayer.address);
+      const deposits = fixture.lamportsOf(session) + fixture.lamportsOf(vault);
+
+      const sent = await fixture.close({ session, closer, kind: CloseKind.AtExpiry });
+
+      expect(sent.ok, sent.logs.join("\n")).toBe(true);
+      expect(findClosedEvent(sent.inner)).toMatchObject({
+        session,
+        kind: CloseKind.AtExpiry,
+        claimed: 0n,
+        owed: 30_000n,
+        refunded: 0n,
+        redirected: 0n,
+        closedBy: closer.address,
+        paidUntil: startedAt + 30n,
+        at: startedAt + 30n,
+      });
+      expect(fixture.tokenAmount(fixture.seller.token)).toBe(30_000n);
+      expect(fixture.exists(session)).toBe(false);
+      expect(fixture.exists(vault)).toBe(false);
+      expect(fixture.lamportsOf(fixture.rentPayer.address) - rentBefore).toBe(deposits);
+    },
+  );
+
+  it("charges the whole covered time after paid_until, and refunds the rounding remainder", async () => {
+    const { session } = await openAndWait(60n, 30_500n);
+    const buyerBefore = fixture.tokenAmount(buyer.token)!;
+
+    const sent = await fixture.close({ session, closer: await generateKeyPairSigner(), kind: CloseKind.AtExpiry });
+
+    expect(sent.ok, sent.logs.join("\n")).toBe(true);
+    expect(findClosedEvent(sent.inner)).toMatchObject({
+      kind: CloseKind.AtExpiry,
+      owed: 30_000n,
+      refunded: 500n,
+      redirected: 0n,
+      paidUntil: startedAt + 30n,
+      at: startedAt + 60n,
+    });
+    expect(fixture.tokenAmount(fixture.seller.token)).toBe(30_000n);
+    expect(fixture.tokenAmount(buyer.token)! - buyerBefore).toBe(500n);
+  });
+
+  it("pays only the rest after earlier claims: claimed + owed + refunded is the deposit", async () => {
+    const { session } = await openAndWait(0n, 30_500n);
+    for (const seconds of [4n, 11n]) {
+      fixture.setNow(startedAt + seconds);
+      const claimed = await fixture.claim({ session });
+      expect(claimed.ok, claimed.logs.join("\n")).toBe(true);
+    }
+    fixture.setNow(startedAt + 30n);
+
+    const sent = await fixture.close({ session, closer: await generateKeyPairSigner(), kind: CloseKind.AtExpiry });
+
+    expect(sent.ok, sent.logs.join("\n")).toBe(true);
+    const closed = findClosedEvent(sent.inner)!;
+    expect(closed).toMatchObject({ claimed: 11_000n, owed: 19_000n, refunded: 500n, redirected: 0n });
+    expect(closed.claimed + closed.owed + closed.refunded + closed.redirected).toBe(30_500n);
+    expect(fixture.tokenAmount(fixture.seller.token)).toBe(30_000n);
+  });
+
+  it("still redirects a residual to the receiver when the refund account is closed", async () => {
+    const { session } = await openAndWait(30n, 30_500n);
+    fixture.removeAccount(buyer.token);
+
+    const sent = await fixture.close({ session, closer: await generateKeyPairSigner(), kind: CloseKind.AtExpiry });
+
+    expect(sent.ok, sent.logs.join("\n")).toBe(true);
+    expect(findClosedEvent(sent.inner)).toMatchObject({ owed: 30_000n, refunded: 0n, redirected: 500n });
+    expect(fixture.tokenAmount(fixture.seller.token)).toBe(30_500n);
+  });
+
+  it("accepts the rent payer itself as the closer, and the rent still returns to it", async () => {
+    const { session, vault } = await openAndWait(30n);
+    const rentBefore = fixture.lamportsOf(fixture.rentPayer.address);
+    const deposits = fixture.lamportsOf(session) + fixture.lamportsOf(vault);
+
+    const sent = await fixture.close({ session, closer: fixture.rentPayer, kind: CloseKind.AtExpiry });
+
+    expect(sent.ok, sent.logs.join("\n")).toBe(true);
+    expect(findClosedEvent(sent.inner)).toMatchObject({ closedBy: fixture.rentPayer.address, owed: 30_000n });
+    expect(fixture.tokenAmount(fixture.seller.token)).toBe(30_000n);
+    expect(fixture.exists(session)).toBe(false);
+    expect(fixture.lamportsOf(fixture.rentPayer.address) - rentBefore).toBe(deposits);
   });
 });

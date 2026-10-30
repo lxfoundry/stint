@@ -26,6 +26,52 @@ export interface Buyer {
   readonly usdcAccount: Address;
 }
 
+/** What a scenario may do to the services that the target runs (spec §12.2). */
+export interface StackControl {
+  /** The facilitator's rent payer: its sweeper signs closes as this key, and a session that names it as rent payer is the sweeper's. */
+  readonly rentPayer: Address;
+  /** Stops the gate and its connections. The facilitator, its sweeper and Kora keep running. */
+  stopGate(): Promise<void>;
+  /** Starts the gate again on the port it had, so that `gateUrl` stays valid. The new gate has no memory of earlier sessions. */
+  startGate(): Promise<void>;
+}
+
+/** A session opened straight on the program, with no gate and no facilitator: nothing of the stack holds it. */
+export interface DirectSession {
+  readonly session: Address;
+  readonly vault: Address;
+  /** A harness key that is not the facilitator's: the rent of the session account and its vault returns to it at the close. */
+  readonly rentPayer: Address;
+  /** The seller's token account, which a close pays. */
+  readonly receiverToken: Address;
+  /** The buyer's USDC account, which a close refunds. */
+  readonly refundTo: Address;
+  /** The whole deposit, the remainder included: the session account's `deposited`. */
+  readonly deposit: bigint;
+  /** The chain's clock when the session opened, in seconds. */
+  readonly startedAt: bigint;
+  /** On the chain's clock, in seconds. */
+  readonly paidUntil: bigint;
+}
+
+/** Opens and closes sessions straight on the program (spec §12.2). */
+export interface DirectChain {
+  /**
+   * Opens a session: the buyer funds the vault, and the rent payer and the receiver authorizer are harness keys, not the
+   * stack's. `seconds` is a whole number between the offer's minimum and maximum. `remainder` (default 0) is a number of base
+   * units, below the rate, that the buyer adds to the vault: the deposit is `rate x seconds + remainder`, the session is paid
+   * for `seconds`, and a close from the paid time on pays `rate x seconds` and refunds the remainder.
+   */
+  open(options: { readonly buyer: Buyer; readonly seconds: number; readonly remainder?: bigint }): Promise<DirectSession>;
+  /**
+   * A `Standard` close signed by `closer`, which may be any key and needs no SOL: a harness key pays the fee. Returns the
+   * transaction's signature, and rejects if the program refuses the close.
+   */
+  close(session: DirectSession, closer: KeyPairSigner): Promise<string>;
+  /** A new key that holds nothing. */
+  newKey(): Promise<KeyPairSigner>;
+}
+
 /** What a scenario receives when it runs. */
 export interface ScenarioContext {
   readonly target: Target;
@@ -51,6 +97,10 @@ export interface ScenarioContext {
    * where the node is ours; several on a network that is not (spec §12.2).
    */
   readonly readRetry: RetryOptions;
+  /** Control of the gate that the target runs. Absent on a target whose services the harness does not run. */
+  readonly stack?: StackControl;
+  /** Sessions opened and closed straight on the program. Absent where the harness holds none of the keys to do it with. */
+  readonly direct?: DirectChain;
 }
 
 export interface Scenario {

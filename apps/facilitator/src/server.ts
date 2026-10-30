@@ -6,6 +6,7 @@ import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import { HttpError, SCHEME, X402_VERSION, readJson, sendJson, type Network, type RetryOptions, type SupportedResponse } from "@lxfoundry/stint-x402";
 import { createKoraClient } from "./kora.js";
 import { settlePayment } from "./settle.js";
+import { DEFAULT_SWEEP_INTERVAL_MS, createSweeper, type SweepReport, type SweeperConfig } from "./sweeper.js";
 import { verifyPayment, type FacilitatorContext } from "./verify.js";
 
 export interface FacilitatorConfig {
@@ -22,6 +23,8 @@ export interface FacilitatorConfig {
   readonly confirmTimeoutMs?: number;
   /** How a confirmed close's transaction is re-read while the node returns nothing (default 5 reads, 400 ms apart). */
   readonly readRetry?: RetryOptions;
+  /** Absent: no periodic sweep (spec §6.4). `sweepOnce()` works either way. */
+  readonly sweeper?: SweeperConfig;
   readonly log?: (entry: Record<string, unknown>) => void;
 }
 
@@ -30,6 +33,9 @@ export interface RunningFacilitator {
   readonly closeUrl: string;
   readonly feePayer: Address;
   readonly rentPayer: Address;
+  /** Runs one sweep of expired sessions now (spec §12.4); a sweep already in flight is joined. */
+  sweepOnce(): Promise<SweepReport>;
+  /** Ends the sweeper's interval and waits for a sweep in flight, then stops the server. */
   stop(): Promise<void>;
 }
 
@@ -61,6 +67,13 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
     confirmTimeoutMs: config.confirmTimeoutMs ?? 30_000,
     readRetry: config.readRetry,
   };
+  // The sweeper builds and signs its own closes with `ctx`: they do not pass `verifyPayment`, which refuses the rent payer as a closer.
+  const sweeper = createSweeper({
+    ctx,
+    scanRpc: config.sweeper?.scanRpcUrl ? createSolanaRpc(config.sweeper.scanRpcUrl) : ctx.rpc,
+    clock: config.sweeper?.clock ?? Date.now,
+    log,
+  });
   const host = config.host ?? "127.0.0.1";
   let url = "";
 
@@ -116,16 +129,22 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
     server.listen(config.port ?? 0, host, resolve);
   });
   url = `http://${host}:${(server.address() as AddressInfo).port}`;
+  // Started only once the server listens, so that a start that fails leaves no timer behind.
+  if (config.sweeper) sweeper.start(config.sweeper.intervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
 
   return {
     url,
     closeUrl: `${url}/close`,
     feePayer,
     rentPayer: rentPayer.address,
-    stop: () =>
-      new Promise<void>((resolve) => {
+    sweepOnce: () => sweeper.sweepOnce(),
+    stop: async () => {
+      // The sweeper first: a close it has sent is waited for before the server goes.
+      await sweeper.stop();
+      await new Promise<void>((resolve) => {
         server.closeAllConnections();
         server.close(() => resolve());
-      }),
+      });
+    },
   };
 }

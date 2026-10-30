@@ -1,13 +1,14 @@
 import { fetchMaybeToken } from "@solana-program/token";
 import { createSolanaRpc, type Rpc, type SolanaRpcApi } from "@solana/kit";
-import { describeError, type ScenarioContext, type Target } from "@lxfoundry/stint-conformance";
+import { describeError, type ScenarioContext, type StackControl, type Target } from "@lxfoundry/stint-conformance";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import { assertDevnet, assertProgramDeployed } from "../devnet/config.js";
 import { cleanUp, fundUsdcAccount, sendSol, type Funding } from "../devnet/funds.js";
 import { KEY_INDEX, deriveKey, deriveKeys, type DevnetKeys } from "../devnet/keys.js";
 import { sendUsdc } from "../fixtures/transfers.js";
 import { USDC_DEVNET_MINT } from "../fixtures/usdc.js";
-import { startServices, type ServiceKeys, type Services } from "./services.js";
+import { createDirectChain } from "./direct.js";
+import { TEST_TERMS, startServices, type ServiceKeys, type Services } from "./services.js";
 
 /** What the funding key must hold to start: fees and rent for the stack, and the buyers' USDC. */
 const MINIMUM_FUNDS = { lamports: 500_000_000n, usdc: 5_000_000n };
@@ -21,6 +22,11 @@ const STACK_LAMPORTS = 50_000_000n;
 const SUBSCRIPTION_SETTLE_MS = 5_000;
 /** How a scenario reads the chain for what its own transaction did: the services' read retry, since the same node answers. */
 const READ_RETRY = { attempts: 20, delayMs: 500 };
+/**
+ * What the rent payer of sessions opened straight on the program is given: the rent of a session account and its vault, about
+ * 4.7 million lamports, for a few sessions at once, with the rent-exempt minimum left on the key. The clean-up returns what is left.
+ */
+const DIRECT_RENT_LAMPORTS = 20_000_000n;
 
 export interface DevnetStackOptions {
   readonly rpcUrl: string;
@@ -144,6 +150,10 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
       // Devnet's blockhashes last about 36 s: an offer may not outlast its own (spec §5.1).
       maxTimeoutSeconds: 30,
       readRetry: READ_RETRY,
+      // The sweeper lists the program's accounts where the clean-up does.
+      scanRpcUrl: options.scanRpcUrl,
+      // Keeps the sweeper's `getProgramAccounts` within the public endpoint's rate limits.
+      sweeperIntervalMs: 5_000,
     });
   } catch (error) {
     report(await cleanUp(rpc, funding, keys.holders, send, scanRpc));
@@ -153,6 +163,34 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
   const target: Target = { name: "devnet", capabilities: new Set(["stack", "facilitatorApi"]) };
   let nextBuyer = 0;
   let stopping: Promise<void> | undefined;
+  /** What the run has lent its buyers from the funding key. It comes back only at the clean-up, so it must fit in what a start-up requires. */
+  let lent = 0n;
+  /** The next key of the pool. Buyers and the rent payer of direct sessions draw from it alike, so that the clean-up covers every one. */
+  const takeKey = () => {
+    const key = keys.buyers[nextBuyer++];
+    if (!key) throw new Error(`The run used all ${keys.buyers.length} buyer keys: raise BUYER_POOL in e2e/src/devnet/keys.ts`);
+    return key;
+  };
+  const control: StackControl = {
+    rentPayer: services.facilitator.rentPayer,
+    stopGate: () => services.stopGate(),
+    startGate: () => services.startGate(),
+  };
+  const sellerWallet = keys.stack.seller.signer.address;
+  const direct = createDirectChain({
+    rpc,
+    terms: TEST_TERMS,
+    seller: { wallet: sellerWallet, usdcAccount: await associatedTokenAddress(sellerWallet, USDC_DEVNET_MINT) },
+    // The funding key pays the fee of the harness's own transactions (spec §12.6), so the rent payer's balance changes by rent only.
+    feePayer: funding.signer,
+    rentPayer: async () => {
+      const key = takeKey();
+      await sendSol(rpc, funding.signer, key.signer.address, DIRECT_RENT_LAMPORTS, send);
+      return key.signer;
+    },
+    readRetry: READ_RETRY,
+    send,
+  });
   return {
     target,
     rpc,
@@ -163,14 +201,22 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
       gateUrl: services.stream.url,
       rpc,
       newBuyer: async (usdc) => {
-        const key = keys.buyers[nextBuyer++];
-        if (!key) throw new Error(`The run used all ${keys.buyers.length} buyer keys: raise BUYER_POOL in e2e/src/devnet/keys.ts`);
+        // Checked and counted before anything is awaited, so that buyers made at the same time cannot all pass.
+        if (lent + usdc > MINIMUM_FUNDS.usdc) {
+          throw new Error(
+            `The run has lent ${lent} USDC base units and this buyer asks for ${usdc} more: a run must stay within ${MINIMUM_FUNDS.usdc}, the least that a start-up requires. Fund a buyer with what its session costs.`,
+          );
+        }
+        lent += usdc;
+        const key = takeKey();
         const usdcAccount = await fundUsdcAccount(rpc, funding, key.signer.address, usdc, send);
         return { signer: key.signer, usdcAccount };
       },
       sendUsdc: (from, to, amount) => sendUsdc(rpc, funding.signer, from, to, amount, send),
       subscriptionSettleMs: SUBSCRIPTION_SETTLE_MS,
       readRetry: READ_RETRY,
+      stack: control,
+      direct,
     }),
     stop: () => {
       stopping ??= (async () => {
