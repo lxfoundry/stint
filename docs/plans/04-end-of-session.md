@@ -65,7 +65,8 @@ Not built, and not to be built here:
   enough to notice a later `paidUntil`.
 - **The lookup of the `Closed` event** after another party closed the account before the paid time ran out
   (spec section 7.3, the "account closed by another party" row): this stage only handles an account that is
-  gone when the end timer fires, which is always at or after `paid_until`.
+  gone, or that holds another session opened at the address after a close, when the end timer fires, which is
+  always at or after `paid_until`. Either way the session the gate tracks has ended: `4402`, and no close.
 - Adoption of sessions opened directly on the program, one live connection per session (`4429`), the outage and
   admin closes (`WaiveMinimum`, `4503`), restart recovery.
 - Recreating a closed `receiver_token` in a sweeper close, and the sweeper's back-off on a frozen account: a
@@ -76,7 +77,10 @@ Not built, and not to be built here:
   section: scenario 26 belongs to the own-stack group, but runs on the run's common stack. It stops the common gate
   and starts it again at the same address, and the scenarios after it use that gate. That is safe only because the
   runner runs scenarios one after another (`conformance/src/runner.ts`), so no other scenario is using the gate while
-  it is down. The catalogue keeps 26's `ownStack` group, which the runner does not act on yet. When the runner gains
+  it is down. A scenario that times out is not cancelled (`withTimeout` in the runner; the limit is 180 s, in
+  `e2e/src/cli.ts`), so a scenario 26 that timed out could leave the gate stopped while the scenarios after it run.
+  No scenario numbered after 26 has a run in this stage, so none can meet it. The catalogue keeps 26's `ownStack`
+  group, which the runner does not act on yet, and Task 6 says so in the runner's doc comment. When the runner gains
   concurrency, scenario 26 moves to a stack of its own, with its own keys on devnet, as section 12.2 says.
 
 ## Before you start: what a person must prepare
@@ -130,8 +134,9 @@ LiteSVM run that must see a Rust change.
   - `maths::claim_amounts(session: &Session, now: i64) -> Result<ClaimAmounts>` with `ClaimAmounts { amount, claimed }`,
     and `maths::close_amounts(session: &Session, vault: u64, now: i64, waive_minimum: bool, refund_account_gone: bool)
     -> Result<CloseAmounts>` with `CloseAmounts { owed, refunded, redirected }`: every amount a claim or a close moves.
-    `claim` and `close` take their amounts from these two functions and compute none themselves, so the property tests,
-    which run on these functions, check what the program does.
+    `claim` and `close` take their amounts from these two functions, so the property tests, which run on these
+    functions, check what the program moves. The one sum left in a handler is `close`'s transfer to the receiver,
+    `owed + redirected`; the LiteSVM tests of `close` check it through the receiver's balance.
   - The instruction `claim()`, without signer or arguments. Accounts, in order: `session` (mutable), `vault` (mutable;
     the canonical associated token account of the session, else `AccountMismatch`), `receiver_token` (mutable; the
     associated token account of the stored `receiver`, else `AccountMismatch`), `token_program`, then the two
@@ -696,6 +701,28 @@ Expected: FAIL. `owed_excludes_what_claims_paid`, `a_claim_pays_what_is_earned_a
 `every_token_that_entered_the_vault_leaves_it_once` fail, the properties with a shrunk counter-example (the other
 properties may fail too). The mutation run's failures are recorded in `programs/stint/proptest-regressions/maths.txt`;
 delete it, it must not be committed.
+
+Run: `git checkout -- programs/stint/src/maths.rs && rm -rf programs/stint/proptest-regressions && cargo test -p stint`
+Expected: PASS, `21 passed`; `git status --short` prints nothing.
+
+A second mutation breaks how a close splits the vault rather than what it owes: the residual is paid twice, redirected
+to the receiver and refunded as well. Checking `owed` alone cannot see it; the property that every token leaves once
+can. In `programs/stint/src/maths.rs`, replace
+
+```rust
+        CloseAmounts { owed, refunded: 0, redirected: residual }
+```
+
+with
+
+```rust
+        CloseAmounts { owed, refunded: residual, redirected: residual }
+```
+
+Run: `cargo test -p stint`
+Expected: FAIL: `19 passed; 2 failed`, the two being `a_close_pays_what_is_owed_then_refunds_or_redirects_the_residual`
+and `every_token_that_entered_the_vault_leaves_it_once` (with a shrunk counter-example). Delete
+`programs/stint/proptest-regressions` again: it must not be committed.
 
 Run: `git checkout -- programs/stint/src/maths.rs && rm -rf programs/stint/proptest-regressions && cargo test -p stint`
 Expected: PASS, `21 passed`; `git status --short` prints nothing.
@@ -2739,8 +2766,9 @@ frame does not go through `send`, so the later `4402` is unaffected. Forwarding 
 
 **What this task leaves out** (each is built later, or is outside the system; do not half-build it): the
 top-up route and any subscription to the session account, so `paid_until` moves only through the re-read at the
-end timer; the lookup of the `Closed` event after another party closed the account (a missing account is ended
-as `expired` with `4402`); adoption of a session opened on chain; one live connection per session (`4429`);
+end timer; the lookup of the `Closed` event after another party closed the account (a missing account, or one
+that holds another session opened at the address after a close, is ended as `expired` with `4402`); adoption of
+a session opened on chain; one live connection per session (`4429`);
 outage and admin closes (`4503`, `WaiveMinimum`); the sponsored close; restart recovery; a pending settlement
 (`202`) of an idle or end close, which counts as a failed attempt. A close request to the facilitator has no
 timeout of its own, so a hung close blocks the other triggers until the HTTP library gives up; that is out of
@@ -2779,10 +2807,11 @@ export type EndReason = "closed" | "expired" | "idle" | "outage" | "admin" | "cl
   - Behaviour: an open that settles for a new session arms both timers; an accepted connection clears the idle
     timer and the drop of the last one arms it (not while forwarding is stopped: `resume` arms it then); the idle
     timer settles a `Standard` close (`teardown("idle")`,
-    `4410`); the end timer mutes forwarding, re-reads the session, and ends it (`4402`, `teardown("expired")`) if
-    the account is gone, resumes if `paid_until` moved later, or settles an `AtExpiry` close, re-reading and
-    retrying after `endRetrySeconds` when that fails. `end()` clears both timers and logs a `teardown` that
-    throws; `Gate.close()` clears every timer and still ends no session.
+    `4410`); the end timer mutes forwarding, re-reads the session, and ends it (`4402`, `teardown("expired")`,
+    no close) if the account is gone or holds another session (another `startedAt`, or terms that
+    `sessionMatches` refuses), resumes if `paid_until` moved later on the same session, or settles an `AtExpiry`
+    close, re-reading the same way and retrying after `endRetrySeconds` when that fails. `end()` clears both
+    timers and logs a `teardown` that throws; `Gate.close()` clears every timer and still ends no session.
   - Test support: `packages/gate/test/harness.ts` exports `NOW_MS`, `Harness`, `startHarness(timings?)`,
     `helpers(get)`, `FakeTimers` and `FakeClock`.
 
@@ -4094,8 +4123,9 @@ with:
 
   /**
    * The end timer fired (spec §7.3): forwarding stops, and the session is closed at the end of its paid time. A session
-   * that is gone, or that was paid for longer, needs no close. A close that fails while the session is unchanged is tried
-   * again after `endRetrySeconds`, until the session ends or the gate stops.
+   * that is gone, whose account now holds another session, or that was paid for longer, needs no close. A close that
+   * fails while the session is unchanged is tried again after `endRetrySeconds`, until the session ends or the gate
+   * stops.
    */
   async function expire(tracked: Tracked<U>): Promise<void> {
     mute(tracked);
@@ -4122,8 +4152,8 @@ with:
 
   /**
    * Re-reads the session at `confirmed`, once. True when that settles the matter: the session ended meanwhile; or its
-   * account is gone, so it ends here with 4402; or `paid_until` moved later on that same account, so it runs on. A read
-   * that fails settles nothing.
+   * account is gone or holds another session, so it ends here with 4402; or `paid_until` moved later on the same
+   * session, so it runs on. A read that fails settles nothing.
    *
    * One read, not `readRetry`'s several: the account was read when the open settled, so finding nothing now means it has
    * closed, not that the RPC has yet to see it. An account at the address that started at another moment, or on other
@@ -6039,7 +6069,7 @@ commit. At the end seven of the 35 scenarios are `required` and pass on `local`.
 - Create: `conformance/src/scenarios/02-close-before-min-seconds.ts`, `conformance/src/scenarios/16-close-after-paid-until.ts`,
   `conformance/src/scenarios/09-disconnect-and-grace.ts`, `conformance/src/scenarios/03-expiry.ts`,
   `conformance/src/scenarios/26-expired-session-nobody-closes.ts`
-- Modify: `conformance/src/catalogue.ts`
+- Modify: `conformance/src/catalogue.ts`, `conformance/src/runner.ts` (its doc comment only)
 - Test: `e2e/test/close-lookup.test.ts` (create: the lookup of a close, on the local node), `conformance/test/closes.test.ts`,
   `conformance/test/helpers.test.ts`, `conformance/test/disconnect-and-grace.test.ts`,
   `conformance/test/expired-session-nobody-closes.test.ts`
@@ -7523,6 +7553,28 @@ and replace `  pending(26, "An expired session that nobody closes", ["stack"], "
   pending(26, "An expired session that nobody closes", ["stack"], "ownStack", expiredSessionNobodyCloses),
 ```
 
+The runner's doc comment says the isolation groups arrive with the first scenarios that need them; scenario 26 needs
+one and runs without it, so the comment now says what the runner does instead. In `conformance/src/runner.ts`, replace
+
+```ts
+/**
+ * Runs scenarios one after another, in the order of their numbers. Concurrency and the isolation
+ * groups of spec section 12.2 arrive with the first scenarios that need them.
+ */
+```
+
+with
+
+```ts
+/**
+ * Runs scenarios one after another, in the order of their numbers. Concurrency and the isolation
+ * groups of spec section 12.2 are not built: a scenario's `group` is not acted on. Scenario 26, of
+ * the own-stack group, stops and restarts the common gate, which is safe only because no other
+ * scenario runs meanwhile. A scenario that times out is not cancelled, so a later scenario may run
+ * while its work goes on: after a timed-out scenario 26, it may find the gate stopped.
+ */
+```
+
 Run: `pnpm --filter @lxfoundry/stint-conformance test expired-session-nobody-closes.test.ts && pnpm typecheck && pnpm e2e:local`
 Expected: the restart test passes (2 tests); the row `| 26. An expired session that nobody closes | local | pending | pass (make required) | ... |` (about 15 to 25 s);
 `Status: required 6, pending 29 · Result: pass 7, fail 0, pending 27, not applicable 1`; `Make required: 1`.
@@ -7668,16 +7720,18 @@ with
 In §7.3, in the row `End timer fires`, replace
 
 ```
-Re-read the session at `confirmed`. If `paid_until` moved, reset the timer. Otherwise stop forwarding and close. On `NotExpired`, re-read:
+Re-read the session at `confirmed`. If `paid_until` moved, reset the timer. Otherwise stop forwarding and close. On `NotExpired`, re-read: if `paid_until` moved (a top-up landed), resume forwarding and reset the timer; if not (the chain's clock is behind), retry. Once the close is confirmed, drop connections (`4402`)
 ```
 
-(the start of the row's second cell, as it reads at present) with
+(the row's whole second cell, as it reads at present) with
 
 ```
-Stop forwarding (the gate discards what the resource sends to a connection, and forwards again if the session continues). Re-read the session at `confirmed`. If `paid_until` moved on the same session (the same `started_at` and terms: an account opened again at the address after a close is another session, section 4.1, and the one the gate tracks has ended), resume forwarding and reset the timer. Otherwise close. On `NotExpired`, re-read:
+Stop forwarding (the gate discards what the resource sends to a connection, and forwards again if the session continues). Re-read the session at `confirmed`. If the account is gone, or holds another session (another `started_at`, or terms the gate does not offer: an account opened again at the address after a close, section 4.1), the session the gate tracks has ended: drop its connections (`4402`), with no close. If `paid_until` moved on the same session, resume forwarding and reset the timer. Otherwise close. On `NotExpired`, re-read the same way: gone or another session, drop the connections (`4402`); `paid_until` moved on the same session (a top-up landed), resume forwarding and reset the timer; neither (the chain's clock is behind), retry. Once the close is confirmed, drop connections (`4402`)
 ```
 
-The rest of the row stays: it already says `resume forwarding` when a top-up landed, which now follows from the first sentence, and a top-up keeps `started_at` and the terms.
+The whole cell changes because a session opened again at the address must not reach either branch that resumes or
+closes: the gate ends the session it tracks, without a close, both at the first re-read and at the re-read after
+`NotExpired`. A top-up keeps `started_at` and the terms, so it is the one way `paid_until` moves on the same session.
 
 In §6.4, after the last paragraph, `It runs on one elected instance, or on all of them tolerating duplicates: a second close finds the` / `account gone and is skipped.`, replace
 
@@ -7886,10 +7940,11 @@ git commit -m "Record the upgraded devnet program and the scenarios that pass th
 
 Each is made in the task that needs it, and restates a fact the code relies on:
 - §4.3 (`claim`): `Claimed` is emitted only when the claim transfers something (Task 6);
-- §7.3 (the end-timer row): how forwarding stops and resumes, and that only the same session resumes, not one opened again at the address (Task 6);
+- §7.3 (the end-timer row): how forwarding stops and resumes; that an account gone, or holding another session opened again at the address, ends the tracked session with no close; and that only the same session resumes (Task 6);
 - §6.4: the listing endpoint of the sweeper (Task 6);
 - §12.2 (stack control): the harness can stop the gate and start it again (Task 6).
 
-Not edited, on purpose: §12.2's isolation groups. The spec states where scenario 26 runs once the runner is
-concurrent; until then it runs on the common stack, as recorded under "What this stage builds, and what it leaves
-for later".
+Not edited, on purpose: §12.2's isolation groups. The spec describes the runner as it is meant to be: every
+scenario runs concurrently, and scenario 26 has a stack of its own. This stage's runner runs scenarios one at a
+time and runs 26 on the common stack, the deviation recorded under "What this stage builds, and what it leaves for
+later". The spec stays as the target; the runner and scenario 26 move to it when concurrency is built.
