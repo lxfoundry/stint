@@ -12,7 +12,18 @@ export interface SessionInfo {
   readonly paidUntil: bigint;
 }
 
-export type EndReason = "closed" | "expired" | "outage" | "admin" | "closedElsewhere";
+/** Why a session ended, as `teardown` receives it. `idle`: no connection came back within `idleCloseSeconds`. */
+export type EndReason = "closed" | "expired" | "idle" | "outage" | "admin" | "closedElsewhere";
+
+/** The close codes the gate sends on a connection it drops (spec §7.4). */
+export const CLOSE_CODES = { PAID_TIME_ENDED: 4402, SESSION_CLOSED: 4410 } as const;
+
+/** The timers the gate arms (spec §12.4). A test replaces them to fire one on demand. */
+export interface Timers {
+  /** Runs `callback` once, after `delayMs`; the handle goes to `clear`. */
+  set(callback: () => void, delayMs: number): unknown;
+  clear(handle: unknown): void;
+}
 
 /** Spec §7.6. `provision` once when the open settles, `attach` per connection, `teardown` once. */
 export interface ResourceAdapter<U = unknown> {
@@ -46,8 +57,12 @@ export interface GateConfig<U = unknown> {
   readonly adapter: ResourceAdapter<U>;
   /** Milliseconds. Checks token times and the `jti` cache (spec §7.3). Default `Date.now`. */
   readonly tokenClock?: () => number;
-  /** Milliseconds. Runs the margin (spec §7.3). Default `Date.now`. */
+  /** Milliseconds. Runs the idle and end timers and the margin (spec §7.3). Default `Date.now`. */
   readonly sessionClock?: () => number;
+  /** The idle and end timers. Default: `setTimeout` and `clearTimeout`, without keeping the process alive. */
+  readonly timers?: Timers;
+  /** Seconds to wait before the close at the end of the paid time is tried again, after it failed and the session was unchanged. Default 2; a value below 1 is raised to 1, and one that is not a finite number gives 2. */
+  readonly endRetrySeconds?: number;
   /**
    * How the session after a settled open, and the `Closed` event after a confirmed close, are
    * re-read while the node returns nothing yet. Default 5 reads, 200 ms apart.
