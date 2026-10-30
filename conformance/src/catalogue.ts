@@ -1,5 +1,6 @@
 import { openConnectCloseEarly } from "./scenarios/01-open-connect-close.js";
 import { closeBeforeMinSeconds } from "./scenarios/02-close-before-min-seconds.js";
+import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
 import type { Capability, IsolationGroup, Scenario } from "./types.js";
 
@@ -40,7 +41,7 @@ export const catalogue: readonly Scenario[] = [
   pending(13, "Payment whose accepted differs by one byte; x402Version 1"),
   pending(14, "The same payment sent twice"),
   pending(15, "Sponsored close through closeUrl"),
-  pending(16, "Close by an unrelated key after paid_until"),
+  required(16, "Close by an unrelated key after paid_until", closeAfterPaidUntil),
   pending(17, "Top-up for an unknown session"),
   pending(18, "Fee payer or rent payer in a forbidden position", ["facilitatorApi"]),
   pending(19, "/verify of a valid open", ["facilitatorApi"]),
