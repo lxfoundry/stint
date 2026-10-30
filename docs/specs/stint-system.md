@@ -454,7 +454,7 @@ instruction that credits it succeed or fail together.
 - **Effects:** when `earned(now) > claimed`:
   - transfers `earned(now) - claimed` to `receiver_token`;
   - `claimed = earned(now)`.
-- Emits `Claimed`.
+- Emits `Claimed` when it transfers something; a claim that finds nothing newly earned succeeds and emits nothing.
 
 **`close(kind: CloseKind)`**
 
@@ -891,6 +891,9 @@ with an increasing back-off.
 It runs on one elected instance, or on all of them tolerating duplicates: a second close finds the
 account gone and is skipped.
 
+It lists sessions through an endpoint that may differ from the facilitator's main one (`scanRpcUrl`), because
+a provider's free tier can refuse the listing of a program's accounts.
+
 ### 6.5 Packaging and configuration
 
 A Docker Compose stack: the facilitator, Kora and a configuration template.
@@ -1000,7 +1003,7 @@ not a connection is live.
 | Resource outage (`closeOnOutage`) | Drop connections (`4503`); close | `WaiveMinimum` |
 | Admin command (section 7.7) | Drop connections (`4410`); close | `WaiveMinimum` |
 | A top-up seen on the account | Move the end timer | — |
-| End timer fires | Re-read the session at `confirmed`. If `paid_until` moved, reset the timer. Otherwise stop forwarding and close. On `NotExpired`, re-read: if `paid_until` moved (a top-up landed), resume forwarding and reset the timer; if not (the chain's clock is behind), retry. Once the close is confirmed, drop connections (`4402`) | `AtExpiry` |
+| End timer fires | Stop forwarding (the gate discards what the resource sends to a connection, and forwards again if the session continues). Re-read the session at `confirmed`. If the account is gone, or holds another session (another `started_at`, or terms the gate does not offer: an account opened again at the address after a close, section 4.1), the session the gate tracks has ended: drop its connections (`4402`), with no close. If `paid_until` moved on the same session, resume forwarding and reset the timer. Otherwise close. On `NotExpired`, re-read the same way: gone or another session, drop the connections (`4402`); `paid_until` moved on the same session (a top-up landed), resume forwarding and reset the timer; neither (the chain's clock is behind), retry. Once the close is confirmed, drop connections (`4402`) | `AtExpiry` |
 | Account closed by another party | Drop connections: `4402` if the `Closed` event's `at` is at or after its `paid_until`, since the paid time ran out whoever closed it; otherwise `4410`. The gate lists the session address's transactions at `confirmed`, which still works once the account is gone. It takes the most recent successful one whose inner instructions hold a `Closed` event for this session (section 4.4). Failed transactions and later lamport transfers to the address (S12) can come after the close, so the latest entry alone is not enough. If that lookup fails, the gate compares its session clock with the last `paid_until` it saw | — |
 | A close before `paid_until` fails because the buyer's `refund_to` is closed and the close pays it | Do not retry. The session settles at expiry with `AtExpiry`, which pays any residual to the receiver (section 4.3) | — |
 | The session ends, whatever the cause | `teardown(reason)`, once; unsubscribe | — |
@@ -1404,7 +1407,8 @@ run is repeatable.
   cheatcodes (T4).
 - **Stack control:** the harness runs the services, so it holds their keys (the seller's wallet,
   the receiver authorizer, the facilitator's API key, the resource's admin key) and can stop,
-  restart or add instances of them.
+  restart or add instances of them. In particular, it can stop the gate and start it again on the same
+  address while the facilitator, its sweeper and Kora keep running (scenario 26).
 - **Facilitator API:** the harness can call the facilitator's `/verify` with an API key (section 6.5). Always
   on `local` and `devnet`; on `external` only with `--facilitator` and `--facilitator-key`.
 - **Allowance:** the facilitator accepts an allowance pull as the funding instruction (section

@@ -15,12 +15,15 @@ Brand assets and usage rules: [`brand/`](brand/README.md).
 
 ## Status
 
-Work in progress. Working today: the Solana program, deployed on devnet (`open`, and `close`, which pays the
-seller for the time used and refunds the rest); the x402 `elapsed` scheme; the facilitator, the gate, the
-client library, an MCP server and an example agent. Two of the 35 end-to-end scenarios of the
-[specification](docs/specs/stint-system.md) (section 12.7) pass, on a local network and on devnet, and the run
-report lists the other 33 as pending. Not built yet: sessions that run to their end and the sweeper that closes
-them, top-ups, refusals of bad payments and settlement records, fallback closes, and resilience across restarts.
+Work in progress. Working today: the Solana program (`open`, `claim`, and `close`, which pays the seller for the
+time used, or for the whole paid time once it has run out, and refunds the rest; the devnet deployment is of the
+earlier version, with `open` and the standard close only, until it is upgraded); the x402 `elapsed` scheme; the
+facilitator with its sweeper, the gate with its timers, the client library, an MCP server and an example agent.
+A session ends by itself: the gate drops its connection with `4402` when the paid time runs out, closes a session
+that nobody connects to, and the sweeper closes any expired session that nobody closed. Seven of the 35 end-to-end
+scenarios of the [specification](docs/specs/stint-system.md) (section 12.7) pass on a local network, two of them
+(1 and 22) also on devnet, and the run report lists the other 28 as pending. Not built yet: top-ups, fallback
+closes, refusals of bad payments and settlement records, and resilience across restarts.
 The [plans](docs/plans/README.md) list the stages that remain.
 
 ## Development
@@ -122,8 +125,8 @@ rate-limited. Create `.env.devnet` (git-ignored; `.env.example` lists the names)
 - `STINT_DEVNET_SCAN_RPC_URL`, optional: the endpoint that lists the program's accounts, which is how the
   clean-up finds open sessions. Some providers' free tiers refuse that method (Alchemy's does: the run's
   start-up fails with `HTTP error (400)`); set this to another endpoint that answers it, such as
-  `https://api.devnet.solana.com`. It is asked three times per run (a devnet check, then the listing at
-  the start and at the end), and the rest goes to `STINT_DEVNET_RPC_URL`;
+  `https://api.devnet.solana.com`. It is asked for the clean-up's listings (at the start and at the end of a run) and by the facilitator's sweeper,
+  every 5 s while a run lasts, and the rest goes to `STINT_DEVNET_RPC_URL`;
 - `STINT_DEVNET_SEED`: a recovery phrase of 12 to 24 words in quotes, or 64 hexadecimal characters
   (`openssl rand -hex 32`). Every key of the target derives from it, by the harness's own rule, so the
   addresses are not the ones a wallet shows for the same phrase. Use a phrase made for this, never one
