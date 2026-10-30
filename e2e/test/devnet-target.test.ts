@@ -123,20 +123,18 @@ describe("the devnet target, run against the local network", () => {
     expect([...stack.target.capabilities].sort()).toEqual(["facilitatorApi", "stack"]);
   });
 
-  it("passes scenarios 1 and 22 with buyers funded from the funding key", async () => {
-    // The local network reports a subscription's slot, not the change's (T6): scenario 22 asserts
-    // on the slot only when the target is named devnet, so it runs here under the local name.
+  it("passes the required scenarios with buyers funded from the funding key", async () => {
+    // The local network reports a subscription's slot, not the change's (T6): scenario 22 asserts on the slot only when the
+    // target is named devnet, so the scenarios run here under the local name. Together they take about two minutes.
+    const required = [1, 2, 3, 9, 16, 22, 26];
     const asLocal: Target = { name: "local", capabilities: stack.target.capabilities };
     const outcomes = await runScenarios(
-      catalogue.filter((scenario) => scenario.id === 1 || scenario.id === 22),
+      catalogue.filter((scenario) => required.includes(scenario.id)),
       asLocal,
       () => ({ ...stack.context(), target: asLocal }),
     );
-    expect(outcomes.map((outcome) => [outcome.id, outcome.result, outcome.error])).toEqual([
-      [1, "pass", undefined],
-      [22, "pass", undefined],
-    ]);
-  }, 120_000);
+    expect(outcomes.map((outcome) => [outcome.id, outcome.result, outcome.error])).toEqual(required.map((id) => [id, "pass", undefined]));
+  }, 300_000);
 
   it("gives its context stack control and direct sessions, paid for by a key of the buyer pool and by the funding key", async () => {
     const { seed, funding, fundingUsdc } = await fundedSeed();
