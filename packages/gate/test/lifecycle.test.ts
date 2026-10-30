@@ -403,6 +403,23 @@ describe("the gate's lifecycle", () => {
       expect(h.timers.pending).toEqual([]);
     });
   });
+
+  describe("a teardown that throws", () => {
+    it("is logged, and the buyer's confirmed close is still answered 200 with its amounts", async () => {
+      const { session } = await open();
+      const { socket } = await connect(session, await token(session, "connect"));
+      const closed = new Promise<number>((resolve) => socket!.once("close", (code) => resolve(code)));
+      h.fail.teardown = true;
+
+      const response = await closeWith(session);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ paid: "8000", refunded: "22000", transaction: "sig" });
+      expect(await closed).toBe(4410);
+      expect(h.calls.teardown).toEqual(["closed"]);
+      expect(h.logs).toContainEqual({ event: "error", error: "teardown broke" });
+    });
+  });
 });
 
 describe("a gate with no timings configured", () => {

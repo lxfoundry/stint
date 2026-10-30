@@ -452,7 +452,12 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     disarm(tracked, "end");
     sessions.delete(tracked.info.session);
     for (const socket of tracked.connections) socket.close(code, "session closed");
-    await config.adapter.teardown(tracked.info, reason);
+    try {
+      await config.adapter.teardown(tracked.info, reason);
+    } catch (error) {
+      // The session is over on chain whatever the resource does: a confirmed close must not become a failure.
+      logError(error);
+    }
   }
 
   async function closeSession(request: IncomingMessage, response: ServerResponse, session: Address): Promise<void> {
