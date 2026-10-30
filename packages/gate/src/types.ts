@@ -25,7 +25,11 @@ export interface Timers {
   clear(handle: unknown): void;
 }
 
-/** Spec §7.6. `provision` once when the open settles, `attach` per connection, `teardown` once. */
+/**
+ * Spec §7.6. `provision` once when the open settles, `attach` per connection, `teardown` once. At the end of the paid
+ * time the gate stops forwarding by replacing each socket's `send`: only sends made through `socket.send` at send
+ * time are dropped, so an adapter that captured the method earlier is not muted.
+ */
 export interface ResourceAdapter<U = unknown> {
   provision(session: SessionInfo): Promise<U>;
   attach(session: SessionInfo, socket: WebSocket, upstream: U): void;

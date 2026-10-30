@@ -8,6 +8,9 @@ import { NOW_MS, helpers, startHarness, type FakeTimer, type Harness } from "./h
 /** The harness's `idleCloseSeconds`. */
 const IDLE_MS = 10_000;
 const IDLE_DUE = NOW_MS + IDLE_MS;
+/** What a deposit of 30,000 at 1,000 per second lasts, in the harness's sessions. */
+const PAID_MS = 30_000;
+const END_DUE = NOW_MS + PAID_MS;
 
 /** The `CloseKind` of the `stint.close` in a close payload, read from the transaction's instruction data. */
 function closeKindOf(payload: PaymentPayload): CloseKind {
@@ -53,6 +56,17 @@ describe("the gate's lifecycle", () => {
     let release!: () => void;
     h.hold.settleClose = new Promise<void>((resolve) => (release = resolve));
     return release;
+  }
+
+  /** An open session with one connection: `frames` collects what the buyer's socket receives, `closed` resolves with its close code. */
+  async function openConnected() {
+    const { session, payload } = await prepareOpen();
+    await send(payload);
+    const { socket } = await connect(session, await token(session, "connect"));
+    const frames: string[] = [];
+    socket!.on("message", (data) => frames.push(String(data)));
+    const closed = new Promise<number>((resolve) => socket!.once("close", (code) => resolve(code)));
+    return { session, payload, socket: socket!, server: h.attached.at(-1)!, frames, closed };
   }
 
   describe("the idle timer", () => {
@@ -139,6 +153,256 @@ describe("the gate's lifecycle", () => {
       expect(h.timers.pending).toEqual([]);
     });
   });
+
+  describe("the end timer", () => {
+    it.each([
+      { offset: 0, delays: [10_000, 30_000] },
+      { offset: 5_000, delays: [10_000, 25_000] },
+      { offset: 40_000, delays: [0, 10_000] },
+    ])("is set for the time left on the session clock when the open settles $offset ms into the session", async ({ offset, delays }) => {
+      h.clock.now = NOW_MS + offset;
+
+      await open();
+
+      expect(h.timers.pending.map((timer) => timer.delayMs).sort((a, b) => a - b)).toEqual(delays);
+    });
+
+    it("stops forwarding when it fires: a frame the adapter sends afterwards does not reach the buyer", async () => {
+      const { server, frames, closed } = await openConnected();
+      server.send("tick:before");
+      await expect.poll(() => frames).toContain("tick:before");
+      const release = holdClose();
+
+      h.timers.fire(pendingDue(END_DUE));
+      await expect.poll(() => closes()).toHaveLength(1); // the close is waiting at the facilitator: forwarding has stopped
+      server.send("tick:after");
+      release();
+
+      expect(await closed).toBe(4402);
+      expect(frames.filter((frame) => frame.startsWith("tick:"))).toEqual(["tick:before"]);
+    });
+
+    it("settles an AtExpiry close, then drops the connection with 4402 and tears down once with the reason expired", async () => {
+      const { session, closed } = await openConnected();
+
+      h.timers.fire(pendingDue(END_DUE));
+
+      expect(await closed).toBe(4402);
+      expect(h.calls.teardown).toEqual(["expired"]);
+      const [close, ...others] = closes();
+      expect(others).toEqual([]);
+      expect(closeKindOf(close!)).toBe(CloseKind.AtExpiry);
+      expect(close!.accepted.extra).toMatchObject({ action: "close", session });
+      expect([...inspectTransaction(readElapsedPayload(close!)!.transaction)!.signed]).toEqual([h.authorizer.address]);
+      expect(h.timers.pending).toEqual([]);
+    });
+
+    it("refuses a connection once it has fired: 402 while the close is in flight, 404 when the session is gone", async () => {
+      const { session, closed } = await openConnected();
+      const release = holdClose();
+
+      h.timers.fire(pendingDue(END_DUE));
+      await expect.poll(() => closes()).toHaveLength(1);
+      expect((await connect(session, await token(session, "connect"))).status).toBe(402);
+      release();
+
+      expect(await closed).toBe(4402);
+      expect((await connect(session, await token(session, "connect"))).status).toBe(404);
+    });
+
+    it("shares one close with a buyer's request that arrives while it is in flight", async () => {
+      const { session, closed } = await openConnected();
+      const release = holdClose();
+
+      h.timers.fire(pendingDue(END_DUE));
+      await expect.poll(() => closes()).toHaveLength(1);
+      const buyer = closeWith(session);
+      await settleDown();
+      release();
+
+      expect((await buyer).status).toBe(200);
+      expect(await closed).toBe(4402);
+      expect(closes()).toHaveLength(1);
+      expect(h.calls.teardown).toEqual(["expired"]);
+    });
+
+    it("joins a close already in flight instead of re-reading the session first", async () => {
+      const { session, closed } = await openConnected();
+      const release = holdClose();
+      const buyer = closeWith(session);
+      await expect.poll(() => closes()).toHaveLength(1);
+      const reads = h.reads.session;
+
+      h.timers.fire(pendingDue(END_DUE));
+      await settleDown();
+      expect(h.reads.session).toBe(reads);
+      release();
+
+      expect((await buyer).status).toBe(200);
+      expect(await closed).toBe(4410); // the buyer's close came first, so it decides how the session ends
+      expect(closes()).toHaveLength(1);
+      expect(h.calls.teardown).toEqual(["closed"]);
+    });
+
+    it("does not arm the idle timer when the last connection drops while forwarding is stopped", async () => {
+      const { socket } = await openConnected();
+      const release = holdClose();
+
+      h.timers.fire(pendingDue(END_DUE));
+      await expect.poll(() => closes()).toHaveLength(1);
+      await drop(socket, h.attached[0]!);
+      expect(idleTimers()).toEqual([]);
+      release();
+
+      await expect.poll(() => h.calls.teardown).toEqual(["expired"]);
+    });
+
+    it("ends the session with 4402, with no close, when the account is already gone, after a single read", async () => {
+      const { session, closed } = await openConnected();
+      h.sessions.delete(session);
+      const reads = h.reads.session;
+
+      h.timers.fire(pendingDue(END_DUE));
+
+      expect(await closed).toBe(4402);
+      expect(h.reads.session - reads).toBe(1); // the harness's readRetry allows 3 reads: a gone account is not read again
+      expect(h.calls.teardown).toEqual(["expired"]);
+      expect(closes()).toEqual([]);
+    });
+
+    it("ends the session with 4402 when the close fails and a re-read shows the account gone", async () => {
+      const { session, closed } = await openConnected();
+      h.fail.settleClose = true;
+      h.onSettleClose = () => void h.sessions.delete(session);
+
+      h.timers.fire(pendingDue(END_DUE));
+
+      expect(await closed).toBe(4402);
+      expect(h.calls.teardown).toEqual(["expired"]);
+      expect(closes()).toHaveLength(1);
+      expect(h.timers.pending).toEqual([]);
+    });
+
+    it("resumes forwarding, answers with the new end and sets the timer again when a re-read shows a later paid_until", async () => {
+      const { session, payload, server, frames } = await openConnected();
+      h.sessions.set(session, { ...h.sessions.get(session)!, deposited: 60_000n }); // paid for 60 s in all
+
+      h.timers.fire(pendingDue(END_DUE));
+
+      await expect.poll(() => h.timers.pending.map((timer) => timer.dueMs)).toEqual([NOW_MS + 60_000]);
+      expect(closes()).toEqual([]);
+      server.send("tick:resumed");
+      await expect.poll(() => frames).toContain("tick:resumed");
+      expect((await send(payload)).body.paidUntil).toBe(NOW_MS / 1000 + 60);
+      expect((await connect(session, await token(session, "connect"))).socket).toBeDefined(); // 30 s from the new end: no longer refused
+    });
+
+    it("resumes forwarding and sets the timer again when the close fails and a re-read shows a later paid_until", async () => {
+      const { session, server, frames } = await openConnected();
+      h.fail.settleClose = true;
+      h.onSettleClose = () => void h.sessions.set(session, { ...h.sessions.get(session)!, deposited: 60_000n });
+
+      h.timers.fire(pendingDue(END_DUE));
+
+      await expect.poll(() => h.timers.pending.map((timer) => timer.dueMs)).toEqual([NOW_MS + 60_000]);
+      expect(closes()).toHaveLength(1);
+      server.send("tick:resumed");
+      await expect.poll(() => frames).toContain("tick:resumed");
+      expect(h.calls.teardown).toEqual([]);
+    });
+
+    it.each([
+      { what: "a later start", startedAfter: 20n, rate: 1_000n, deposited: 60_000n },
+      { what: "other terms", startedAfter: 0n, rate: 2_000n, deposited: 120_000n },
+    ])("ends the session with 4402, and does not resume, when the re-read finds another session at the address: $what", async ({ startedAfter, rate, deposited }) => {
+      const { session, closed } = await openConnected();
+      const stored = h.sessions.get(session)!;
+      // Closed, then opened again at the same address, and paid until later than the session the gate tracks.
+      h.sessions.set(session, { ...stored, startedAt: stored.startedAt + startedAfter, rate, deposited });
+
+      h.timers.fire(pendingDue(END_DUE));
+
+      await expect.poll(() => h.calls.teardown).toEqual(["expired"]);
+      expect(await closed).toBe(4402);
+      expect(closes()).toEqual([]);
+      expect(h.timers.pending).toEqual([]);
+    });
+
+    it("tries the close again after endRetrySeconds when it fails and nothing changed, and stays muted meanwhile", async () => {
+      const { server, frames, closed } = await openConnected();
+      h.fail.settleClose = true;
+
+      h.timers.fire(pendingDue(END_DUE));
+
+      await expect.poll(() => h.timers.pending.map((timer) => timer.delayMs)).toEqual([3_000]);
+      expect(closes()).toHaveLength(1);
+      expect(h.calls.teardown).toEqual([]);
+      server.send("tick:waiting");
+      h.fail.settleClose = false;
+      h.timers.fire(h.timers.pending[0]!);
+
+      expect(await closed).toBe(4402);
+      expect(closes().map(closeKindOf)).toEqual([CloseKind.AtExpiry, CloseKind.AtExpiry]);
+      expect(h.calls.teardown).toEqual(["expired"]);
+      expect(frames.filter((frame) => frame.startsWith("tick:"))).toEqual([]);
+    });
+
+    it("sets itself again, without stopping forwarding, when it fires before paid_until on the session clock", async () => {
+      const { server, frames } = await openConnected();
+      const early = pendingDue(END_DUE);
+
+      h.timers.fire(early, { advance: false });
+
+      expect(closes()).toEqual([]);
+      server.send("tick:early");
+      await expect.poll(() => frames).toContain("tick:early");
+      const again = pendingDue(END_DUE);
+      expect(again).not.toBe(early);
+      expect(again.delayMs).toBe(PAID_MS);
+    });
+
+    it("caps a long wait at the longest delay setTimeout takes, and waits out the rest", async () => {
+      const longest = 2_147_483_647;
+      const { session, payload } = await prepareOpen();
+      h.sessions.set(session, { ...h.sessions.get(session)!, deposited: 3_000_000_000_000n }); // paid for about 95 years
+      await send(payload);
+      const end = h.timers.pending.find((timer) => timer.delayMs === longest)!;
+      expect(end).toBeDefined();
+
+      h.timers.fire(end);
+
+      expect(closes()).toEqual([]);
+      expect(h.timers.pending.some((timer) => timer.delayMs === longest)).toBe(true);
+    });
+
+    it("is kept when an idle close fails", async () => {
+      await open();
+      h.fail.settleClose = true;
+
+      h.timers.fire(pendingDue(IDLE_DUE));
+
+      await expect.poll(() => h.logs.some((entry) => entry.event === "error")).toBe(true);
+      expect(h.timers.pending.map((timer) => timer.dueMs)).toEqual([END_DUE]);
+    });
+
+    it("is cleared with the idle timer when the buyer closes the session", async () => {
+      const { session } = await open();
+      expect(h.timers.pending).toHaveLength(2);
+
+      expect((await closeWith(session)).status).toBe(200);
+
+      expect(h.timers.pending).toEqual([]);
+    });
+
+    it("is cleared with the idle timer when the gate stops", async () => {
+      await open();
+      expect(h.timers.pending).toHaveLength(2);
+
+      await h.gate.close();
+
+      expect(h.timers.pending).toEqual([]);
+    });
+  });
 });
 
 describe("a gate with no timings configured", () => {
@@ -158,5 +422,14 @@ describe("a gate with no timings configured", () => {
   it("gives a session 60 seconds to connect", async () => {
     await open();
     expect(d.timers.pending.map((timer) => timer.delayMs)).toContain(60_000);
+  });
+
+  it("tries a failed close at the end of the paid time again after 2 seconds", async () => {
+    await open();
+    d.fail.settleClose = true;
+
+    d.timers.fire(d.timers.pending.find((timer) => timer.delayMs === 30_000)!);
+
+    await expect.poll(() => d.timers.pending.map((timer) => timer.delayMs).sort((a, b) => a - b)).toEqual([2_000, 60_000]);
   });
 });
