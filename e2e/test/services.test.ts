@@ -112,6 +112,22 @@ describe("the services of a stack, run against the local chain", () => {
     expect(await unreachable(own.facilitator.url)).toBe(true);
   }, 60_000);
 
+  it("starts no gate, and leaves nothing listening, when the stack stops while the start waits for the port", async () => {
+    const own = await start();
+    const url = own.stream.url;
+    await own.stopGate();
+    const holder = createServer();
+    await new Promise<void>((resolve) => holder.listen(Number(new URL(url).port), "127.0.0.1", resolve));
+
+    const starting = own.startGate(); // it cannot succeed while the holder has the port
+    const stopping = own.stop(); // it lands during the start's tries, and finds no gate to stop
+    await new Promise<void>((resolve) => holder.close(() => resolve()));
+    await starting;
+    await stopping;
+
+    expect(await unreachable(url)).toBe(true);
+  }, 60_000);
+
   it("stops with a gate that is already stopped, takes a second stop, and starts no gate after it", async () => {
     const url = services.stream.url;
     await services.stopGate();

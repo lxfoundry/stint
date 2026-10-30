@@ -147,7 +147,10 @@ export async function startServices(options: ServicesOptions): Promise<Services>
     let stopped = false;
     const startGate = async (): Promise<void> => {
       if (running || stopped) return;
-      latest = running = await startStreamOn(streamConfig, port);
+      const started = await startStreamOn(streamConfig, port);
+      // A stop that landed during the start's tries found no gate to stop: this one would run on, with nothing to stop it.
+      if (stopped) return started.stop();
+      latest = running = started;
     };
     stops.unshift(stopGate);
     let stopping: Promise<void> | undefined;
