@@ -30,6 +30,8 @@ import { sendInstructions } from "../src/network/transactions.js";
 import { waitForNewSlot } from "../src/network/surfnet.js";
 import { startLocalChain, type LocalChain } from "../src/targets/chain.js";
 import { cleanDevnet, devnetFunds, startDevnetStack, type DevnetStack, type DevnetStackOptions } from "../src/targets/devnet.js";
+import { createDirectChain } from "../src/targets/direct.js";
+import { TEST_TERMS } from "../src/targets/services.js";
 
 const FUNDING_USDC = 10_000_000n;
 
@@ -134,6 +136,33 @@ describe("the devnet target, run against the local network", () => {
       [1, "pass", undefined],
       [22, "pass", undefined],
     ]);
+  }, 120_000);
+
+  it("gives its context stack control and direct sessions, paid for by a key of the buyer pool and by the funding key", async () => {
+    const { seed, funding, fundingUsdc } = await fundedSeed();
+    const lamportsOfFunding = async () => (await chain.network.rpc.getBalance(funding, { commitment: "confirmed" }).send()).value;
+    const fundingBefore = await lamportsOfFunding();
+    const running = await start(seed);
+    const context = running.context();
+    expect(context.stack?.rentPayer).toBe(running.services.facilitator.rentPayer);
+
+    const buyer = await context.newBuyer(1_000_000n);
+    const opened = await context.direct!.open({ buyer, seconds: 5 });
+
+    // The rent payer is a key that the clean-up covers, and it is not the stack's.
+    expect((await deriveKeys(seed)).buyers.map((key) => key.signer.address)).toContain(opened.rentPayer);
+    expect(opened.rentPayer).not.toBe(running.services.facilitator.rentPayer);
+    await expect
+      .poll(async () => (await fetchSysvarClock(chain.network.rpc)).unixTimestamp >= opened.paidUntil, { timeout: 30_000, interval: 500 })
+      .toBe(true);
+    await context.direct!.close(opened, await context.direct!.newKey());
+    expect(await sessionsOnChain()).toBe(0);
+
+    await running.stop();
+
+    // What the rent payer held went back with the rest: the funding key ends with what it lent, less fees.
+    expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC);
+    expect(fundingBefore - (await lamportsOfFunding())).toBeLessThan(5_000_000n);
   }, 120_000);
 
   it("closes a session left open at the end, returns the funds, and stops", async () => {
@@ -482,6 +511,38 @@ describe("the devnet target, run against the local network", () => {
     }
   }, 120_000);
 
+  it("runs the sweeper against the scan endpoint, which lists the program's accounts where the main endpoint cannot", async () => {
+    const { seed } = await fundedSeed();
+    const keys = await deriveKeys(seed, 0);
+    const provider = await nodeThatCannotListProgramAccounts();
+    let running: DevnetStack | undefined;
+    try {
+      const started = await start(seed, { rpcUrl: provider.url, scanRpcUrl: chain.network.rpcUrl });
+      running = started;
+      const seller = keys.stack.seller.signer.address;
+      // A session that names the facilitator's rent payer is the sweeper's to close. It is opened straight on the program,
+      // so that no gate holds it.
+      const swept = createDirectChain({
+        rpc: chain.network.rpc,
+        terms: TEST_TERMS,
+        seller: { wallet: seller, usdcAccount: await associatedTokenAddress(seller, USDC_DEVNET_MINT) },
+        feePayer: keys.funding.signer,
+        rentPayer: async () => started.keys.rentPayer.signer,
+        readRetry: { attempts: 1, delayMs: 0 },
+        send: { pollMs: 100 },
+      });
+      const buyer = await started.context().newBuyer(100_000n);
+      await swept.open({ buyer, seconds: 5 });
+      expect(await sessionsOnChain()).toBe(1);
+
+      // The listing through the main endpoint would fail at every sweep, and the session would stay open.
+      await expect.poll(sessionsOnChain, { timeout: 40_000, interval: 1_000 }).toBe(0);
+    } finally {
+      await running?.stop();
+      await provider.close();
+    }
+  }, 120_000);
+
   it("refuses a scan endpoint that is not devnet's before it cleans up anything", async () => {
     const seed = crypto.getRandomValues(new Uint8Array(32));
     const devnet = await serveRpc(async () => ({ status: 200, reply: { result: DEVNET_GENESIS_HASH } }));
@@ -498,6 +559,18 @@ describe("the devnet target, run against the local network", () => {
       startDevnetStack({ rpcUrl: "http://127.0.0.1:9", wsUrl: "ws://127.0.0.1:9", seed, preflight: false, pollMs: 100 }),
     ).rejects.toThrow(/does not start/);
   }, 60_000);
+
+  it("refuses a buyer whose allotment would take the run's loans above the funds a start-up requires", async () => {
+    const { seed } = await fundedSeed();
+    const running = await start(seed);
+    const context = running.context();
+
+    await context.newBuyer(3_000_000n);
+    await context.newBuyer(2_000_000n); // 5,000,000 in all: the minimum itself is still within what the run may lend
+
+    await expect(context.newBuyer(1n)).rejects.toThrow(/5000000/);
+    await running.stop();
+  }, 120_000);
 
   it("stops handing out buyers when the pool is used", async () => {
     const { seed } = await fundedSeed();
