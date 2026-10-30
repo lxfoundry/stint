@@ -4,7 +4,7 @@ import type { Capability, IsolationGroup } from "../src/types.js";
 
 const byId = new Map(catalogue.map((scenario) => [scenario.id, scenario]));
 /** The scenarios the build has made required: each passes on `local`, and none goes back to pending (spec §12.2). */
-const REQUIRED = [1, 2, 3, 9, 16, 22];
+const REQUIRED = [1, 2, 3, 9, 16, 22, 26];
 
 function idsWhere(predicate: (needs: readonly Capability[]) => boolean): number[] {
   return catalogue.filter((scenario) => predicate(scenario.needs)).map((scenario) => scenario.id);
