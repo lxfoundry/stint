@@ -72,6 +72,12 @@ Not built, and not to be built here:
   close that fails is reported and tried again at the next sweep.
 - `WaiveMinimum` in the program: it stays refused with `InvalidTerms`.
 - The sponsored close route and the client's fallback chain.
+- **The isolation groups of spec section 12.2, and concurrency in the runner.** This is a known deviation from that
+  section: scenario 26 belongs to the own-stack group, but runs on the run's common stack. It stops the common gate
+  and starts it again at the same address, and the scenarios after it use that gate. That is safe only because the
+  runner runs scenarios one after another (`conformance/src/runner.ts`), so no other scenario is using the gate while
+  it is down. The catalogue keeps 26's `ownStack` group, which the runner does not act on yet. When the runner gains
+  concurrency, scenario 26 moves to a stack of its own, with its own keys on devnet, as section 12.2 says.
 
 ## Before you start: what a person must prepare
 
@@ -121,14 +127,19 @@ LiteSVM run that must see a Rust change.
   `Fixture`.
 - Produces:
   - `maths::earned(deposited: u64, rate: u64, elapsed: u64) -> u64`: `min(deposited, rate × elapsed)` through `u128`.
+  - `maths::claim_amounts(session: &Session, now: i64) -> Result<ClaimAmounts>` with `ClaimAmounts { amount, claimed }`,
+    and `maths::close_amounts(session: &Session, vault: u64, now: i64, waive_minimum: bool, refund_account_gone: bool)
+    -> Result<CloseAmounts>` with `CloseAmounts { owed, refunded, redirected }`: every amount a claim or a close moves.
+    `claim` and `close` take their amounts from these two functions and compute none themselves, so the property tests,
+    which run on these functions, check what the program does.
   - The instruction `claim()`, without signer or arguments. Accounts, in order: `session` (mutable), `vault` (mutable;
     the canonical associated token account of the session, else `AccountMismatch`), `receiver_token` (mutable; the
     associated token account of the stored `receiver`, else `AccountMismatch`), `token_program`, then the two
     `#[event_cpi]` accounts. When `earned(now) > claimed` it transfers `earned(now) - claimed` from the vault to
     `receiver_token`, sets `claimed = earned(now)` and emits `Claimed { session, amount, claimed }`; otherwise it
     succeeds, moves nothing and emits nothing. `earned` uses the elapsed time of spec §4.2, so it stops at `paid_until`.
-  - `close` accepts `CloseKind.AtExpiry`: any signer; `now >= paid_until`, else `NotExpired`; charged
-    `maths::charged(min_seconds, elapsed, true)`; everything else as `Standard`. `CloseKind.WaiveMinimum` is still
+  - `close` accepts `CloseKind.AtExpiry`: any signer; `now >= paid_until`, else `NotExpired`; the minimum
+    waived (`close_amounts` with `waive_minimum: true`); everything else as `Standard`. `CloseKind.WaiveMinimum` is still
     refused with `InvalidTerms`. The authorisation rule of `Standard` is unchanged.
   - `@lxfoundry/stint-program-client`: the generated `getClaimInstruction(input)` with
     `input = { session, vault, receiverToken, tokenProgram?, eventAuthority, program }` (the last two from
@@ -146,9 +157,45 @@ release) and `Cargo.lock` gains `proptest` and its dependencies; `git status --s
 SBF build is unaffected; the IDL step builds the test profile, so `mod properties` must compile for `anchor build` to
 pass.
 
-- [ ] **Step 2: Write the failing unit tests of `earned`**
+- [ ] **Step 2: Write the failing unit tests of `earned`, `claim_amounts` and `close_amounts`**
 
 In `programs/stint/src/maths.rs`, replace
+
+```rust
+#[cfg(test)]
+mod tests {
+```
+
+with
+
+```rust
+/// The session `open` stores, for the tests: the keys play no part in the amounts.
+#[cfg(test)]
+fn opened(rate: u64, min_seconds: u32, started_at: i64, deposited: u64) -> Session {
+    Session {
+        version: crate::state::SESSION_VERSION,
+        bump: 0,
+        authority: Pubkey::default(),
+        seed: 0,
+        mint: Pubkey::default(),
+        receiver: Pubkey::default(),
+        receiver_authorizer: Pubkey::default(),
+        refund_owner: Pubkey::default(),
+        rent_payer: Pubkey::default(),
+        rate,
+        min_seconds,
+        max_seconds: u32::MAX,
+        started_at,
+        deposited,
+        claimed: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+```
+
+Then, in the same file, replace
 
 ```rust
         assert!(!redirects(1, 1_030, 1_030, false));
@@ -193,16 +240,48 @@ with
         assert_eq!(earned(u64::MAX, u64::MAX, 0), 0);
         assert_eq!(earned(0, u64::MAX, u64::MAX), 0);
     }
+
+    #[test]
+    fn a_claim_pays_what_is_earned_and_not_yet_claimed() {
+        let mut session = opened(1_000, 5, 1_000, 30_000);
+        assert_eq!(claim_amounts(&session, 1_008).unwrap(), ClaimAmounts { amount: 8_000, claimed: 8_000 });
+        session.claimed = 8_000;
+        assert_eq!(claim_amounts(&session, 1_012).unwrap(), ClaimAmounts { amount: 4_000, claimed: 12_000 });
+        // A clock that stepped back pays nothing and leaves `claimed` as it is.
+        assert_eq!(claim_amounts(&session, 1_003).unwrap(), ClaimAmounts { amount: 0, claimed: 8_000 });
+        // From `paid_until` on, a claim pays up to the covered time, never the rounding remainder.
+        let session = opened(1_000, 5, 1_000, 30_500);
+        assert_eq!(claim_amounts(&session, 9_000).unwrap(), ClaimAmounts { amount: 30_000, claimed: 30_000 });
+    }
+
+    #[test]
+    fn a_close_pays_what_is_owed_then_refunds_or_redirects_the_residual() {
+        let mut session = opened(1_000, 5, 1_000, 30_000);
+        session.claimed = 8_000;
+        // Before `paid_until`, with the minimum: 12 s charged, 8,000 already claimed; the vault holds the rest.
+        let before = close_amounts(&session, 22_000, 1_012, false, true).unwrap();
+        assert_eq!(before, CloseAmounts { owed: 4_000, refunded: 18_000, redirected: 0 });
+        // 2 s in, the minimum of 5 s is charged unless it is waived.
+        let fresh = opened(1_000, 5, 1_000, 30_000);
+        assert_eq!(close_amounts(&fresh, 30_000, 1_002, false, false).unwrap().owed, 5_000);
+        assert_eq!(close_amounts(&fresh, 30_000, 1_002, true, false).unwrap().owed, 2_000);
+        // From `paid_until` on, a residual owed to a missing refund account goes to the receiver.
+        let after = close_amounts(&session, 22_100, 1_030, true, true).unwrap();
+        assert_eq!(after, CloseAmounts { owed: 22_000, refunded: 0, redirected: 100 });
+        // A vault holding less than is owed is an error, not a partial payment.
+        assert!(close_amounts(&session, 3_999, 1_012, false, false).is_err());
+    }
 }
 ```
 
 - [ ] **Step 3: Write the failing property tests**
 
-The properties of spec §12.1 are checked on a model built from the pure functions: a random sequence of claims, then one
-close. In `programs/stint/src/maths.rs`, replace
+The properties of spec §12.1 are checked on the two functions `claim` and `close` take their amounts from: a random
+sequence of claims, each applied as `claim` applies it, then one close on what the vault still holds. `earned` and `due`
+at the close come from the formulas of spec §4.2 and serve as the reference. In `programs/stint/src/maths.rs`, replace
 
 ```rust
-        assert_eq!(earned(0, u64::MAX, u64::MAX), 0);
+        assert!(close_amounts(&session, 3_999, 1_012, false, false).is_err());
     }
 }
 ```
@@ -210,15 +289,15 @@ close. In `programs/stint/src/maths.rs`, replace
 with
 
 ```rust
-        assert_eq!(earned(0, u64::MAX, u64::MAX), 0);
+        assert!(close_amounts(&session, 3_999, 1_012, false, false).is_err());
     }
 }
 
-/// Property tests of spec section 12.1, on a model built from the functions above: a claim at each
-/// of a sequence of moments, then a close.
+/// Property tests of spec section 12.1, run on the functions `claim` and `close` call: a claim at
+/// each of a sequence of moments, then a close.
 #[cfg(test)]
 mod properties {
-    use super::*;
+    use super::{charged, claim_amounts, close_amounts, due, earned, elapsed, opened, paid_until, CloseAmounts};
     use proptest::prelude::*;
 
     /// A session's terms as `open` stores them, and the tokens that reached the vault uncredited.
@@ -298,46 +377,50 @@ mod properties {
     }
 
     struct Outcome {
-        /// `claimed` after each claim, with what was earned at that claim's moment.
+        /// The session's `claimed` after each claim, with what was earned at that claim's moment.
         claims: Vec<(u64, u64)>,
+        /// What the claims moved out of the vault, in total.
+        paid_by_claims: u64,
         claimed: u64,
+        close: CloseAmounts,
+        /// `earned` and `due` at the close, by the formulas of spec section 4.2: the reference the
+        /// amounts are checked against.
         earned_at_close: u64,
         due: u64,
-        owed: u64,
-        refunded: u64,
-        redirected: u64,
     }
 
-    /// What the program does: a claim at each moment (it pays `owed(claimed, earned)` and never lowers
-    /// `claimed`), then the close, with the residual redirected as `close` does.
+    /// The program's sequence: each claim applied as `claim` applies it (the vault pays `amount`, the
+    /// session stores `claimed`), then the close on what the vault still holds, as `close` computes it.
     fn run(scenario: &Scenario) -> Outcome {
-        let Terms { rate, min_seconds, started_at, deposited, uncredited } = scenario.terms;
-        let paid_until = paid_until(started_at, deposited, rate).unwrap();
-        let earned_at = |now: i64| earned(deposited, rate, elapsed(started_at, paid_until, now));
+        let terms = scenario.terms;
+        let mut session = opened(terms.rate, terms.min_seconds, terms.started_at, terms.deposited);
+        let paid_until = paid_until(terms.started_at, terms.deposited, terms.rate).unwrap();
+        let elapsed_at = |now: i64| elapsed(terms.started_at, paid_until, now);
 
         // The vault holds the credited deposit and whatever reached it without being credited.
-        let mut vault = deposited + uncredited;
-        let mut claimed = 0;
+        let mut vault = terms.deposited + terms.uncredited;
+        let mut paid_by_claims = 0;
         let mut claims = Vec::new();
         for &now in &scenario.claim_times {
-            let earned_now = earned_at(now);
-            let amount = owed(claimed, earned_now);
-            vault -= amount;
-            claimed += amount;
-            claims.push((claimed, earned_now));
+            let claim = claim_amounts(&session, now).unwrap();
+            vault = vault.checked_sub(claim.amount).expect("a claim pays no more than the vault holds");
+            paid_by_claims += claim.amount;
+            session.claimed = claim.claimed;
+            claims.push((session.claimed, earned(terms.deposited, terms.rate, elapsed_at(now))));
         }
 
         let now = scenario.close_time;
-        let elapsed_now = elapsed(started_at, paid_until, now);
-        let due_now = due(deposited, rate, charged(min_seconds, elapsed_now, scenario.waive_minimum));
-        let owed_now = owed(claimed, due_now);
-        let residual = vault - owed_now;
-        let (refunded, redirected) = if redirects(residual, now, paid_until, scenario.refund_account_gone) {
-            (0, residual)
-        } else {
-            (residual, 0)
-        };
-        Outcome { claims, claimed, earned_at_close: earned_at(now), due: due_now, owed: owed_now, refunded, redirected }
+        let close = close_amounts(&session, vault, now, scenario.waive_minimum, scenario.refund_account_gone)
+            .expect("a close owes no more than the vault holds");
+        let charged_now = charged(terms.min_seconds, elapsed_at(now), scenario.waive_minimum);
+        Outcome {
+            claims,
+            paid_by_claims,
+            claimed: session.claimed,
+            close,
+            earned_at_close: earned(terms.deposited, terms.rate, elapsed_at(now)),
+            due: due(terms.deposited, terms.rate, charged_now),
+        }
     }
 
     proptest! {
@@ -348,7 +431,7 @@ mod properties {
         fn claimed_plus_owed_never_exceeds_the_deposit(scenario in any_scenario()) {
             let outcome = run(&scenario);
             prop_assert!(
-                u128::from(outcome.claimed) + u128::from(outcome.owed) <= u128::from(scenario.terms.deposited)
+                u128::from(outcome.claimed) + u128::from(outcome.close.owed) <= u128::from(scenario.terms.deposited)
             );
         }
 
@@ -370,19 +453,21 @@ mod properties {
                 prop_assert!(claimed <= earned_then);
             }
             prop_assert!(outcome.claimed <= outcome.earned_at_close);
-            prop_assert_eq!(outcome.claimed + outcome.owed, outcome.due);
+            prop_assert_eq!(outcome.claimed + outcome.close.owed, outcome.due);
         }
 
-        // Every token that entered the vault leaves it exactly once, on any clock.
+        // Every token that entered the vault leaves it exactly once, on any clock: what the claims moved is
+        // what the session records as claimed, and the close moves the rest.
         #[test]
         fn every_token_that_entered_the_vault_leaves_it_once(scenario in any_scenario()) {
             let outcome = run(&scenario);
             let terms = scenario.terms;
+            prop_assert_eq!(outcome.paid_by_claims, outcome.claimed);
             prop_assert_eq!(
                 u128::from(outcome.claimed)
-                    + u128::from(outcome.owed)
-                    + u128::from(outcome.refunded)
-                    + u128::from(outcome.redirected),
+                    + u128::from(outcome.close.owed)
+                    + u128::from(outcome.close.refunded)
+                    + u128::from(outcome.close.redirected),
                 u128::from(terms.deposited) + u128::from(terms.uncredited)
             );
         }
@@ -397,12 +482,26 @@ run. Only a genuine failure is worth keeping: the failures of Step 8's deliberat
 - [ ] **Step 4: Run the tests to see them fail**
 
 Run: `cargo test -p stint`
-Expected: FAIL, the tests do not compile: `error[E0425]: cannot find function `earned` in this scope`, reported for
-`mod tests` and for `mod properties`.
+Expected: FAIL, the tests do not compile: the errors name `earned`, `claim_amounts`, `close_amounts`, `ClaimAmounts`,
+`CloseAmounts` and `Session` (`cannot find function`, `cannot find type` or `unresolved import`), in `mod tests`, in
+`mod properties` and in `opened`.
 
-- [ ] **Step 5: Implement `earned`**
+- [ ] **Step 5: Implement `earned` and the amounts of a claim and a close, and take `close`'s amounts from them**
 
 In `programs/stint/src/maths.rs`, replace
+
+```rust
+use crate::errors::StintError;
+```
+
+with
+
+```rust
+use crate::errors::StintError;
+use crate::state::Session;
+```
+
+Then, in the same file, replace
 
 ```rust
 /// The seconds a close charges: the elapsed time, raised to the minimum unless it is waived.
@@ -445,18 +544,131 @@ fn capped(deposited: u64, rate: u64, seconds: u64) -> u64 {
 }
 ```
 
+Then, in the same file, replace
+
+```rust
+/// `rate × seconds`, for the deposit bounds of `open`.
+```
+
+with
+
+```rust
+/// What a claim moves: `amount` from the vault to the receiver, after which the session's
+/// `claimed` is `claimed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClaimAmounts {
+    pub amount: u64,
+    pub claimed: u64,
+}
+
+/// A claim at `now` (spec section 4.3): what is earned and not yet paid. It is zero when the clock
+/// has not moved since the last claim, and when it has stepped back (S15): `claimed` then stays as
+/// it is, and otherwise becomes exactly `earned`.
+pub fn claim_amounts(session: &Session, now: i64) -> Result<ClaimAmounts> {
+    let paid_until = paid_until(session.started_at, session.deposited, session.rate)?;
+    let earned = earned(session.deposited, session.rate, elapsed(session.started_at, paid_until, now));
+    Ok(ClaimAmounts { amount: owed(session.claimed, earned), claimed: session.claimed.max(earned) })
+}
+
+/// What a close moves: `owed` to the receiver for the time charged, then the residual, either
+/// `refunded` or `redirected` to the receiver. Together they are the vault's whole balance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CloseAmounts {
+    pub owed: u64,
+    pub refunded: u64,
+    pub redirected: u64,
+}
+
+/// A close at `now` of a vault holding `vault` (spec section 4.3): the time charged, with the
+/// minimum waived or not, what that still owes the receiver, and where the residual goes.
+pub fn close_amounts(
+    session: &Session,
+    vault: u64,
+    now: i64,
+    waive_minimum: bool,
+    refund_account_gone: bool,
+) -> Result<CloseAmounts> {
+    let paid_until = paid_until(session.started_at, session.deposited, session.rate)?;
+    let elapsed = elapsed(session.started_at, paid_until, now);
+    let due = due(session.deposited, session.rate, charged(session.min_seconds, elapsed, waive_minimum));
+    let owed = owed(session.claimed, due);
+    let residual = vault.checked_sub(owed).ok_or_else(|| error!(StintError::MathOverflow))?;
+    Ok(if redirects(residual, now, paid_until, refund_account_gone) {
+        CloseAmounts { owed, refunded: 0, redirected: residual }
+    } else {
+        CloseAmounts { owed, refunded: residual, redirected: 0 }
+    })
+}
+
+/// `rate × seconds`, for the deposit bounds of `open`.
+```
+
+Last, make `close` take its amounts from `close_amounts`, with no change in behaviour. In
+`programs/stint/src/instructions/close.rs`, replace
+
+```rust
+    let elapsed = maths::elapsed(session.started_at, paid_until, now);
+    let charged = maths::charged(session.min_seconds, elapsed, false);
+    let due = maths::due(session.deposited, session.rate, charged);
+    let owed = maths::owed(session.claimed, due);
+    let residual = ctx
+        .accounts
+        .vault
+        .amount
+        .checked_sub(owed)
+        .ok_or_else(|| error!(StintError::MathOverflow))?;
+
+    // From `paid_until` on, a residual owed to a refund account that no longer exists goes to the
+    // receiver (spec section 4.3), so the account's owner cannot keep a session open by closing it
+    // and sending the vault one base unit. "No longer exists" means owned by the System program,
+    // whatever its lamports (S12): anyone can send lamports to a closed address, so a balance check
+    // would let them block the redirect.
+    let refund_account_gone = *ctx.accounts.refund_to.owner == System::id();
+    let (to_receiver, refunded, redirected) =
+        if maths::redirects(residual, now, paid_until, refund_account_gone) {
+            let to_receiver = owed
+                .checked_add(residual)
+                .ok_or_else(|| error!(StintError::MathOverflow))?;
+            (to_receiver, 0, residual)
+        } else {
+            (owed, residual, 0)
+        };
+```
+
+with
+
+```rust
+    // From `paid_until` on, a residual owed to a refund account that no longer exists goes to the
+    // receiver (spec section 4.3), so the account's owner cannot keep a session open by closing it
+    // and sending the vault one base unit. "No longer exists" means owned by the System program,
+    // whatever its lamports (S12): anyone can send lamports to a closed address, so a balance check
+    // would let them block the redirect.
+    let refund_account_gone = *ctx.accounts.refund_to.owner == System::id();
+    let maths::CloseAmounts { owed, refunded, redirected } =
+        maths::close_amounts(session, ctx.accounts.vault.amount, now, false, refund_account_gone)?;
+    let to_receiver = owed
+        .checked_add(redirected)
+        .ok_or_else(|| error!(StintError::MathOverflow))?;
+```
+
+`paid_until` is still computed in the handler: the authorisation check and the `Closed` event use it.
+
 - [ ] **Step 6: Run the tests to see them pass**
 
 Run: `cargo test -p stint`
-Expected: PASS: `test result: ok. 19 passed; 0 failed` (the 11 earlier tests, the 4 unit tests of `earned` and the 4
-properties). If the build errors with a message naming `Result` or an ambiguous glob import, replace `use super::*;` in
-`mod properties` by `use super::{charged, due, earned, elapsed, owed, paid_until, redirects};`.
+Expected: PASS: `test result: ok. 21 passed; 0 failed` (the 11 earlier tests, the 6 new unit tests and the 4
+properties). The two `unexpected cfg condition value: solana` warnings were there before and stay.
+
+Run: `anchor build && pnpm generate:client && pnpm --filter @lxfoundry/stint-program-client test close.test.ts && git status --short`
+Expected: PASS. Every test of `close.test.ts` passes unchanged: `close` behaves as before. `pnpm generate:client` changes
+nothing, because no instruction, account or event changed. `git status --short` lists exactly `Cargo.lock`,
+`programs/stint/Cargo.toml`, `programs/stint/src/maths.rs` and `programs/stint/src/instructions/close.rs`.
 
 - [ ] **Step 7: Commit the maths**
 
 ```bash
-git add Cargo.lock programs/stint/Cargo.toml programs/stint/src/maths.rs
-git commit -m "Add earned to the maths, with property tests of the amounts"
+git add Cargo.lock programs/stint/Cargo.toml programs/stint/src/maths.rs programs/stint/src/instructions/close.rs
+git commit -m "Add earned and the amounts of a claim and a close to the maths, with property tests, and use them in close"
 ```
 
 - [ ] **Step 8: Check that the properties can fail**
@@ -479,13 +691,14 @@ pub fn owed(_claimed: u64, due: u64) -> u64 {
 ```
 
 Run: `cargo test -p stint`
-Expected: FAIL. `owed_excludes_what_claims_paid`, `claimed_plus_owed_never_exceeds_the_deposit` and
+Expected: FAIL. `owed_excludes_what_claims_paid`, `a_claim_pays_what_is_earned_and_not_yet_claimed`,
+`a_close_pays_what_is_owed_then_refunds_or_redirects_the_residual`, `claimed_plus_owed_never_exceeds_the_deposit` and
 `every_token_that_entered_the_vault_leaves_it_once` fail, the properties with a shrunk counter-example (the other
 properties may fail too). The mutation run's failures are recorded in `programs/stint/proptest-regressions/maths.txt`;
 delete it, it must not be committed.
 
 Run: `git checkout -- programs/stint/src/maths.rs && rm -rf programs/stint/proptest-regressions && cargo test -p stint`
-Expected: PASS, `19 passed`; `git status --short` prints nothing.
+Expected: PASS, `21 passed`; `git status --short` prints nothing.
 
 - [ ] **Step 9: Write the failing tests of `findClaimedEvent`**
 
@@ -970,15 +1183,12 @@ pub struct Claim<'info> {
 pub fn claim_handler(ctx: Context<Claim>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let session = &ctx.accounts.session;
-    let paid_until = maths::paid_until(session.started_at, session.deposited, session.rate)?;
-    let elapsed = maths::elapsed(session.started_at, paid_until, now);
-    let earned = maths::earned(session.deposited, session.rate, elapsed);
 
     // What is earned and not yet paid: the same difference as a close's `owed`. It is zero when the
     // clock has not moved since the last claim, and when it has stepped back (S15): then `claimed`
     // stays as it is, and the claim succeeds without moving anything or emitting an event. A transfer
     // of zero is skipped, so the receiver's account need not exist then (spec section 4.3).
-    let amount = maths::owed(session.claimed, earned);
+    let maths::ClaimAmounts { amount, claimed } = maths::claim_amounts(session, now)?;
     if amount == 0 {
         return Ok(());
     }
@@ -1002,9 +1212,8 @@ pub fn claim_handler(ctx: Context<Claim>) -> Result<()> {
         amount,
     )?;
 
-    // `amount > 0` means `earned > claimed`, so the new total is exactly `earned`.
-    ctx.accounts.session.claimed = earned;
-    emit_cpi!(Claimed { session: session_key, amount, claimed: earned });
+    ctx.accounts.session.claimed = claimed;
+    emit_cpi!(Claimed { session: session_key, amount, claimed });
     Ok(())
 }
 ```
@@ -1074,7 +1283,7 @@ generated code.
 - [ ] **Step 20: Run the tests to see them pass**
 
 Run: `cargo test -p stint && pnpm --filter @lxfoundry/stint-program-client test && pnpm --filter @lxfoundry/stint-program-client typecheck`
-Expected: PASS. `19 passed` in the Rust run; every test of the program-client suite, including all 17 of `claim.test.ts`;
+Expected: PASS. `21 passed` in the Rust run; every test of the program-client suite, including all 17 of `claim.test.ts`;
 no type error.
 
 - [ ] **Step 21: Run the Solana program analyser on `claim.rs`**
@@ -1318,14 +1527,17 @@ pub fn close_handler(ctx: Context<Close>, kind: CloseKind) -> Result<()> {
 Second, replace
 
 ```rust
-    let charged = maths::charged(session.min_seconds, elapsed, false);
+    let maths::CloseAmounts { owed, refunded, redirected } =
+        maths::close_amounts(session, ctx.accounts.vault.amount, now, false, refund_account_gone)?;
 ```
 
 with
 
 ```rust
     // `AtExpiry` charges the elapsed time alone: from `paid_until` on, that is the whole covered time.
-    let charged = maths::charged(session.min_seconds, elapsed, kind == CloseKind::AtExpiry);
+    let waive_minimum = kind == CloseKind::AtExpiry;
+    let maths::CloseAmounts { owed, refunded, redirected } =
+        maths::close_amounts(session, ctx.accounts.vault.amount, now, waive_minimum, refund_account_gone)?;
 ```
 
 - [ ] **Step 26: Rebuild and run every program check**
@@ -2545,7 +2757,7 @@ scope here.
 
 **Interfaces:**
 - Consumes: `createGate`, `GateChain.readSession`, `FacilitatorClient.settle`, `buildCloseTransaction({ kind })`,
-  `readUntilFound`, `paidUntil` and `CloseKind` (`CloseKind.AtExpiry` is in the generated client). The facilitator's
+  `readUntilFound`, `paidUntil`, `sessionMatches` and `CloseKind` (`CloseKind.AtExpiry` is in the generated client). The facilitator's
   `/settle` passes a close of any kind: `checkCloseTransaction` reads the kind and `verifyPayment` does not restrict
   it. The program accepts `AtExpiry` once the program task has landed; the unit tests here use a fake facilitator.
 - Produces (from `@lxfoundry/stint-gate`):
@@ -3599,13 +3811,15 @@ const END_DUE = NOW_MS + PAID_MS;
       await expect.poll(() => h.calls.teardown).toEqual(["expired"]);
     });
 
-    it("ends the session with 4402, with no close, when the account is already gone", async () => {
+    it("ends the session with 4402, with no close, when the account is already gone, after a single read", async () => {
       const { session, closed } = await openConnected();
       h.sessions.delete(session);
+      const reads = h.reads.session;
 
       h.timers.fire(pendingDue(END_DUE));
 
       expect(await closed).toBe(4402);
+      expect(h.reads.session - reads).toBe(1); // the harness's readRetry allows 3 reads: a gone account is not read again
       expect(h.calls.teardown).toEqual(["expired"]);
       expect(closes()).toEqual([]);
     });
@@ -3649,6 +3863,23 @@ const END_DUE = NOW_MS + PAID_MS;
       server.send("tick:resumed");
       await expect.poll(() => frames).toContain("tick:resumed");
       expect(h.calls.teardown).toEqual([]);
+    });
+
+    it.each([
+      { what: "a later start", startedAfter: 20n, rate: 1_000n, deposited: 60_000n },
+      { what: "other terms", startedAfter: 0n, rate: 2_000n, deposited: 120_000n },
+    ])("ends the session with 4402, and does not resume, when the re-read finds another session at the address: $what", async ({ startedAfter, rate, deposited }) => {
+      const { session, closed } = await openConnected();
+      const stored = h.sessions.get(session)!;
+      // Closed, then opened again at the same address, and paid until later than the session the gate tracks.
+      h.sessions.set(session, { ...stored, startedAt: stored.startedAt + startedAfter, rate, deposited });
+
+      h.timers.fire(pendingDue(END_DUE));
+
+      await expect.poll(() => h.calls.teardown).toEqual(["expired"]);
+      expect(await closed).toBe(4402);
+      expect(closes()).toEqual([]);
+      expect(h.timers.pending).toEqual([]);
     });
 
     it("tries the close again after endRetrySeconds when it fails and nothing changed, and stays muted meanwhile", async () => {
@@ -3744,7 +3975,7 @@ const END_DUE = NOW_MS + PAID_MS;
 - [ ] **Step 15: Run them to see them fail**
 
 Run: `pnpm exec vitest run packages/gate/test/lifecycle.test.ts`
-Expected: FAIL: the 20 new tests (the 3 cases of `it.each`, 16 more in the end-timer block, and 1 in the defaults
+Expected: FAIL: the 22 new tests (the 3 cases of the first `it.each` and the 2 of the second, 16 more in the end-timer block, and 1 in the defaults
 block). The gate arms no end timer, so `pendingDue(END_DUE)` fails with `expected [] to have a length of 1`, and the
 checks on two pending timers fail. The 7 idle tests still pass.
 
@@ -3890,14 +4121,20 @@ with:
   }
 
   /**
-   * Re-reads the session at `confirmed`. True when that settles the matter: the session ended meanwhile; or its account
-   * is gone, so it ends here with 4402; or `paid_until` moved later, so it runs on. A read that fails settles nothing.
+   * Re-reads the session at `confirmed`, once. True when that settles the matter: the session ended meanwhile; or its
+   * account is gone, so it ends here with 4402; or `paid_until` moved later on that same account, so it runs on. A read
+   * that fails settles nothing.
+   *
+   * One read, not `readRetry`'s several: the account was read when the open settled, so finding nothing now means it has
+   * closed, not that the RPC has yet to see it. An account at the address that started at another moment, or on other
+   * terms, is another session opened there after a close (spec §4.1): the one tracked here is gone, and its connections
+   * are not served on the newcomer's account.
    */
   async function settledByChain(tracked: Tracked<U>): Promise<boolean> {
     try {
-      const stored = await readUntilFound(() => upstream(() => config.chain.readSession(tracked.info.session)), readRetry);
+      const stored = await upstream(() => config.chain.readSession(tracked.info.session));
       if (tracked.ended) return true;
-      if (!stored) {
+      if (!stored || stored.startedAt !== tracked.stored.startedAt || !sessionMatches(stored, seller)) {
         await end(tracked, "expired", CLOSE_CODES.PAID_TIME_ENDED);
         return true;
       }
@@ -3955,10 +4192,10 @@ clear the `"end"` slot, and the buyer's close and the end close share `tracked.c
 - [ ] **Step 17: Run the tests**
 
 Run: `pnpm exec vitest run packages/gate/test/lifecycle.test.ts`
-Expected: PASS: 27 tests (7 of Step 8, 20 new).
+Expected: PASS: 29 tests (7 of Step 8, 22 new).
 
 Run: `pnpm --filter @lxfoundry/stint-gate test`
-Expected: PASS: 61 tests (27 lifecycle, 27 `gate.test.ts`, 7 `chain.test.ts`).
+Expected: PASS: 63 tests (29 lifecycle, 27 `gate.test.ts`, 7 `chain.test.ts`).
 
 Run: `pnpm --filter @lxfoundry/stint-gate typecheck`
 Expected: no output, exit code 0.
@@ -4033,7 +4270,7 @@ with:
 - [ ] **Step 23: Run the tests**
 
 Run: `pnpm --filter @lxfoundry/stint-gate test`
-Expected: PASS: 62 tests (28 lifecycle, 27 `gate.test.ts`, 7 `chain.test.ts`).
+Expected: PASS: 64 tests (30 lifecycle, 27 `gate.test.ts`, 7 `chain.test.ts`).
 
 - [ ] **Step 24: Commit**
 
@@ -4049,7 +4286,7 @@ Expected: every package passes with no errors (`e2e`, `conformance` and `example
 the new optional `GateConfig` fields without change).
 
 Run: `pnpm --filter @lxfoundry/stint-gate test && pnpm --filter @lxfoundry/stint-client test`
-Expected: PASS (62 gate tests and 32 client tests; the client's tests unchanged).
+Expected: PASS (64 gate tests and 32 client tests; the client's tests unchanged).
 
 Run: `git status --short`
 Expected: no output (everything is committed).
@@ -5840,7 +6077,8 @@ commit. At the end seven of the 35 scenarios are `required` and pass on `local`.
   - `whileGateStopped<T>(stack: StackControl, work: () => Promise<T>): Promise<T>`, exported from scenario 26's file with its own test.
   - `closeBeforeMinSeconds`, `closeAfterPaidUntil`, `disconnectAndGrace` (with `idleCloseSecondsOf`), `expiry`,
     `expiredSessionNobodyCloses`: the five scenarios, and the catalogue entries 2, 3, 9, 16 and 26 `required` (26 keeps
-    `["stack"]` and `"ownStack"`).
+    `["stack"]` and `"ownStack"`, which the sequential runner does not act on yet: 26 runs on the common stack, a known
+    deviation from spec §12.2 recorded under "What this stage builds, and what it leaves for later").
   - The local report reads `Status: required 7, pending 28 · Result: pass 7, fail 0, pending 27, not applicable 1`.
 
 **What stage 4 leaves out, and this task does not build:** top-up, adoption of sessions opened on-chain, one live connection per
@@ -7132,9 +7370,13 @@ covers both. Within that window the sweeper closes it: `AtExpiry`, signed by the
 `claimed + owed` = the deposit (12,000), nothing refunded, the receiver gained exactly `owed`, the rent returned to the rent payer, the account gone. The gate is started again
 in a `finally`, whatever happened, so the scenarios after this one still have a gate at the same address.
 
+Spec §12.2 puts scenario 26 in the own-stack group; here it runs on the common stack, which is safe only while the runner runs one
+scenario at a time (see "What this stage builds, and what it leaves for later"). The scenario's file says so where it stops the gate.
+
 The session lasts 12 s and not less because its `paid_until` comes from the chain's clock, which in clock mode follows the wall clock but falls
-behind when blocks are late (spec §12.3), while the scenario's guards compare `paid_until` with the wall clock: the slack keeps them from
-failing on a late block. The buyer is funded with 100,000 base units, which covers the deposit (12,000, or 22,000 on `devnet`) with room to spare.
+behind when blocks are late (spec §12.3), while the scenario's `paid_until` guard compares it with the wall clock: the slack keeps the guard
+from failing on a late block. The idle guard counts from the wall clock before the open, as the gate's idle timer does, and not from the
+chain's `startedAt`. The buyer is funded with 100,000 base units, which covers the deposit (12,000, or 22,000 on `devnet`) with room to spare.
 
 - [ ] **Step F1: Write the failing test of the gate's restart**
 
@@ -7190,7 +7432,11 @@ import { readUntil } from "../reads.js";
 import type { ScenarioContext, StackControl } from "../types.js";
 import { assertRentReturned } from "./22-example-agent-task.js";
 
-/** Runs `work` with the gate stopped, and starts the gate again afterwards, whatever happened. */
+/**
+ * Runs `work` with the gate stopped, and starts the gate again afterwards, whatever happened. The gate is the run's common
+ * one: spec §12.2 gives scenario 26 a stack of its own, and stopping the common gate is safe only because the runner runs
+ * one scenario at a time. When the runner runs scenarios concurrently, scenario 26 needs a stack of its own.
+ */
 export async function whileGateStopped<T>(stack: StackControl, work: () => Promise<T>): Promise<T> {
   await stack.stopGate();
   try {
@@ -7208,6 +7454,7 @@ export async function expiredSessionNobodyCloses(context: ScenarioContext): Prom
   const stack = context.stack;
   if (!stack) throw new Error("scenario 26 needs a target that provides stack control");
   const buyer = await context.newBuyer(100_000n); // the session costs 12,000 (22,000 on devnet): the funding key lends no more than that
+  const openedAt = Date.now();
   const session = await buyerClient(buyer).open(context.gateUrl, { seconds: sessionSeconds(context.target, 12) });
   const readSession = () => fetchMaybeSession(context.rpc, session.id, { commitment: "confirmed" });
   const account = await readUntil(context.readRetry, readSession, (read) => read.exists);
@@ -7218,9 +7465,11 @@ export async function expiredSessionNobodyCloses(context: ScenarioContext): Prom
   const vault = await associatedTokenAddress(session.id, stored.mint);
   const paidUntilMs = session.paidUntil * 1_000;
   // Were the gate still running at paid_until it would close the session itself, which is not what this scenario is about.
+  // The gate's end timer compares paid_until with its own clock, as this check does.
   expectTrue(paidUntilMs - Date.now() > 3_000, "the gate is stopped at least 3 s before paid_until: the open took too long");
-  // Nor may the gate close it for want of a connection: the test offer's idleCloseSeconds is 10, counted from the open.
-  expectTrue(Date.now() < Number(stored.startedAt) * 1_000 + 7_000, "the gate is stopped at least 3 s before its idle close: the open took too long");
+  // Nor may the gate close it for want of a connection: the test offer's idleCloseSeconds is 10, counted on the gate's clock
+  // from when the open settled, which is after openedAt. The chain's startedAt would not do: the chain's clock can lag.
+  expectTrue(Date.now() < openedAt + 7_000, "the gate is stopped at least 3 s before its idle close: the open took too long");
 
   // The sweeper lists every 2 s on the local target and every 5 s on the devnet target, and a sweep takes a few seconds to close: 30 s after
   // paid_until covers both. The wait starts when the gate is down, so it also counts the time left until paid_until.
@@ -7425,10 +7674,10 @@ Re-read the session at `confirmed`. If `paid_until` moved, reset the timer. Othe
 (the start of the row's second cell, as it reads at present) with
 
 ```
-Stop forwarding (the gate discards what the resource sends to a connection, and forwards again if the session continues). Re-read the session at `confirmed`. If `paid_until` moved, resume forwarding and reset the timer. Otherwise close. On `NotExpired`, re-read:
+Stop forwarding (the gate discards what the resource sends to a connection, and forwards again if the session continues). Re-read the session at `confirmed`. If `paid_until` moved on the same session (the same `started_at` and terms: an account opened again at the address after a close is another session, section 4.1, and the one the gate tracks has ended), resume forwarding and reset the timer. Otherwise close. On `NotExpired`, re-read:
 ```
 
-The rest of the row stays: it already says `resume forwarding` when a top-up landed, which now follows from the first sentence.
+The rest of the row stays: it already says `resume forwarding` when a top-up landed, which now follows from the first sentence, and a top-up keeps `started_at` and the terms.
 
 In §6.4, after the last paragraph, `It runs on one elected instance, or on all of them tolerating duplicates: a second close finds the` / `account gone and is skipped.`, replace
 
@@ -7637,6 +7886,10 @@ git commit -m "Record the upgraded devnet program and the scenarios that pass th
 
 Each is made in the task that needs it, and restates a fact the code relies on:
 - §4.3 (`claim`): `Claimed` is emitted only when the claim transfers something (Task 6);
-- §7.3 (the end-timer row): how forwarding stops and resumes (Task 6);
+- §7.3 (the end-timer row): how forwarding stops and resumes, and that only the same session resumes, not one opened again at the address (Task 6);
 - §6.4: the listing endpoint of the sweeper (Task 6);
 - §12.2 (stack control): the harness can stop the gate and start it again (Task 6).
+
+Not edited, on purpose: §12.2's isolation groups. The spec states where scenario 26 runs once the runner is
+concurrent; until then it runs on the common stack, as recorded under "What this stage builds, and what it leaves
+for later".
