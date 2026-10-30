@@ -2,6 +2,7 @@ import { STATUS_CODES, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Duplex } from "node:stream";
 import { address, isAddress, type Address } from "@solana/kit";
 import {
+  CloseKind,
   STINT_PROGRAM_ADDRESS,
   StintInstruction,
   dueAt,
@@ -39,33 +40,50 @@ import {
   type TokenPurpose,
 } from "@lxfoundry/stint-x402";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { EndReason, GateConfig, SessionInfo } from "./types.js";
+import { CLOSE_CODES, type EndReason, type GateConfig, type SessionInfo, type Timers } from "./types.js";
 
 export interface Gate {
   /** Serves the gate's HTTP routes; resolves false for any other request, which the host serves. */
   handleRequest(request: IncomingMessage, response: ServerResponse): Promise<boolean>;
   /** Serves `GET /sessions/:id/ws`; returns false for any other upgrade. */
   handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): boolean;
-  /** Drops every connection. */
+  /** Stops the gate's timers and drops every connection. It does not end the sessions: nothing is closed on chain. */
   close(): Promise<void>;
 }
+
+/** The two timers of a session: no connection within the grace period, and the end of the paid time. */
+type TimerSlot = "idle" | "end";
 
 interface Tracked<U> {
   readonly info: SessionInfo;
   readonly stored: Session;
   readonly upstream: U;
   readonly connections: Set<WebSocket>;
-  /** The close in flight, or finished with the session ended: concurrent closes share it. */
+  /** The close in flight, or finished with the session ended: every close of the session shares it. */
   closing?: Promise<CloseOutcome>;
   ended: boolean;
+  /** Cancels each pending timer. */
+  readonly pending: Partial<Record<TimerSlot, () => void>>;
 }
 
 interface CloseOutcome {
   readonly status: number;
   readonly body: unknown;
-  /** True once the session is over; false when the buyer may retry. */
+  /** True once the session is over; false when the buyer, or a timer, may retry. */
   readonly ended: boolean;
 }
+
+/** What a close is for: its kind on chain, why the session ends once it is confirmed, and the code its connections get. */
+interface ClosePlan {
+  readonly kind: CloseKind;
+  readonly reason: EndReason;
+  readonly code: number;
+}
+
+/** The buyer's request. */
+const BUYER_CLOSE: ClosePlan = { kind: CloseKind.Standard, reason: "closed", code: CLOSE_CODES.SESSION_CLOSED };
+/** No connection came back within `idleCloseSeconds`. */
+const IDLE_CLOSE: ClosePlan = { kind: CloseKind.Standard, reason: "idle", code: CLOSE_CODES.SESSION_CLOSED };
 
 /** A failure of something the gate calls: the facilitator or the chain. Answered 502; any other error is 500. */
 class UpstreamError extends Error {
@@ -87,6 +105,14 @@ const SESSION_PATH = /^\/sessions\/([1-9A-HJ-NP-Za-km-z]{32,44})\/(ws|close)$/;
 /** `GET /sessions/:id` (the status); `SESSION_PATH` holds the routes that end in `/ws` or `/close`. */
 const STATUS_PATH = /^\/sessions\/([1-9A-HJ-NP-Za-km-z]{32,44})$/;
 const TOKEN_SKEW_MS = 30_000;
+/** The longest delay `setTimeout` takes: a longer one fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+const systemTimers: Timers = {
+  // Unreferenced, so a session that is still waiting does not keep a stopped host alive.
+  set: (callback, delayMs) => setTimeout(callback, delayMs).unref(),
+  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
 
 function parseUrl(request: IncomingMessage, origin: string): URL | undefined {
   try {
@@ -101,9 +127,14 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   const tokenClock = config.tokenClock ?? Date.now;
   const sessionClock = config.sessionClock ?? Date.now;
   const log = config.log ?? (() => {});
+  const logError = (error: unknown) => log({ event: "error", error: error instanceof Error ? error.message : String(error) });
   const menu = config.durations ?? [config.terms.minSeconds];
   const marginMs = (config.marginSeconds ?? 2) * 1000;
   const readRetry = config.readRetry ?? { attempts: 5, delayMs: 200 };
+  const timers = config.timers ?? systemTimers;
+  const idleCloseSeconds = Math.max(0, Number.isFinite(config.idleCloseSeconds) ? (config.idleCloseSeconds as number) : 60);
+  /** Set when the gate stops: from then on no timer is armed. */
+  let stopped = false;
   const wss = new WebSocketServer({ noServer: true, maxPayload: config.maxMessageBytes ?? 64 * 1024 });
   const sessions = new Map<Address, Tracked<U>>();
   /** Sessions being provisioned, so a retried open waits for the first instead of provisioning again. */
@@ -149,7 +180,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       facilitator: await fromFacilitator(),
       lifetime: lifetime ?? (await upstream(() => config.chain.latestBlockhash())),
       maxTimeoutSeconds: config.maxTimeoutSeconds ?? 60,
-      idleCloseSeconds: config.idleCloseSeconds ?? 60,
+      idleCloseSeconds,
       closeOnOutage: config.closeOnOutage ?? true,
     };
   }
@@ -181,11 +212,49 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     return undefined;
   }
 
+  /**
+   * Runs `run` once the session clock reaches `targetMs`: the timer is set for `max(0, targetMs - sessionClock())`.
+   * A slot holds one timer, and arming it again replaces the old one. A timer that fires before its target (the
+   * delay is capped, and a timer can fire a moment early) sets itself again for what is left.
+   */
+  function arm(tracked: Tracked<U>, slot: TimerSlot, targetMs: number, run: (tracked: Tracked<U>) => Promise<void>): void {
+    disarm(tracked, slot);
+    if (stopped || tracked.ended) return;
+    const delayMs = Math.min(Math.max(0, targetMs - sessionClock()), MAX_TIMER_MS);
+    const handle = timers.set(() => {
+      tracked.pending[slot] = undefined;
+      if (stopped || tracked.ended) return;
+      if (sessionClock() < targetMs) return arm(tracked, slot, targetMs, run);
+      run(tracked).catch(logError);
+    }, delayMs);
+    tracked.pending[slot] = () => timers.clear(handle);
+  }
+
+  function disarm(tracked: Tracked<U>, slot: TimerSlot): void {
+    tracked.pending[slot]?.();
+    tracked.pending[slot] = undefined;
+  }
+
+  /** The session has `idleCloseSeconds`, from now, to get a connection. */
+  function armIdle(tracked: Tracked<U>): void {
+    arm(tracked, "idle", sessionClock() + idleCloseSeconds * 1000, idleClose);
+  }
+
+  /** The idle timer fired (spec §7.3): close the session. A close that fails leaves it to run to the end of its paid time. */
+  async function idleClose(tracked: Tracked<U>): Promise<void> {
+    try {
+      await (tracked.closing ??= startClose(tracked, IDLE_CLOSE));
+    } catch (error) {
+      logError(error);
+    }
+  }
+
   async function provision(session: Address, stored: Session): Promise<Tracked<U>> {
     const info: SessionInfo = { session, authority: stored.authority, paidUntil: paidUntil(stored) };
     const resource = await config.adapter.provision(info);
-    const tracked: Tracked<U> = { info, stored, upstream: resource, connections: new Set(), ended: false };
+    const tracked: Tracked<U> = { info, stored, upstream: resource, connections: new Set(), ended: false, pending: {} };
     sessions.set(session, tracked);
+    armIdle(tracked);
     return tracked;
   }
 
@@ -280,6 +349,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   async function end(tracked: Tracked<U>, reason: EndReason, code: number): Promise<void> {
     if (tracked.ended) return;
     tracked.ended = true;
+    disarm(tracked, "idle");
+    disarm(tracked, "end");
     sessions.delete(tracked.info.session);
     for (const socket of tracked.connections) socket.close(code, "session closed");
     await config.adapter.teardown(tracked.info, reason);
@@ -290,19 +361,19 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     if (!tracked) return sendJson(response, 404, { error: "unknown_session" });
     if (!(await authenticate(bearer(request), tracked, "close"))) return sendJson(response, 401, { error: "unauthorized" });
     // Overlapping closes share one settlement and one outcome (the first assignment is synchronous).
-    const outcome = await (tracked.closing ??= startClose(tracked));
+    const outcome = await (tracked.closing ??= startClose(tracked, BUYER_CLOSE));
     sendJson(response, outcome.status, outcome.body);
   }
 
-  function startClose(tracked: Tracked<U>): Promise<CloseOutcome> {
-    const run = performClose(tracked);
-    // A failed close leaves the session open, and the buyer may try again.
+  function startClose(tracked: Tracked<U>, plan: ClosePlan): Promise<CloseOutcome> {
+    const run = performClose(tracked, plan);
+    // A failed close leaves the session open, and the buyer, or a timer, may try again.
     const reopen = () => void (tracked.closing = undefined);
     run.then((outcome) => outcome.ended || reopen(), reopen);
     return run;
   }
 
-  async function performClose(tracked: Tracked<U>): Promise<CloseOutcome> {
+  async function performClose(tracked: Tracked<U>, plan: ClosePlan): Promise<CloseOutcome> {
     const session = tracked.info.session;
     const base = await offerBase();
     const transaction = await buildCloseTransaction({
@@ -311,6 +382,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       closer: config.receiverAuthorizer,
       feePayer: address(base.facilitator.feePayer),
       lifetime: base.lifetime,
+      kind: plan.kind,
     });
     const requirements = buildCloseRequirements({ ...base, session });
     const payload: PaymentPayload = {
@@ -334,7 +406,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     } catch (error) {
       log({ event: "error", error: error instanceof Error ? error.message : String(error) });
     } finally {
-      await end(tracked, "closed", 4410);
+      await end(tracked, plan.reason, plan.code);
     }
     // A confirmed close is a success. Without the event the amounts are unknown, so only the transaction is returned.
     if (!event) return { status: 200, body: { transaction: settled.transaction }, ended: true };
@@ -392,7 +464,11 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     if (Number(tracked.info.paidUntil) * 1000 - sessionClock() <= marginMs) return refuseUpgrade(socket, 402);
     wss.handleUpgrade(request, socket, head, (ws) => {
       tracked.connections.add(ws);
-      ws.once("close", () => tracked.connections.delete(ws));
+      disarm(tracked, "idle");
+      ws.once("close", () => {
+        tracked.connections.delete(ws);
+        if (tracked.connections.size === 0) armIdle(tracked);
+      });
       // A protocol violation, such as a message over the limit, is emitted as an error before the close.
       // Without a listener it would be an uncaught exception.
       ws.on("error", (error) => log({ event: "error", error: error.message }));
@@ -456,7 +532,12 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       return true;
     },
     async close() {
-      for (const tracked of sessions.values()) for (const socket of tracked.connections) socket.close(1001, "gate stopping");
+      stopped = true;
+      for (const tracked of sessions.values()) {
+        disarm(tracked, "idle");
+        disarm(tracked, "end");
+        for (const socket of tracked.connections) socket.close(1001, "gate stopping");
+      }
       await new Promise<void>((resolve) => wss.close(() => resolve()));
     },
   };
