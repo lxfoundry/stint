@@ -109,6 +109,11 @@ async function disconnectedPastGrace(shared: Shared, buyer: Buyer): Promise<void
     closePollMs(context.target),
   );
   expectTrue(Date.now() - droppedAt >= (grace - 1) * 1_000, "the gate waited out the grace period before closing");
+  // On the chain's clock, which follows the wall clock or lags behind it: a lag can only make `at` smaller, so it cannot fail this bound.
+  expectTrue(
+    found.event.at - BigInt(Math.floor(droppedAt / 1_000)) <= BigInt(grace + 5),
+    "the gate closed within 5 s of the end of the grace period",
+  );
   await expectStandardClose(shared, buyer, stored, found.signature, found.event);
 }
 
@@ -147,6 +152,10 @@ async function neverConnected(shared: Shared, buyer: Buyer): Promise<void> {
     closePollMs(context.target),
   );
   expectTrue(Date.now() - openedAt >= (grace - 1) * 1_000, "the gate waited out the grace period before closing");
+  expectTrue(
+    found.event.at - BigInt(Math.floor(openedAt / 1_000)) <= BigInt(grace + 5),
+    "the gate closed a never-connected session within 5 s of the end of the grace period",
+  );
   await expectStandardClose(shared, buyer, stored, found.signature, found.event);
 }
 

@@ -77,6 +77,7 @@ export async function expiry(context: ScenarioContext): Promise<void> {
   expectEqual(event.kind, CloseKind.AtExpiry, "the session is closed with AtExpiry");
   expectEqual(event.paidUntil, BigInt(session.paidUntil), "the close's paid_until is the one the open reported");
   expectTrue(event.at >= event.paidUntil, "the chain's clock had reached paid_until at the close");
+  expectTrue(event.at - event.paidUntil <= 30n, "the close confirmed within 30 s of paid_until");
   // 10 s at 1,000 a second is 10,000: all of it is earned at paid_until, so the receiver is paid it all and nothing is refunded.
   expectEqual(event.claimed + event.owed, stored.deposited, "the receiver is paid the whole deposit");
   expectEqual(event.refunded + event.redirected, 0n, "nothing is refunded");
