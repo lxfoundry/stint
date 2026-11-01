@@ -1,3 +1,4 @@
+import { SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM, isSolanaError } from "@solana/kit";
 import { createStintClient, type StintClient } from "@lxfoundry/stint-client";
 import type { Buyer, Target } from "./types.js";
 
@@ -20,4 +21,20 @@ export function sessionSeconds(target: Target, local: number): number {
 /** How often a scenario looks for a close that someone else sent: devnet's public node rate-limits, so it is asked half as often. */
 export function closePollMs(target: Target): number {
   return target.name === "devnet" ? 2_000 : 1_000;
+}
+
+/**
+ * Whether a rejection carries the custom error `code` of a program's instruction. A transaction refused in preflight
+ * rejects with a kit `SolanaError` whose `cause` chain holds the instruction error; one that lands and fails is reported
+ * by the harness as text, `Transaction … failed: {"InstructionError":[0,{"Custom":6006}]}`. Anything else, a network error
+ * or another code included, is not the program refusing.
+ */
+export function rejectedWithProgramError(error: unknown, code: number): boolean {
+  const failedTransaction = new RegExp(String.raw`"InstructionError":\[\d+,\{"Custom":${code}\}\]`);
+  // The chain is short; the bound keeps a chain that loops from running for ever.
+  for (let depth = 0, current = error; current instanceof Error && depth < 10; depth++, current = current.cause) {
+    if (isSolanaError(current, SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM) && current.context.code === code) return true;
+    if (failedTransaction.test(current.message)) return true;
+  }
+  return false;
 }

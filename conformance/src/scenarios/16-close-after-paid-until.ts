@@ -1,19 +1,20 @@
 import type { KeyPairSigner } from "@solana/kit";
-import { CloseKind, fetchMaybeSession } from "@lxfoundry/stint-program-client";
+import { CloseKind, STINT_ERROR__UNAUTHORIZED, fetchMaybeSession } from "@lxfoundry/stint-program-client";
 import { fetchClosedEvent, lamportBalances, tokenBalanceChanges } from "@lxfoundry/stint-x402";
 import { expectEqual, expectTrue, sleep } from "../assert.js";
-import { sessionSeconds } from "../helpers.js";
+import { rejectedWithProgramError, sessionSeconds } from "../helpers.js";
 import { readUntil } from "../reads.js";
 import type { DirectChain, DirectSession, ScenarioContext } from "../types.js";
 import { assertRentReturned } from "./22-example-agent-task.js";
 
-/** Whether the attempt is refused: it rejects. */
-async function isRefused(attempt: Promise<unknown>): Promise<boolean> {
+/** Whether the program itself refuses the attempt with its custom error `code`. Any other rejection, a network error included, is not a refusal. */
+async function isRefusedWith(attempt: Promise<unknown>, code: number): Promise<boolean> {
   try {
     await attempt;
     return false;
-  } catch {
-    return true;
+  } catch (error) {
+    if (rejectedWithProgramError(error, code)) return true;
+    throw new Error(`the attempt was rejected, but not with the program error ${code}`, { cause: error });
   }
 }
 
@@ -58,7 +59,7 @@ export async function closeAfterPaidUntil(context: ScenarioContext): Promise<voi
   // Before paid_until only the authority and the receiver authorizer may close (spec §4.3).
   const stranger = await direct.newKey();
   expectTrue(Date.now() < paidUntilMs - 2_000, "the early close is tried at least 2 s before paid_until: the open took too long");
-  expectTrue(await isRefused(direct.close(opened, stranger)), "a close by an unrelated key before paid_until is refused");
+  expectTrue(await isRefusedWith(direct.close(opened, stranger), STINT_ERROR__UNAUTHORIZED), "a close by an unrelated key before paid_until is refused with Unauthorized");
   expectTrue((await readSession()).exists, "the refused close left the session open");
 
   await sleep(Math.max(0, paidUntilMs + 1_000 - Date.now()));
