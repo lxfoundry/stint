@@ -81,12 +81,23 @@ describe("checkTopUp (spec §9.2, §9.3)", () => {
     ["another receiver authorizer than the session's", withTopUpExtra({ receiverAuthorizer: signer }), 10],
     ["another maxSeconds than the session's", withTopUpExtra({ maxSeconds: 200 }), 10],
     ["another duration than requested", topUp, 11],
-    ["more than maxSeconds leaves after what the session covers", { ...withTopUpExtra({ seconds: 91 }), amount: "91000" }, 91],
     ["an amount that is not rate × seconds", { ...topUp, amount: "10001" }, 10],
     ["more than maxPerSession with what the session holds", topUp, 10, { sessionTotal: 90_001n }],
     ["more than the period budget", topUp, 10, { locked: 190_001n }],
   ])("refuses %s", (_, candidate, requested, overrides) => {
     expect(checkTopUp(policy, candidate, requested, { ...context, ...overrides }).ok).toBe(false);
+  });
+
+  it("refuses more seconds than maxSeconds leaves after what the session covers, though every amount limit would take them", () => {
+    // 30 s are covered by the 30,000 held, so 90 s of the 120 remain. The limits on money are raised so that only the
+    // duration can refuse: 30,000 + 91,000 is within maxPerSession and within the budget.
+    const roomy: Policy = { ...policy, maxPerSession: 200_000n, budget: { amount: 200_000n, periodSeconds: 3_600 } };
+    const tooLong = { ...withTopUpExtra({ seconds: 91 }), amount: "91000" };
+
+    expect(checkTopUp(roomy, tooLong, 91, context)).toEqual({
+      ok: false,
+      reason: "91 s is outside 1..90, what maxSeconds leaves",
+    });
   });
 
   it("refuses an offer that names the client's own signer as the fee payer, as an open's check does", () => {
