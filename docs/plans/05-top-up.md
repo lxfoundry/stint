@@ -105,6 +105,10 @@ A top-up reaches the chain by one of two paths, and the path, not the moment alo
 The 10 s margin is the facilitator's rule, not the program's: it makes sure that a payment, which has to go through
 verification, Kora and confirmation, lands before the end. The program has no margin.
 
+The timeline is drawn as if the facilitator's clock and the wall clock agree with the chain's. Scenario 34 sets only
+the gate's clock ahead: its session clock is the wall clock plus 5 s (Task 6), and the scenario times its steps on the
+wall clock.
+
 ```
  Time on the chain's clock, relative to the session's paid_until P (2 characters = 1 s)
 
@@ -115,7 +119,7 @@ verification, Kora and confirmation, lands before the end. The program has no ma
  ├─── accepted ──────┤├── refused (1) ───┤├── refused (2) ─────────────────►
 
  B. Sent to the chain directly
- ├─────────────── accepted ───────────────┤├── refused (3) ─────────────────►
+ ├─────────────── accepted ──────────────┤├── refused (3) ─────────────────►
 
  Scenario 34: the gate's clock runs 5 s ahead of the chain's
                                ▲     ▲   ▲             ▲         ▲
@@ -138,8 +142,9 @@ would be refused, by the margin and by the gate, whose end timer has fired. The 
 chain's end only when its clock runs ahead of the chain's, a normal skew; the program decides by the chain's clock,
 so a direct top-up can still land, and the gate must not end a session that has just been extended.
 
-Scenario 4 uses path A only: a top-up about 19 s before the first end is accepted, and the new end is P' = P + 10;
-one at P' − 5 is refused (1); one after the gate has closed the session at P' is refused (2), with `404`.
+Scenario 4 uses path A only. Locally, a top-up about 19 s before the first end is accepted, and the new end is
+P' = P + 10; on devnet the session is 30 s and the top-up 20 s, so P' = P + 20. On both targets, one at P' − 5 is
+refused (1), and one after the gate has closed the session at P' is refused (2), with `404`.
 
 ## Before you start: what a person must prepare
 
@@ -5668,6 +5673,9 @@ with
     await sleep(1_500);
 
     await direct.topUp({ buyer, session: session.id, seconds: 20 });
+    expect(Date.now(), "the top-up was confirmed more than 2 s before the old end: the open and the top-up took too long").toBeLessThan(
+      oldEndMs - 2_000,
+    );
     await sleep(Math.max(0, oldEndMs - 1_000 - Date.now()));
 
     // 1 s before the old end, within the gate's 2 s margin: a gate that has not seen the top-up refuses with 402.
@@ -5812,7 +5820,7 @@ URL in it is cut to its host). Diagnose by the symptom:
 | Scenario 4: the top-up 5 s before the end is not refused | The facilitator's clock and the chain's disagree by more than 5 s | Stop and report: the facilitator decides the margin on its own clock (spec §5.4), and a gap that large is a finding |
 | Scenario 34: the on-chain top-up fails with error 6003 (`SessionExpired`) | It landed after `paidUntil`: the confirmation took longer than the 2.5 s lead, or devnet's clock runs ahead of the wall clock | Raise `TOP_UP_LEAD_MS` to the measured time, at most 3,500, so that `IN_FLIGHT_MS` still fits before it. Record the measurement |
 | Scenario 34: `the gate stopped forwarding when its end timer fired` fails | A frame forwarded just before the gate stopped arrived more than 1 s later | Raise `IN_FLIGHT_MS` to the measured delay, keeping `GATE_AHEAD_MS - IN_FLIGHT_MS > TOP_UP_LEAD_MS`. If no frame should have been in flight, stop and report: the gate did not stop forwarding |
-| Scenario 34: `the gate forwards again after the first paid_until` times out | The gate resumes on the account's notification (Task 7), or, if its subscription failed, at the re-read after its next failed close. Neither saw the top-up before the end timer's next firing, or the payments were too slow to land in the window. The harness does not capture the gate's log, so a `subscription_error` is not visible | Look at the timestamps of the frames and of the top-up's confirmation. If the gate never resumed, stop and report: whether the subscription failed is the first thing to find out, from a run with the gate's `log` set |
+| Scenario 34: `the gate forwards again after the first paid_until` times out | The gate resumes on the account's notification (Task 7), or, if its subscription failed, at the end timer's next re-read. Neither saw the top-up before the end timer's next firing, or the payments were too slow to land in the window. The harness does not capture the gate's log, so a `subscription_error` is not visible | Look at the timestamps of the frames and of the top-up's confirmation. If the gate never resumed, stop and report: whether the subscription failed is the first thing to find out, from a run with the gate's `log` set |
 | Scenario 3, 4 or 34: `4402` not received within 30 s | Confirmations are slow, or the devnet clock lags the gate's, so the gate's `AtExpiry` close fails with `NotExpired` and is retried | A `4402` later than the 30 s after `paid_until` that the specification allows is a finding about the design: stop and report it. Only the slack that `awaitClose` adds for the chain to confirm (15 s) may be lengthened, to the observed lag |
 | Scenario 26 times out | The sweeper did not close the session: its interval (5 s on devnet) and the confirmation outlasted the scenario's wait | Lengthen the scenario's wait by the measured delay; never shorten the check |
 | `Cleaning up what earlier runs left failed` at start-up | A session or account was left by a run that ended abnormally, or the provider refuses the listing of the program's accounts | `pnpm e2e:devnet clean`, then run again; set `STINT_DEVNET_SCAN_RPC_URL=https://api.devnet.solana.com` in `.env.devnet` if the listing is refused |
@@ -5865,9 +5873,9 @@ git commit -m "Record the upgraded devnet program and the scenarios that pass th
   expiry, funding by a preceding transfer), and the four properties of that section hold as property tests over
   sequences of claims and top-ups, with two more: a top-up lands only before the end, and the deposit never buys more
   than `max_seconds`.
-- A buyer tops up through the gate with `session.topUp` or `stint_top_up`; the gate moves its end timer; a top-up within
-  10 s of the end, or after it, is refused and costs nothing; a top-up that lands on-chain while the gate is closing at
-  expiry makes the gate resume.
+- A buyer tops up through the gate with `session.topUp` or `stint_top_up`; the gate moves its end timer; a top-up
+  through the gate within 10 s of the end, or after it, is refused and costs nothing; a top-up sent to the chain
+  directly that lands while the gate is closing at expiry makes the gate resume.
 - The gate follows each session's account: a top-up it did not settle moves its end timer at once (the end-to-end test
   of Task 7 connects within the margin of the old end), and a subscription that fails leaves the end timer's re-read as
   the fallback.
