@@ -8,8 +8,10 @@ import {
   earnedAt,
   elapsedAt,
   findClaimedEvent,
+  findToppedUpEvent,
   getClaimedEventEncoder,
   getClosedEventEncoder,
+  getToppedUpEventEncoder,
   type ProgramInstruction,
 } from "../src/index.js";
 
@@ -75,5 +77,30 @@ describe("findClaimedEvent", () => {
   it("ignores an event emitted by another program", () => {
     const tokenProgram = address("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
     expect(findClaimedEvent([emitted(claimed, tokenProgram)])).toBeUndefined();
+  });
+});
+
+describe("findToppedUpEvent", () => {
+  const key = address("11111111111111111111111111111111");
+  const toppedUp = getToppedUpEventEncoder().encode({ session: key, added: 10_000n, deposited: 40_000n, paidUntil: 1_040n });
+  const claimed = getClaimedEventEncoder().encode({ session: key, amount: 8_000n, claimed: 8_000n });
+
+  function emitted(payload: ReadonlyUint8Array, programAddress: Address = STINT_PROGRAM_ADDRESS): ProgramInstruction {
+    const data = new Uint8Array(EVENT_IX_TAG.length + payload.length);
+    data.set(EVENT_IX_TAG, 0);
+    data.set(payload, EVENT_IX_TAG.length);
+    return { programAddress, data };
+  }
+
+  it("decodes the ToppedUp event that the program emitted, among other events", () => {
+    const expected = { session: key, added: 10_000n, deposited: 40_000n, paidUntil: 1_040n };
+    expect(findToppedUpEvent([emitted(toppedUp)])).toEqual(expected);
+    expect(findToppedUpEvent([emitted(claimed), emitted(toppedUp)])).toEqual(expected);
+  });
+
+  it("is undefined when the program emitted no ToppedUp event, or another program did", () => {
+    expect(findToppedUpEvent([])).toBeUndefined();
+    expect(findToppedUpEvent([emitted(claimed)])).toBeUndefined();
+    expect(findToppedUpEvent([emitted(toppedUp, address("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"))])).toBeUndefined();
   });
 });
