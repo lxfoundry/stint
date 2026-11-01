@@ -620,3 +620,35 @@ describe("a gate with no timings configured", () => {
     await expect.poll(() => d.timers.pending.map((timer) => timer.delayMs)).toEqual([2_000]);
   });
 });
+
+describe("a gate whose endRetrySeconds is longer than 60 s", () => {
+  let l: Harness;
+  const { open } = helpers(() => l);
+
+  beforeEach(async () => {
+    l = await startHarness({ endRetrySeconds: 120 });
+  });
+
+  afterEach(async () => {
+    await l.gate.close();
+    l.server.closeAllConnections();
+    await new Promise((resolve) => l.server.close(resolve));
+  });
+
+  it("keeps waiting endRetrySeconds once the waits would double: the 60 s cap does not shorten it", async () => {
+    await open();
+    l.fail.settleClose = true;
+    l.timers.fire(l.timers.pending.find((timer) => timer.dueMs === END_DUE)!);
+
+    const delays: number[] = [];
+    while (delays.length < 3) {
+      await expect.poll(() => l.timers.pending.length).toBe(1);
+      const timer = l.timers.pending[0]!;
+      l.timers.fire(timer);
+      delays.push(timer.delayMs);
+    }
+
+    // The first wait already ends past the first 30 s, so each wait after it would double; it stays at 120 s.
+    expect(delays).toEqual([120_000, 120_000, 120_000]);
+  });
+});
