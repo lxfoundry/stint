@@ -1074,6 +1074,7 @@ Decisions this task makes, from the code and the spec:
 - Modify: `packages/x402/src/constants.ts`, `packages/x402/src/types.ts`, `packages/x402/src/offer.ts`,
   `packages/x402/src/wire.ts`, `packages/x402/src/transactions.ts`, `packages/x402/src/checks.ts`,
   `docs/specs/stint-system.md` (section 5.3)
+- Modify (types only, Step 12): `apps/facilitator/src/verify.ts`, `apps/facilitator/src/settle.ts`
 - Test: `packages/x402/test/offer.test.ts`, `packages/x402/test/wire.test.ts`, `packages/x402/test/checks.test.ts`
 
 **Interfaces:**
@@ -1618,12 +1619,49 @@ git add packages/x402 docs/specs/stint-system.md
 git commit -m "Add top-up offers, durations, payloads, transactions and checks to the scheme"
 ```
 
-- [ ] **Step 12: Check the packages that use the scheme**
+- [ ] **Step 12: Let the facilitator's types hold a `topUp` payload**
+
+`ElapsedPayload` gained a member, so the `type: elapsed.type` that `verifyPayment` returns
+(`apps/facilitator/src/verify.ts`) can now be `"topUp"`, and `settlePayment` passes it on to `submitSettlement`. Both
+types must name it, or the workspace no longer type-checks. Only the types change here: Task 3 gives a top-up its own
+checks and settlement.
+
+In `apps/facilitator/src/verify.ts`, replace
+
+```ts
+      readonly type: "open" | "close";
+```
+
+with
+
+```ts
+      readonly type: "open" | "topUp" | "close";
+```
+
+In `apps/facilitator/src/settle.ts`, replace
+
+```ts
+export interface SignedSettlement {
+  readonly type: "open" | "close";
+```
+
+with
+
+```ts
+export interface SignedSettlement {
+  readonly type: "open" | "topUp" | "close";
+```
+
+- [ ] **Step 13: Check the packages that use the scheme, and commit**
 
 Run: `pnpm typecheck && pnpm --filter @lxfoundry/stint-facilitator test && pnpm --filter @lxfoundry/stint-gate test`
-Expected: PASS. `ElapsedPayload` gained a member: the facilitator's `verifyPayment` compares `elapsed.type` with the
-entry's action and branches on `"open"`, so a `topUp` payload now reaches its close branch. Task 3 gives it its own
-branch; until then no test sends one.
+Expected: PASS. A `topUp` payload now reaches the facilitator's close branch, which refuses it; Task 3 gives it its
+own branch, and until then no test sends one.
+
+```bash
+git add apps/facilitator/src/verify.ts apps/facilitator/src/settle.ts
+git commit -m "Name the topUp payload in the facilitator's verification and settlement types"
+```
 
 ---
 
@@ -1658,7 +1696,7 @@ Decisions this task makes, from the code and the spec:
   - `verifyPayment` accepts a `topUp` payload and returns `{ ok: true, type: "topUp", tx, payer: <the session's
     authority>, session }`, or refuses with `unknown_session`, `invalid_terms`, `session_expired`, `invalid_payload`,
     `invalid_amount`, `unexpected_instruction`, `payer_misuse`, `blockhash_expired` or `simulation_failed`.
-  - `SignedSettlement.type: "open" | "topUp" | "close"`; `submitSettlement` answers a confirmed top-up with
+  - `submitSettlement` answers a confirmed top-up (`SignedSettlement.type` names `"topUp"` since Task 2) with
     `{ success: true, transaction, network, payer, amount: <the requirements' amount> }`.
   - The facilitator's `/verify` and `/settle` therefore accept a top-up from a gate (Task 4).
 
@@ -1907,11 +1945,10 @@ with
 
 Run: `pnpm --filter @lxfoundry/stint-facilitator test verify.test.ts settle.test.ts`
 Expected: FAIL. A top-up payload reaches the close branch, whose layout check refuses it as `unexpected_instruction`,
-so the tests that expect a top-up accepted, or refused for its own reasons, fail (the two that expect
-`unknown_session` and `invalid_terms` pass by coincidence: the close branch makes the same two checks first). The new
-test of `settle.test.ts` fails too: the top-up is answered as a close, without its amount. Vitest does not check
-types; `pnpm --filter @lxfoundry/stint-facilitator typecheck` also fails, since `"topUp"` is not a `SignedSettlement`
-type yet.
+so the tests that expect a top-up accepted, or refused for its own reasons, fail. Three pass by coincidence: the two
+that expect `unknown_session` and `invalid_terms` (the close branch makes the same two checks first), and the one that
+sends a payload against the other action's requirements (the check that the payload's type matches the action comes
+before any branch). The new test of `settle.test.ts` fails too: the top-up is answered as a close, without its amount.
 
 - [ ] **Step 4: Verify a top-up**
 
@@ -1957,18 +1994,6 @@ with
 }
 ```
 
-replace
-
-```ts
-      readonly type: "open" | "close";
-```
-
-with
-
-```ts
-      readonly type: "open" | "topUp" | "close";
-```
-
 and replace
 
 ```ts
@@ -2007,21 +2032,7 @@ already sets it: the rent payer funds nothing.
 
 - [ ] **Step 5: Settle a top-up**
 
-In `apps/facilitator/src/settle.ts`, replace
-
-```ts
-export interface SignedSettlement {
-  readonly type: "open" | "close";
-```
-
-with
-
-```ts
-export interface SignedSettlement {
-  readonly type: "open" | "topUp" | "close";
-```
-
-replace
+In `apps/facilitator/src/settle.ts` (whose `SignedSettlement.type` names `"topUp"` since Task 2), replace
 
 ```ts
   /** The amount an open deposits; a close reports what its `Closed` event says it paid. */
@@ -2113,6 +2124,12 @@ Decisions this task makes, from the code and the spec:
 - **A top-up that settles while the end close is in flight.** The top-up resumes the session; the end close, which
   then fails with `NotExpired`, must not arm a retry over the new end timer. `expire` stops after its pass when the
   session was resumed during it (`resume` clears `endRetry`).
+- **A top-up only moves the end.** `resume` is split: `extend` sets the new end and the end timer, and `resume` adds
+  forwarding and the idle timer. The route calls `resume` only when the end timer has fired; otherwise `extend`, so a
+  top-up does not arm again an idle timer whose close failed (a failed close leaves the session to run to its end, and
+  spec section 7.3 does not retry a close refused because the buyer's refund account is closed).
+- **The `200` reports the later end it knows.** If the end timer's re-read found a top-up made elsewhere while this one
+  settled, the session already runs later than the worked-out end: the answer is the later of the two.
 - **A pending top-up** (`202`) needs nothing more from the gate: if it lands, the end timer finds the later end when it
   fires. Forwarding then stops for the length of one read. The subscription that would avoid this is not built.
 
@@ -2491,6 +2508,34 @@ describe("the gate's top-up route (spec §7.1)", () => {
     expect(h.timers.pending.map((timer) => timer.dueMs)).toEqual([EXTENDED_DUE]);
     expect(h.calls.teardown).toEqual([]);
   });
+
+  it("leaves an idle close that failed alone: a top-up moves the end timer and arms no idle timer", async () => {
+    const { session } = await open();
+    h.fail.settleClose = true;
+    h.timers.fire(pendingDue(NOW_MS + 10_000)); // the idle timer: its close fails, and the session runs on to its end
+    await expect.poll(() => ofType("close")).toHaveLength(1);
+    await settleDown();
+    h.fail.settleClose = false;
+
+    expect((await sendTopUp(session, await prepareTopUp(session, 10), 10)).status).toBe(200);
+
+    expect(h.timers.pending.map((timer) => timer.dueMs)).toEqual([EXTENDED_DUE]);
+  });
+
+  it("answers the later end it knows when its end timer found a top-up made elsewhere while this one settled", async () => {
+    const { session } = await openConnected();
+    const releaseTopUp = hold("settleTopUp");
+    const paying = sendTopUp(session, await prepareTopUp(session, 10), 10);
+    await expect.poll(() => ofType("topUp")).toHaveLength(1);
+    h.sessions.set(session, { ...h.sessions.get(session)!, deposited: 70_000n }); // 40 s more, topped up on-chain meanwhile
+    h.timers.fire(pendingDue(END_DUE)); // the end timer's re-read finds it: the session runs on to +70 s
+    await expect.poll(() => h.timers.pending.map((timer) => timer.dueMs)).toEqual([NOW_MS + 70_000]);
+
+    releaseTopUp();
+
+    expect((await paying).body).toEqual({ paidUntil: NOW_MS / 1000 + 70 });
+    expect(h.timers.pending.map((timer) => timer.dueMs)).toEqual([NOW_MS + 70_000]);
+  });
 });
 ```
 
@@ -2604,37 +2649,53 @@ with
   }
 ```
 
-`resume` hands the resource the new end: replace
+`resume` is split in two: `extend` moves the end, which is all a top-up does to a session whose end timer has not fired,
+and `resume` also lets forwarding go on and arms the idle timer again where the drop of the last connection could not.
+Replace
 
 ```ts
   /** The session was paid for longer: forwarding resumes in both directions, and the end timer is set for the new end of the paid time. */
+  function resume(tracked: Tracked<U>, until: bigint): void {
+    if (tracked.muted) {
+      for (const [socket, original] of tracked.muted) {
+        socket.send = original.send;
+        socket.emit = original.emit;
+      }
+    }
+    tracked.muted = undefined;
+    tracked.endRetry = undefined;
+    tracked.paidUntil = until;
+    armEnd(tracked);
 ```
 
 with
 
 ```ts
   /**
-   * The session was paid for longer: forwarding resumes in both directions, and the end timer is set for the new end of the
-   * paid time, which the resource's `SessionInfo` carries from then on.
+   * The session was paid for longer: the end timer is set for the new end of the paid time, which the resource's
+   * `SessionInfo` carries from then on. Nothing else changes: an idle timer whose close failed is not armed again, since a
+   * failed close leaves the session to run to the end of its paid time.
    */
-```
-
-and replace
-
-```ts
-    tracked.endRetry = undefined;
-    tracked.paidUntil = until;
-    armEnd(tracked);
-```
-
-with
-
-```ts
+  function extend(tracked: Tracked<U>, until: bigint): void {
     tracked.endRetry = undefined;
     tracked.paidUntil = until;
     tracked.info = { ...tracked.info, paidUntil: until };
     armEnd(tracked);
+  }
+
+  /** The session was paid for longer while forwarding was stopped: forwarding resumes in both directions, and the session is extended. */
+  function resume(tracked: Tracked<U>, until: bigint): void {
+    if (tracked.muted) {
+      for (const [socket, original] of tracked.muted) {
+        socket.send = original.send;
+        socket.emit = original.emit;
+      }
+    }
+    tracked.muted = undefined;
+    extend(tracked, until);
 ```
+
+The rest of `resume`, which arms the idle timer when no connection is left and none is pending, stays as it is.
 
 `expire` arms nothing after a pass during which a top-up resumed the session: replace
 
@@ -2740,8 +2801,13 @@ with
       return refusal(settled.errorReason ?? "simulation_failed");
     }
     const until = paidUntil({ ...stored, deposited: stored.deposited + BigInt(requirements.amount) });
-    if (!tracked.ended && until > tracked.paidUntil) resume(tracked, until);
-    sendJson(response, 200, { paidUntil: Number(until) }, paymentResponse);
+    if (!tracked.ended && until > tracked.paidUntil) {
+      // Forwarding goes on if the end timer fired while the top-up settled; otherwise only the end moves.
+      if (tracked.muted) resume(tracked, until);
+      else extend(tracked, until);
+    }
+    // The session may already run later than this top-up alone makes it: the end timer found one made elsewhere meanwhile.
+    sendJson(response, 200, { paidUntil: Number(until > tracked.paidUntil ? until : tracked.paidUntil) }, paymentResponse);
   }
 
   /** Checks 1 to 3 of spec §7.2. Check 4 holds for every tracked session: it opened with this gate's terms. */
@@ -2775,7 +2841,7 @@ with
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `pnpm --filter @lxfoundry/stint-gate test && pnpm --filter @lxfoundry/stint-gate typecheck`
-Expected: PASS, the new file's 14 tests and every earlier one; no type error.
+Expected: PASS, the new file's 16 tests and every earlier one; no type error.
 
 If `resumes forwarding, and keeps the new end timer, when its end timer fires while the top-up settles` fails with a
 pending timer whose `delayMs` is 3,000, the guard in `expire` is missing or placed after the `arm`.
@@ -2843,6 +2909,9 @@ Decisions this task makes, from the code and the spec:
   change.
 - **The tool refuses a session the gate ended or the buyer closed** before it asks the gate, with the messages the other
   tools use.
+- **A 402 that offers no top-up is a refusal with its reason.** Once its end timer has fired, the gate answers a top-up
+  request with `402 session_expired` and offers for a new session only. The client throws a `StintError` with status
+  402 and the gate's body, and says that the paid time has run out, so the tool and an agent see why.
 
 **Files:**
 - Modify: `packages/client/src/policy.ts`, `packages/client/src/client.ts`, `packages/client/src/tools.ts`,
@@ -3131,7 +3200,19 @@ first session plus its own seconds only. The tests below make one top-up through
 
 - [ ] **Step 5: Write the failing tests of `session.topUp`**
 
-In `packages/client/test/client.test.ts`, replace the last two lines of the file,
+In `packages/client/test/client.test.ts`, replace
+
+```ts
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+```
+
+with
+
+```ts
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+```
+
+and replace the last two lines of the file,
 
 ```ts
   });
@@ -3214,13 +3295,36 @@ with
     await expect(session.topUp({ seconds: 5 })).rejects.toThrow(/closed/);
     expect(gate.payments).toHaveLength(2); // the open and the close
   });
+
+  it("reports a gate's 402 that offers no top-up with its status and reason, and signs nothing", async () => {
+    const client = createStintClient({ signer: buyer, policy });
+    const session = await client.open(gate.url, { seconds: 30 });
+    const realFetch = globalThis.fetch;
+    // What the gate answers once its end timer has fired: a 402 offering a new session only.
+    vi.stubGlobal("fetch", (input: string | URL | Request, init?: RequestInit) =>
+      String(input).includes("/top-up")
+        ? Promise.resolve(Response.json({ x402Version: 2, error: "session_expired", resource: { url: `${gate.url}/sessions` }, accepts: [] }, { status: 402 }))
+        : realFetch(input, init),
+    );
+    try {
+      await expect(session.topUp({ seconds: 5 })).rejects.toMatchObject({
+        message: "The session's paid time has run out: it cannot be extended",
+        status: 402,
+        body: { error: "session_expired" },
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(gate.payments).toHaveLength(1);
+    expect(client.remainingBudget()).toBe(10_000n);
+  });
 });
 ```
 
 - [ ] **Step 6: Run them to see them fail**
 
 Run: `pnpm --filter @lxfoundry/stint-client test client.test.ts`
-Expected: FAIL: `session.topUp is not a function` in the six new tests; the earlier tests pass.
+Expected: FAIL: `session.topUp is not a function` in the seven new tests; the earlier tests pass.
 
 - [ ] **Step 7: Implement `session.topUp`**
 
@@ -3398,7 +3502,11 @@ export function createStintClient(options: ClientOptions): StintClient {
         const entry = required.accepts
           .map(readElapsedRequirements)
           .find((candidate) => candidate?.extra.action === "topUp" && candidate.extra.seconds === seconds);
-        if (!entry) throw new StintError(`No top-up offer for ${seconds} s`);
+        // Once its end timer has fired, the gate answers with offers for a new session only, and says why.
+        if (!entry) {
+          const expired = required.error === "session_expired";
+          throw new StintError(expired ? "The session's paid time has run out: it cannot be extended" : `No top-up offer for ${seconds} s`, 402, required);
+        }
         const check = checkTopUp(options.policy, entry, seconds, {
           opened: offer,
           session: session.id,
@@ -3546,7 +3654,7 @@ export {
 - [ ] **Step 8: Run the client's tests to see them pass**
 
 Run: `pnpm --filter @lxfoundry/stint-client test policy.test.ts client.test.ts`
-Expected: PASS, the six new tests of `session.topUp`, the new tests of `checkTopUp`, and every earlier test of the
+Expected: PASS, the seven new tests of `session.topUp`, the new tests of `checkTopUp`, and every earlier test of the
 policy and the client.
 
 - [ ] **Step 9: Write the failing tests of `stint_top_up`**
@@ -3801,16 +3909,19 @@ harness cannot do yet: start the gate with its session clock ahead of the wall c
 gate or the facilitator.
 
 What each scenario proves, on `local` and on `devnet`:
-- **Scenario 4.** A session of 15 s (25 s on devnet, where every step takes longer and a subscription takes 5 s to
-  settle), connected, with a payer changing a watched account every 500 ms. A top-up of the same length, made once the
-  connection is watched, answers the new `paidUntil` (the old one plus its seconds), and the chain shows the deposit
-  grown by its cost. Frames keep arriving after the first `paidUntil`. Five seconds before the new end, a top-up is
-  refused with `402 session_expired` (the facilitator's 10 s margin) and the buyer's USDC does not move. The
-  connection is dropped with `4402` within 30 s of the new end; the `AtExpiry` close's `paid_until` is the new one, and
-  it pays the receiver the opening deposit and the top-up. After the close, a top-up is refused with `404
-  unknown_session`, the buyer's USDC does not move, and the client's budget holds the two payments only.
-- **Scenario 34.** The gate restarted with its session clock 5 s ahead. A session of 15 s (25 s on devnet), connected
-  and watched as above. The gate's end timer fires 5 s before `paidUntil`: from a second after that, no frame arrives.
+- **Scenario 4.** A session of 20 s (30 s on devnet, where every step takes longer). A top-up of 10 s (20 s on devnet),
+  made right after the open, answers the new `paidUntil` (the old one plus its seconds), and the chain shows the
+  deposit grown by its cost. It comes before the connection, so the target's subscription wait (5 s on devnet) does not
+  bring it near the facilitator's 10 s margin. Then the buyer connects, a payer changes a watched account every 500 ms,
+  and frames keep arriving after the first `paidUntil`. Five seconds before the new end, a top-up is refused with `402
+  session_expired` (the margin) and the buyer's USDC does not move. The connection is dropped with `4402` within 30 s
+  of the new end; the `AtExpiry` close's `paid_until` is the new one, and it pays the receiver the opening deposit and
+  the top-up. After the close, a top-up is refused with `404 unknown_session`, the buyer's USDC does not move, and the
+  client's budget holds the two payments only.
+- **Scenario 34.** The gate restarted with its session clock 5 s ahead. A session of 15 s plus the target's
+  subscription wait (17 s locally, 30 s on devnet), connected and watched as above, so that frames flow for some
+  seconds before the gate's end timer fires. The end timer fires 5 s before `paidUntil`: from a second after that, no
+  frame arrives.
   2.5 s before `paidUntil` the authority tops up 12 s on-chain. The chain shows the deposit grown and `paidUntil` moved
   by 12 s; frames arrive again after the first `paidUntil` (the gate resumed); the gate stops forwarding again when its
   end timer fires before the new end, closes with `AtExpiry` once the chain reaches it, and drops the connection with
@@ -4317,18 +4428,17 @@ async function refusalOf(attempt: Promise<unknown>): Promise<{ readonly status?:
 }
 
 /**
- * Scenario 4 (spec §12.7): a top-up before expiry extends the session; after expiry, a top-up is refused. The buyer stays
- * connected while a payer keeps changing a watched account, so the frames show how long the gate serves the session. A
- * top-up within the facilitator's 10 s margin before the end is refused too. Neither refusal costs the buyer anything.
+ * Scenario 4 (spec §12.7): a top-up before expiry extends the session; after expiry, a top-up is refused. Once topped up,
+ * the buyer stays connected while a payer keeps changing a watched account, so the frames show how long the gate serves
+ * the session. A top-up within the facilitator's 10 s margin before the end is refused too. Neither refusal costs the
+ * buyer anything.
  */
 export async function topUpBeforeAndAfterExpiry(context: ScenarioContext): Promise<void> {
-  const buyer = await context.newBuyer(100_000n); // 15 s, then 15 s more: 30,000 (50,000 on devnet)
+  const buyer = await context.newBuyer(100_000n); // 20 s, then 10 s more: 30,000 (50,000 on devnet)
   const payer = await context.newBuyer(1_000n);
   const watched = await context.newBuyer(0n);
   const client = buyerClient(buyer);
-  // Long enough that the first top-up, made once the connection is watched, is more than 10 s before the end.
-  const seconds = sessionSeconds(context.target, 15);
-  const session = await client.open(context.gateUrl, { seconds });
+  const session = await client.open(context.gateUrl, { seconds: sessionSeconds(context.target, 20) });
   const readSession = () => fetchMaybeSession(context.rpc, session.id, { commitment: "confirmed" });
   const opened = await readUntil(context.readRetry, readSession, (read) => read.exists);
   expectTrue(opened.exists, "the session exists on-chain after the open");
@@ -4336,24 +4446,26 @@ export async function topUpBeforeAndAfterExpiry(context: ScenarioContext): Promi
   const usdcOf = async (account: Address) =>
     BigInt((await context.rpc.getTokenAccountBalance(account, { commitment: "confirmed" }).send()).value.amount);
   const firstEndMs = session.paidUntil * 1_000;
-  let deposited = stored.deposited;
-  let endMs = firstEndMs;
+
+  // Before expiry: the top-up adds its seconds to the end of the paid time, and its cost to the deposit. It comes right
+  // after the open, before the connection and its subscription wait, so it is well outside the facilitator's 10 s margin
+  // whatever the target; the chain's clock, which set the end, can lag the facilitator's.
+  expectTrue(firstEndMs - Date.now() > 12_000, "the first top-up is more than 12 s before the end: the open took too long");
+  const seconds = sessionSeconds(context.target, 10);
+  const extended = await session.topUp({ seconds });
+  expectEqual(extended.cost, stored.rate * BigInt(seconds), "the top-up costs rate x seconds");
+  expectEqual(extended.paidUntil * 1_000, firstEndMs + seconds * 1_000, "the top-up moves paid_until by the seconds it bought");
+  expectEqual(session.paidUntil, extended.paidUntil, "the session reports the new paid_until");
+  const toppedUp = await readUntil(context.readRetry, readSession, (read) => read.exists && read.data.deposited > stored.deposited);
+  expectTrue(toppedUp.exists, "the session is still open after the top-up");
+  expectEqual(toppedUp.data.deposited, stored.deposited + extended.cost, "the top-up is credited to the deposit");
+  expectEqual(toppedUp.data.startedAt, stored.startedAt, "the session keeps its start");
+  expectEqual(paidUntil(toppedUp.data), BigInt(extended.paidUntil), "the chain's paid_until is the one the gate answered");
+  const deposited = toppedUp.data.deposited;
+  const endMs = extended.paidUntil * 1_000;
 
   const watch = await watchWhilePaying(context, session, payer, watched);
   try {
-    // Before expiry: the top-up adds its seconds to the end of the paid time, and its cost to the deposit.
-    const extended = await session.topUp({ seconds });
-    expectEqual(extended.cost, stored.rate * BigInt(seconds), "the top-up costs rate x seconds");
-    expectEqual(extended.paidUntil * 1_000, firstEndMs + seconds * 1_000, "the top-up moves paid_until by the seconds it bought");
-    expectEqual(session.paidUntil, extended.paidUntil, "the session reports the new paid_until");
-    const toppedUp = await readUntil(context.readRetry, readSession, (read) => read.exists && read.data.deposited > stored.deposited);
-    expectTrue(toppedUp.exists, "the session is still open after the top-up");
-    expectEqual(toppedUp.data.deposited, stored.deposited + extended.cost, "the top-up is credited to the deposit");
-    expectEqual(toppedUp.data.startedAt, stored.startedAt, "the session keeps its start");
-    expectEqual(paidUntil(toppedUp.data), BigInt(extended.paidUntil), "the chain's paid_until is the one the gate answered");
-    deposited = toppedUp.data.deposited;
-    endMs = extended.paidUntil * 1_000;
-
     // 5 s before the new end, within the facilitator's 10 s margin, a top-up is refused and takes nothing.
     await sleep(Math.max(0, endMs - 5_000 - Date.now()));
     const before = await usdcOf(buyer.usdcAccount);
@@ -4504,10 +4616,13 @@ export async function topUpWhileClosingAtExpiry(context: ScenarioContext): Promi
   const direct = context.direct;
   if (!direct) throw new Error("scenario 34 needs a target that provides direct chain access");
   await withGateClockAhead(stack, GATE_AHEAD_MS, async () => {
-    const buyer = await context.newBuyer(100_000n); // 15 s, then 12 s more: 27,000 (37,000 on devnet)
+    const buyer = await context.newBuyer(100_000n); // at most 30 s, then 12 s more: 42,000
     const payer = await context.newBuyer(1_000n);
     const watched = await context.newBuyer(0n);
-    const session = await buyerClient(buyer).open(context.gateUrl, { seconds: sessionSeconds(context.target, 15) });
+    // The connection and its subscription wait come before the gate's end timer fires, 5 s before the end: the session
+    // lasts that wait longer (17 s locally, 30 s on devnet, where the wait is 5 s).
+    const seconds = sessionSeconds(context.target, 15) + Math.ceil(context.subscriptionSettleMs / 1_000);
+    const session = await buyerClient(buyer).open(context.gateUrl, { seconds });
     const readSession = () => fetchMaybeSession(context.rpc, session.id, { commitment: "confirmed" });
     const opened = await readUntil(context.readRetry, readSession, (read) => read.exists);
     expectTrue(opened.exists, "the session exists on-chain after the open");
@@ -4627,7 +4742,7 @@ with
 ```ts
 /**
  * The required scenarios, all passing on `local`. Together they take about three minutes: scenario 1 sleeps 7 s, 3 runs
- * about 25 s, 4 about 45 s, 9 about 15 s, 16 about 15 s, 26 about 20 s and 34 about 35 s, so the test's limit is generous.
+ * about 25 s, 4 about 35 s, 9 about 15 s, 16 about 15 s, 26 about 20 s and 34 about 35 s, so the test's limit is generous.
  */
 ```
 
@@ -4792,7 +4907,8 @@ URL in it is cut to its host). Diagnose by the symptom:
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
-| Scenario 4: the first top-up is refused with `402 session_expired` | The open and the 5 s subscription wait took more than the 15 s that the 25 s session leaves before the facilitator's margin | Lengthen scenario 4's devnet session (its `sessionSeconds(context.target, 15)`) by the measured delay, and record it |
+| Scenario 4: `the first top-up is more than 12 s before the end` fails, or the first top-up is refused with `402 session_expired` | The open took more than the 18 s that the 30 s session leaves, or devnet's clock lags the facilitator's by that much | Lengthen scenario 4's opening session (its `sessionSeconds(context.target, 20)`) by the measured delay, and record it |
+| Scenario 34: `frames flow for 3 s before the gate's end timer fires` fails | The open and the 5 s subscription wait took more than the 30 s session allows before the end timer fires, 5 s early | Lengthen scenario 34's session (its `sessionSeconds(context.target, 15)`) by the measured delay, and record it |
 | Scenario 4: the top-up 5 s before the end is not refused | The facilitator's clock and the chain's disagree by more than 5 s | Stop and report: the facilitator decides the margin on its own clock (spec §5.4), and a gap that large is a finding |
 | Scenario 34: the on-chain top-up fails with error 6003 (`SessionExpired`) | It landed after `paidUntil`: the confirmation took longer than the 2.5 s lead, or devnet's clock runs ahead of the wall clock | Raise `TOP_UP_LEAD_MS` to the measured time, at most 3,500, so that `IN_FLIGHT_MS` still fits before it. Record the measurement |
 | Scenario 34: `the gate stopped forwarding when its end timer fired` fails | A frame forwarded just before the gate stopped arrived more than 1 s later | Raise `IN_FLIGHT_MS` to the measured delay, keeping `GATE_AHEAD_MS - IN_FLIGHT_MS > TOP_UP_LEAD_MS`. If no frame should have been in flight, stop and report: the gate did not stop forwarding |
