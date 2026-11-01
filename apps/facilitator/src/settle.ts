@@ -69,7 +69,7 @@ export interface SignedSettlement {
   readonly blockhash: string;
   /** The session authority. */
   readonly payer: Address;
-  /** The amount an open deposits; a close reports what its `Closed` event says it paid. */
+  /** The amount an open or a top-up deposits; a close reports what its `Closed` event says it paid. */
   readonly amount: string;
 }
 
@@ -103,7 +103,7 @@ export async function submitSettlement(
     return { success: false, errorReason, errorMessage: message(error), transaction: signature, network, payer };
   }
 
-  if (signed.type === "open") return { success: true, transaction: signature, network, payer, amount: signed.amount };
+  if (signed.type !== "close") return { success: true, transaction: signature, network, payer, amount: signed.amount };
   // What this transaction paid the receiver; earlier claims are the gate's to add (spec §5.5).
   const event = await readUntilFound(
     () => fetchClosedEvent(ctx.rpc, signature).catch(() => undefined),

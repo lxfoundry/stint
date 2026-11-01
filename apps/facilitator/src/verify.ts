@@ -8,12 +8,14 @@ import {
   type Rpc,
   type SolanaRpcApi,
 } from "@solana/kit";
-import { STINT_PROGRAM_ADDRESS, fetchMaybeSession, getSessionSize } from "@lxfoundry/stint-program-client";
+import { STINT_PROGRAM_ADDRESS, fetchMaybeSession, getSessionSize, paidUntil } from "@lxfoundry/stint-program-client";
 import {
+  TOP_UP_MARGIN_SECONDS,
   X402_VERSION,
   associatedTokenAddress,
   checkCloseTransaction,
   checkOpenTransaction,
+  checkTopUpTransaction,
   inspectTransaction,
   readElapsedPayload,
   readElapsedRequirements,
@@ -40,6 +42,8 @@ export interface FacilitatorContext {
   readonly confirmTimeoutMs: number;
   /** How a confirmed close's transaction is re-read while the node returns nothing. Default 5 reads, 400 ms apart. */
   readonly readRetry?: RetryOptions;
+  /** The facilitator's clock, in milliseconds: it decides the top-up margin of spec §5.4. Default `Date.now`. */
+  readonly clock?: () => number;
 }
 
 export type Verified =
@@ -83,7 +87,7 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
   if (!tx) return refuse("invalid_payload", "the transaction cannot be decoded as version 0");
 
   let facts: { payer: Address; session: Address };
-  // A close funds nothing: the rent payer only receives the session's rent back.
+  // A close and a top-up fund nothing: the rent payer only receives a closed session's rent back.
   let funding: Funding = { destinations: [], budget: 0n };
   if (elapsed.type === "open") {
     const check = await checkOpenTransaction(tx, requirements, ctx.keys);
@@ -98,6 +102,25 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
       ctx.rpc.getMinimumBalanceForRentExemption(BigInt(getTokenSize())).send(),
     ]);
     funding = { destinations: [check.value.session, check.value.vault], budget: sessionRent + vaultRent };
+  } else if (elapsed.type === "topUp") {
+    if (!extra.session) return refuse("invalid_payment_requirements", "a top-up names its session");
+    const session = address(extra.session);
+    const stored = await fetchMaybeSession(ctx.rpc, session, { commitment: "confirmed" });
+    if (!stored.exists) return refuse("unknown_session", "no such session");
+    if (!sessionMatches(stored.data, sellerTermsOf(requirements))) {
+      return refuse("invalid_terms", "the session's terms differ from the requirements");
+    }
+    // The transaction must land before the end: from `paid_until` on, the program refuses it (spec §4.3).
+    const now = BigInt(Math.floor((ctx.clock ?? Date.now)() / 1000));
+    if (paidUntil(stored.data) - now < BigInt(TOP_UP_MARGIN_SECONDS)) {
+      return refuse("session_expired", `the session's paid time ends in less than ${TOP_UP_MARGIN_SECONDS} s`);
+    }
+    const check = await checkTopUpTransaction(tx, requirements, stored.data, ctx.keys);
+    if (!check.ok) return check;
+    if (stored.data.deposited + BigInt(requirements.amount) > stored.data.rate * BigInt(stored.data.maxSeconds)) {
+      return refuse("invalid_amount", "the top-up would take the session past maxSeconds");
+    }
+    facts = { payer: stored.data.authority, session };
   } else {
     if (!extra.session) return refuse("invalid_payment_requirements", "a close names its session");
     const session = address(extra.session);

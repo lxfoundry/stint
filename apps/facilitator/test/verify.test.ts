@@ -5,13 +5,15 @@ import {
   getTokenSize,
 } from "@solana-program/token";
 import { generateKeyPairSigner, getBase64Decoder, none, type Address, type KeyPairSigner, type Rpc, type SolanaRpcApi } from "@solana/kit";
-import { STINT_PROGRAM_ADDRESS, getSessionEncoder, getSessionSize } from "@lxfoundry/stint-program-client";
+import { STINT_PROGRAM_ADDRESS, findSessionPda, getSessionEncoder, getSessionSize } from "@lxfoundry/stint-program-client";
 import {
   associatedTokenAddress,
   buildCloseTransaction,
   buildOpenOffer,
   buildOpenTransaction,
   buildCloseRequirements,
+  buildTopUpOffer,
+  buildTopUpTransaction,
   type ElapsedRequirements,
 } from "@lxfoundry/stint-x402";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -322,6 +324,147 @@ describe("verifyPayment (spec §5.4)", () => {
       const verified = await verifyPayment(ctx, await closePayload(await generateKeyPairSigner()), closeRequirements);
       expect(verified).toMatchObject({ ok: false, reason: "invalid_payload", message: "the closer is not the expected one" });
       expect(node.simulated).toBe(0);
+    });
+  });
+
+  describe("a top-up", () => {
+    let session: Address;
+    let topUpOffer: ElapsedRequirements;
+    /** The session opened at 1,800,000,000 with 30,000 at 1,000 per second: paid until 1,800,000,030. */
+    const STARTED_AT = 1_800_000_000n;
+
+    const storedSession = (overrides: { rate?: bigint; deposited?: bigint } = {}) => ({
+      owner: STINT_PROGRAM_ADDRESS,
+      data: Uint8Array.from(
+        getSessionEncoder().encode({
+          version: 1,
+          bump: 255,
+          authority: buyer.address,
+          seed: 1n,
+          mint: MINT,
+          receiver: offer.payTo as Address,
+          receiverAuthorizer: authorizer.address,
+          refundOwner: buyer.address,
+          rentPayer: rentPayer.address,
+          rate: overrides.rate ?? 1_000n,
+          minSeconds: 5,
+          maxSeconds: 120,
+          startedAt: STARTED_AT,
+          deposited: overrides.deposited ?? 30_000n,
+          claimed: 0n,
+        }),
+      ),
+    });
+
+    const topUpPayload = async (signedBy: KeyPairSigner = buyer, requirements: ElapsedRequirements = topUpOffer) => {
+      const transaction = await buildTopUpTransaction({ requirements, authority: signedBy, decimals: 6 });
+      return payload(requirements, { type: "topUp", transaction });
+    };
+
+    /** The facilitator's clock at `seconds` after the session's start. */
+    const at = (seconds: number) => {
+      ctx = { ...ctx, clock: () => (Number(STARTED_AT) + seconds) * 1000 };
+    };
+
+    /** A node holding the session, with the facilitator's clock 5 s into it: 25 s before the end of its paid time. */
+    const withSession = async (overrides: { rate?: bigint; deposited?: bigint } = {}) => {
+      await resetNode();
+      node.accounts.set(session, storedSession(overrides));
+      at(5);
+    };
+
+    beforeAll(async () => {
+      [session] = await findSessionPda(buyer.address, 1n);
+      topUpOffer = buildTopUpOffer({
+        network: NETWORK,
+        asset: MINT,
+        payTo: offer.payTo as Address,
+        receiverAuthorizer: authorizer.address,
+        terms: { rate: 1_000n, minSeconds: 5, maxSeconds: 120 },
+        seconds: 12,
+        facilitator: { feePayer, rentPayer: rentPayer.address, programId: STINT_PROGRAM_ADDRESS, closeUrl: "http://127.0.0.1:4021/close" },
+        lifetime: { blockhash: BLOCKHASH, lastValidBlockHeight: 1_234n },
+        maxTimeoutSeconds: 60,
+        idleCloseSeconds: 10,
+        closeOnOutage: true,
+        session,
+      });
+    });
+
+    it("accepts a top-up that passes every check and simulates, with the session's authority as the payer", async () => {
+      await withSession();
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: true, type: "topUp", payer: buyer.address, session });
+      expect(node.simulated).toBe(1);
+    });
+
+    it("refuses a session that does not exist", async () => {
+      await resetNode();
+      at(5);
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "unknown_session" });
+      expect(node.simulated).toBe(0);
+    });
+
+    it("refuses a session whose terms differ from the offer", async () => {
+      await withSession({ rate: 999n, deposited: 29_970n });
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "invalid_terms" });
+      expect(node.simulated).toBe(0);
+    });
+
+    it.each([21, 30, 35])("refuses a top-up %s s into a session paid for 30 s: within 10 s of its end, or after it", async (seconds) => {
+      await withSession();
+      at(seconds);
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "session_expired" });
+      expect(node.simulated).toBe(0);
+    });
+
+    it("accepts a top-up exactly 10 s before the end of the paid time", async () => {
+      await withSession();
+      at(20);
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: true, type: "topUp" });
+    });
+
+    it("refuses a top-up that would take the session past maxSeconds", async () => {
+      // Paid for 110 s of 120: 12 s more would make 122.
+      await withSession({ deposited: 110_000n });
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "invalid_amount" });
+      expect(node.simulated).toBe(0);
+    });
+
+    it("refuses a top-up signed by a key other than the session's authority", async () => {
+      await withSession();
+      expect(await verifyPayment(ctx, await topUpPayload(await generateKeyPairSigner()), topUpOffer)).toMatchObject({
+        ok: false,
+        reason: "invalid_payload",
+      });
+      expect(node.simulated).toBe(0);
+    });
+
+    it("refuses a top-up payload against an open's requirements, and an open payload against a top-up's", async () => {
+      await withSession();
+      expect(await verifyPayment(ctx, { ...(await topUpPayload()), accepted: offer }, offer)).toMatchObject({ ok: false, reason: "invalid_payload" });
+      expect(await verifyPayment(ctx, { ...(await openPayload()), accepted: topUpOffer }, topUpOffer)).toMatchObject({
+        ok: false,
+        reason: "invalid_payload",
+      });
+    });
+
+    it("refuses a simulation in which the rent payer funds anything", async () => {
+      await withSession();
+      node.simulation = {
+        err: null,
+        innerInstructions: [
+          {
+            index: 1,
+            instructions: [
+              {
+                programId: "11111111111111111111111111111111",
+                parsed: { type: "transfer", info: { source: rentPayer.address, destination: session, lamports: 1 } },
+              },
+            ],
+          },
+        ],
+      };
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "payer_misuse" });
     });
   });
 });

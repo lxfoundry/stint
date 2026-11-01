@@ -712,7 +712,7 @@ section 5.5) is not verified again. `/verify` answers from its record.
 | Type | Checks |
 |---|---|
 | `open` | The `stint.open` terms equal `extra` (`rate`, `minSeconds`, `maxSeconds`), and `receiver_authorizer` equals `extra.receiverAuthorizer`. `receiver` is `payTo`, and its associated token account for `asset` exists. `refund_owner` owns the associated token account the funding comes from. `rent_payer` is `rentPayer`. The funding moves **exactly `amount`** of `asset` into the vault. The authority signed |
-| `topUp` | The session exists and its terms match the gate's offer. The signer is its `authority`. `paid_until` is at least 10 s away, so the transaction lands before the end. The funding moves exactly `amount`. The total stays within `maxSeconds` |
+| `topUp` | The session exists and its terms match the gate's offer. The signer is its `authority`. `paid_until` is at least 10 s away on the facilitator's clock, so the transaction lands before the end (`session_expired` otherwise). The funding moves exactly `amount` of the session's mint into its vault, from the associated token account of its stored `refund_owner`, so that a refund goes back to the account the money came from. The total stays within `maxSeconds` (`invalid_amount` otherwise). The rent payer appears nowhere: a top-up creates no account |
 | `close` (from the gate, through `/settle`) | The session exists and its terms match the requirements. The `closer` is its `receiver_authorizer` |
 | `close` (sponsored, through `closeUrl`) | The session exists and its `rent_payer` is one of this facilitator's keys. The `closer` is its `authority`, and `kind` is `Standard` or `AtExpiry`. The payload, `accepted` and requirements checks do not apply: the request carries only the transaction. The fee-payer, facilitator-key, program, layout, simulation and blockhash checks do |
 
@@ -729,7 +729,7 @@ it is used.
 | `unexpected_instruction` | An instruction outside the allowed layout |
 | `payer_misuse` | The fee payer or the rent payer appears where section 5.3 forbids it |
 | `blockhash_expired` | The transaction's blockhash is no longer valid |
-| `session_expired` | A top-up after `paid_until` |
+| `session_expired` | A top-up after `paid_until`, or within 10 s of it |
 | `simulation_failed` | Including an exhausted allowance |
 | `unknown_session` | No such session |
 | `already_processed` | The chain has already processed this message, and the facilitator holds no record of it (section 5.5). **Not final:** the payment may have landed |
