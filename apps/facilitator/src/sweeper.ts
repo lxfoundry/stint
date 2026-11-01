@@ -17,6 +17,7 @@ import {
   getSessionDecoder,
   getSessionSize,
   paidUntil,
+  type Session,
 } from "@lxfoundry/stint-program-client";
 import { buildCloseTransaction, redactUrls, type SettleResponse } from "@lxfoundry/stint-x402";
 import { submitSettlement } from "./settle.js";
@@ -102,14 +103,39 @@ export function createSweeper(deps: SweeperDeps): Sweeper {
       .map(({ pubkey }) => pubkey);
   }
 
-  /** Closes one session; throws when the close fails. "skipped": it is gone, no longer expired, or not ours to close. */
+  /**
+   * True when the account is gone now, or holds another session (it started at another moment): a close that failed lost a
+   * race to another one, and has nothing left to do. A read that fails settles nothing: false.
+   */
+  async function closedMeanwhile(session: Address, stored: Session): Promise<boolean> {
+    try {
+      const current = await fetchMaybeSession(ctx.rpc, session, { commitment: "confirmed" });
+      return !current.exists || current.data.startedAt !== stored.startedAt;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Closes one session; throws when the close fails. "skipped": it is gone, no longer expired, or not ours to close, or its
+   * close failed because the gate's, or another instance's, landed first (spec §6.4: a second close finds the account gone).
+   */
   async function closeOne(session: Address, now: bigint): Promise<"closed" | "skipped"> {
     // The listing may be old, or from another node: the gate or another instance may have closed the session since. The scan
     // endpoint may be a third party's, too: the filters it was asked for are not taken on trust, because a close costs a fee.
     const current = await fetchMaybeSession(ctx.rpc, session, { commitment: "confirmed" });
     if (!current.exists || current.data.rentPayer !== ctx.keys.rentPayer || paidUntil(current.data) > now) return "skipped";
     const stored = current.data;
+    try {
+      return await settleClose(session, stored);
+    } catch (error) {
+      if (await closedMeanwhile(session, stored)) return "skipped";
+      throw error;
+    }
+  }
 
+  /** Builds, signs and settles an `AtExpiry` close of a session read just now. */
+  async function settleClose(session: Address, stored: Session): Promise<"closed"> {
     const { value: lifetime } = await ctx.rpc.getLatestBlockhash({ commitment: "confirmed" }).send();
     const transaction = await buildCloseTransaction({
       session,

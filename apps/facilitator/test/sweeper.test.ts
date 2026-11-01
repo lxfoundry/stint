@@ -66,6 +66,10 @@ interface Node {
   hold?: Promise<void>;
   /** Runs after a listing has been answered. */
   onListed?: () => void;
+  /** Runs when a submission is refused, before the refusal: another party's close can land here. */
+  onRefused?: (session: Address) => void;
+  /** Makes every read of one account fail with this message. */
+  readError?: string;
   listings: Listing[];
   /** The accounts read one by one. */
   reads: Address[];
@@ -113,6 +117,7 @@ function createChain(): { node: Node; rpc: Rpc<SolanaRpcApi>; scanRpc: Rpc<Solan
     getAccountInfo: (target: Address) =>
       call(() => {
         node.reads.push(target);
+        if (node.readError) throw new Error(node.readError);
         const data = node.accounts.get(target);
         return { value: data ? rpcAccount(data) : null };
       }),
@@ -124,7 +129,10 @@ function createChain(): { node: Node; rpc: Rpc<SolanaRpcApi>; scanRpc: Rpc<Solan
         const tx = inspectTransaction(wire)!;
         // `close`'s accounts: closer, session, vault, receiver token, refund account, rent payer.
         const session = tx.instructions[0]!.accounts![1]!.address;
-        if (node.refuse.has(session)) throw new Error("Transaction simulation failed: custom program error 0x1774");
+        if (node.refuse.has(session)) {
+          node.onRefused?.(session);
+          throw new Error("Transaction simulation failed: custom program error 0x1774");
+        }
         node.sent.push({ session, tx });
         node.accounts.delete(session);
         return "accepted";
@@ -194,7 +202,7 @@ describe("the sweeper (spec §6.4)", () => {
   const sweeper = (clock: () => number = () => PAID_UNTIL_MS) =>
     createSweeper({ ctx, scanRpc: fake.scanRpc, clock, log: (entry) => logs.push(entry) });
 
-  const sessionData = (options: { rentPayer?: Address; deposited?: bigint }): Uint8Array =>
+  const sessionData = (options: { rentPayer?: Address; deposited?: bigint; startedAt?: bigint }): Uint8Array =>
     Uint8Array.from(
       getSessionEncoder().encode({
         version: 1,
@@ -209,7 +217,7 @@ describe("the sweeper (spec §6.4)", () => {
         rate: 1_000n,
         minSeconds: 5,
         maxSeconds: 120,
-        startedAt: STARTED_AT,
+        startedAt: options.startedAt ?? STARTED_AT,
         deposited: options.deposited ?? 30_000n,
         claimed: 0n,
       }),
@@ -322,6 +330,37 @@ describe("the sweeper (spec §6.4)", () => {
 
     fake.node.refuse.delete(second);
     expect(await sweep.sweepOnce()).toEqual({ closed: [second], failed: [] });
+  });
+
+  it("skips a session whose close failed because it was closed meanwhile: a second close finds the account gone", async () => {
+    const session = await addSession();
+    fake.node.refuse.add(session);
+    fake.node.onRefused = () => void fake.node.accounts.delete(session); // the gate's close landed first
+
+    expect(await sweeper().sweepOnce()).toEqual({ closed: [], failed: [] });
+
+    expect(logs).toEqual([]);
+  });
+
+  it("skips a session whose close failed because another session was opened at its address meanwhile", async () => {
+    const session = await addSession();
+    fake.node.refuse.add(session);
+    fake.node.onRefused = () => void fake.node.accounts.set(session, sessionData({ startedAt: STARTED_AT + 100n }));
+
+    expect(await sweeper().sweepOnce()).toEqual({ closed: [], failed: [] });
+
+    expect(logs).toEqual([]);
+  });
+
+  it("reports the close's own error when the read that follows its failure fails too", async () => {
+    const session = await addSession();
+    fake.node.refuse.add(session);
+    fake.node.onRefused = () => void (fake.node.readError = "rpc down");
+
+    expect(await sweeper().sweepOnce()).toEqual({
+      closed: [],
+      failed: [{ session, error: expect.stringContaining("simulation_failed") }],
+    });
   });
 
   it("reports a close that Kora refuses to sign, and sends nothing", async () => {
