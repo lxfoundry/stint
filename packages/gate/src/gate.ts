@@ -126,10 +126,16 @@ const systemTimers: Timers = {
   clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
-/** Stands in for a muted socket's `send`: the frame is dropped, and a send callback still runs, so an adapter waiting on it is not stuck. */
+/**
+ * Stands in for a muted socket's `send`: the frame is dropped, and a send callback still runs, without an error, so an
+ * adapter waiting on it is not stuck. It runs on a later turn of the event loop, as `ws`'s never runs before `send`
+ * returns: an adapter that sends its next frame from the callback would otherwise recurse here without end when its
+ * source has no end, and the end close could not run. `setImmediate` and not `process.nextTick`, which would still
+ * starve I/O and timers.
+ */
 function discard(...args: unknown[]): void {
   const done = args.at(-1);
-  if (typeof done === "function") done();
+  if (typeof done === "function") setImmediate(done as () => void);
 }
 
 /**

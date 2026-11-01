@@ -200,6 +200,22 @@ describe("the gate's lifecycle", () => {
       expect(received).toEqual(["cmd:before"]);
     });
 
+    it("runs the send callback of a frame it drops on a later turn of the event loop, without an error", async () => {
+      const { server } = await openConnected();
+      const release = holdClose();
+      h.timers.fire(pendingDue(END_DUE));
+      await expect.poll(() => closes()).toHaveLength(1); // the close is waiting at the facilitator: forwarding has stopped
+
+      const calls: unknown[][] = [];
+      server.send("tick:dropped", (...args: unknown[]) => calls.push(args));
+
+      expect(calls).toEqual([]); // not before send returns: an adapter that sends its next frame from the callback would recurse
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(calls).toEqual([[]]);
+      release();
+      await expect.poll(() => h.calls.teardown).toEqual(["expired"]);
+    });
+
     it("forwards the buyer's frames again when it resumes, and drops the ones sent while forwarding was stopped", async () => {
       const { session, socket, server } = await openConnected();
       const received: string[] = [];
