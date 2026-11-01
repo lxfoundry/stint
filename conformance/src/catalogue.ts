@@ -1,6 +1,7 @@
 import { openConnectCloseEarly } from "./scenarios/01-open-connect-close.js";
 import { closeBeforeMinSeconds } from "./scenarios/02-close-before-min-seconds.js";
 import { expiry } from "./scenarios/03-expiry.js";
+import { topUpBeforeAndAfterExpiry } from "./scenarios/04-top-up.js";
 import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
@@ -32,7 +33,7 @@ export const catalogue: readonly Scenario[] = [
   required(1, "Open, connect, close early", openConnectCloseEarly),
   required(2, "Close before minSeconds", closeBeforeMinSeconds),
   required(3, "Expiry", expiry),
-  pending(4, "Top-up before and after expiry"),
+  required(4, "Top-up before and after expiry", topUpBeforeAndAfterExpiry),
   pending(5, "Payment with wrong terms, a wrong amount, or a Memo instruction"),
   pending(6, "Failed payment"),
   pending(7, "Unilateral on-chain close"),
