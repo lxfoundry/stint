@@ -16,3 +16,9 @@ export const HEADERS = {
   paymentSignature: "PAYMENT-SIGNATURE",
   paymentResponse: "PAYMENT-RESPONSE",
 } as const;
+
+/**
+ * A top-up is refused when its session's paid time ends within this many seconds, on the facilitator's clock, so that the
+ * transaction lands before the end (spec §5.4): from `paid_until` on, the program refuses it.
+ */
+export const TOP_UP_MARGIN_SECONDS = 10;

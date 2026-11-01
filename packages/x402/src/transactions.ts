@@ -27,6 +27,7 @@ import {
   findSessionPda,
   getCloseInstruction,
   getOpenInstruction,
+  getTopUpInstruction,
   type Session,
 } from "@lxfoundry/stint-program-client";
 import type { ElapsedRequirements } from "./types.js";
@@ -118,6 +119,44 @@ export async function buildOpenTransaction(input: BuildOpenInput): Promise<Built
     instructions,
   );
   return { transaction, session, seed };
+}
+
+export interface BuildTopUpInput {
+  /** A `topUp` entry: `extra.session` names the session it extends. */
+  readonly requirements: ElapsedRequirements;
+  readonly authority: TransactionSigner;
+  /** The asset's decimals, from the client's allowlist (spec §5.1, "Decimals"). */
+  readonly decimals: number;
+}
+
+/**
+ * The `topUp` layout of spec §5.3: fund the session's vault with exactly `amount` from the authority's associated token
+ * account, then `stint.top_up`. Refunds go to the session's stored refund owner, which is the authority for every session
+ * this client opens. The fee payer's slot stays empty; nobody else signs.
+ */
+export async function buildTopUpTransaction(input: BuildTopUpInput): Promise<string> {
+  const { requirements, authority } = input;
+  const extra = requirements.extra;
+  if (extra.action !== "topUp" || extra.session === undefined) throw new Error("Not a top-up entry: no topUp action, or no session");
+  const mint = address(requirements.asset);
+  const session = address(extra.session);
+  const vault = await associatedTokenAddress(session, mint);
+  const instructions = [
+    getTransferCheckedInstruction({
+      source: await associatedTokenAddress(authority.address, mint),
+      mint,
+      destination: vault,
+      authority,
+      amount: BigInt(requirements.amount),
+      decimals: input.decimals,
+    }),
+    getTopUpInstruction({ authority, session, vault, ...(await eventAccounts()) }),
+  ];
+  return compile(
+    address(extra.feePayer),
+    { blockhash: blockhash(extra.recentBlockhash), lastValidBlockHeight: BigInt(extra.lastValidBlockHeight) },
+    instructions,
+  );
 }
 
 export interface BuildCloseInput {

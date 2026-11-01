@@ -10,16 +10,19 @@ import {
   type SignatureBytes,
 } from "@solana/kit";
 import { getSetComputeUnitLimitInstruction, getSetComputeUnitPriceInstruction } from "@solana-program/compute-budget";
-import { getCreateAssociatedTokenIdempotentInstruction } from "@solana-program/token";
+import { TOKEN_PROGRAM_ADDRESS, getCreateAssociatedTokenIdempotentInstruction } from "@solana-program/token";
 import { beforeAll, describe, expect, it } from "vitest";
-import { CloseKind, type Session } from "@lxfoundry/stint-program-client";
+import { CloseKind, STINT_PROGRAM_ADDRESS, findSessionPda, type Session } from "@lxfoundry/stint-program-client";
 import {
   associatedTokenAddress,
   buildCloseTransaction,
   buildOpenOffer,
   buildOpenTransaction,
+  buildTopUpOffer,
+  buildTopUpTransaction,
   checkCloseTransaction,
   checkOpenTransaction,
+  checkTopUpTransaction,
   inspectTransaction,
   sessionMatches,
   sellerTermsOf,
@@ -310,6 +313,98 @@ describe("close transactions (spec §5.3, §5.4)", () => {
     expect(
       await checkCloseTransaction(inspectTransaction(forgedWire)!, { session, closer: closer.address }, { feePayer, rentPayer }),
     ).toMatchObject({ ok: false, reason: "invalid_payload" });
+  });
+});
+
+describe("top-up transactions (spec §5.3, §5.4)", () => {
+  let buyer: KeyPairSigner;
+  let feePayer: Address;
+  let rentPayer: Address;
+  let session: Address;
+  let entry: ElapsedRequirements;
+  let stored: Pick<Session, "authority" | "mint" | "refundOwner">;
+
+  beforeAll(async () => {
+    buyer = await generateKeyPairSigner();
+    feePayer = (await generateKeyPairSigner()).address;
+    rentPayer = (await generateKeyPairSigner()).address;
+    [session] = await findSessionPda(buyer.address, 7n);
+    entry = buildTopUpOffer({ ...offerInput({ facilitator: { ...offerInput().facilitator, feePayer, rentPayer } }), seconds: 12, session });
+    stored = { authority: buyer.address, mint: entry.asset as Address, refundOwner: buyer.address };
+  });
+
+  const keys = () => ({ feePayer, rentPayer });
+  const built = () => buildTopUpTransaction({ requirements: entry, authority: buyer, decimals: 6 });
+  const check = async (wire: string, against: typeof stored = stored) => checkTopUpTransaction(inspectTransaction(wire)!, entry, against, keys());
+
+  it("builds what the facilitator accepts: the funding, then stint.top_up, signed by the authority only", async () => {
+    const wire = await built();
+    const tx = inspectTransaction(wire)!;
+    expect(tx.feePayer).toBe(feePayer);
+    expect([...tx.signed]).toEqual([buyer.address]);
+    expect(tx.instructions.map((ix) => ix.programAddress)).toEqual([TOKEN_PROGRAM_ADDRESS, STINT_PROGRAM_ADDRESS]);
+    expect(await check(wire)).toEqual({ ok: true, value: { session, authority: buyer.address } });
+  });
+
+  it("refuses to build from an entry that is not a top-up", async () => {
+    await expect(buildTopUpTransaction({ requirements: buildOpenOffer(offerInput()), authority: buyer, decimals: 6 })).rejects.toThrow(/top-up/);
+  });
+
+  it("refuses a deposit that is not exactly the amount", async () => {
+    const wire = await buildTopUpTransaction({ requirements: { ...entry, amount: "11999" }, authority: buyer, decimals: 6 });
+    expect(await check(wire)).toMatchObject({ ok: false, reason: "invalid_amount" });
+  });
+
+  it("refuses a top-up of another session", async () => {
+    const [other] = await findSessionPda(buyer.address, 8n);
+    const wire = await buildTopUpTransaction({ requirements: { ...entry, extra: { ...entry.extra, session: other } }, authority: buyer, decimals: 6 });
+    expect(await check(wire)).toMatchObject({ ok: false, reason: "invalid_terms" });
+  });
+
+  it("refuses a top-up signed by a key other than the session's authority", async () => {
+    const wire = await buildTopUpTransaction({ requirements: entry, authority: await generateKeyPairSigner(), decimals: 6 });
+    expect(await check(wire)).toMatchObject({ ok: false, reason: "invalid_payload" });
+  });
+
+  it("refuses funding from an account other than the refund owner's, and a session in another mint", async () => {
+    // The session refunds a wallet that is not the signer's: the funding must come from that wallet's account.
+    expect(await check(await built(), { ...stored, refundOwner: (await generateKeyPairSigner()).address })).toMatchObject({
+      ok: false,
+      reason: "invalid_terms",
+    });
+    expect(await check(await built(), { ...stored, mint: feePayer })).toMatchObject({ ok: false, reason: "invalid_terms" });
+  });
+
+  it("accepts a compute-unit limit, and refuses an instruction outside the layout", async () => {
+    const wire = await built();
+    const withLimit = await rebuild(wire, buyer, (ixs) => [getSetComputeUnitLimitInstruction({ units: 100_000 }), ...ixs]);
+    expect(await check(withLimit)).toMatchObject({ ok: true });
+    const reversed = await rebuild(wire, buyer, (ixs) => [...ixs].reverse());
+    expect(await check(reversed)).toMatchObject({ ok: false, reason: "unexpected_instruction" });
+    const twice = await rebuild(wire, buyer, (ixs) => [ixs[0]!, ...ixs]);
+    expect(await check(twice)).toMatchObject({ ok: false, reason: "unexpected_instruction" });
+  });
+
+  it("refuses the rent payer anywhere in a top-up", async () => {
+    // Here the rent payer is the funding transfer's authority: a top-up creates nothing, so it has no place at all.
+    const misplaced = await rebuild(await built(), buyer, ([transfer, topUp]) => [
+      {
+        ...transfer!,
+        accounts: transfer!.accounts!.map((meta, at) =>
+          at === 3 ? { address: rentPayer, role: AccountRole.READONLY_SIGNER, signer: createNoopSigner(rentPayer) } : meta,
+        ),
+      } as Instruction,
+      topUp!,
+    ]);
+    expect(await check(misplaced)).toMatchObject({ ok: false, reason: "payer_misuse" });
+  });
+
+  it("refuses an extra signer, and a forged signature", async () => {
+    const wire = await built();
+    const extra = await generateKeyPairSigner();
+    const withExtra = await rebuild(wire, buyer, (ixs) => [ixs[0]!, withExtraSigner(ixs[1]!, extra)]);
+    expect(await check(withExtra)).toMatchObject({ ok: false, reason: "invalid_payload" });
+    expect(await check(forged(wire, buyer.address))).toMatchObject({ ok: false, reason: "invalid_payload" });
   });
 });
 

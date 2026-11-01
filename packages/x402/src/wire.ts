@@ -21,6 +21,7 @@ export function readElapsedPayload(payload: unknown): ElapsedPayload | undefined
   if (inner.type === "open" && typeof inner.session === "string") {
     return { type: "open", transaction: inner.transaction, session: inner.session };
   }
+  if (inner.type === "topUp") return { type: "topUp", transaction: inner.transaction };
   if (inner.type === "close") return { type: "close", transaction: inner.transaction };
   return undefined;
 }

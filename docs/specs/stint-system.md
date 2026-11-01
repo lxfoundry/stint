@@ -648,6 +648,8 @@ Network identifiers: devnet `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`, mainnet
 - `accepted` MUST be the chosen entry exactly as received, byte for byte.
 - `x402Version` MUST be 2.
 - `payload.session` is informative: the facilitator derives the address itself.
+- A top-up's payload is `{ "type": "topUp", "transaction": "<base64, partially signed>" }`. The session it extends is
+  `accepted.extra.session`.
 
 **Transaction layouts.** Transactions are version 0. The fee payer is the first account and is
 left unsigned by the client: the facilitator pays the fees, and the client holds no SOL (S14).

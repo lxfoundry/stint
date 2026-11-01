@@ -45,7 +45,7 @@ export interface FacilitatorContext {
 export type Verified =
   | {
       readonly ok: true;
-      readonly type: "open" | "close";
+      readonly type: "open" | "topUp" | "close";
       readonly tx: InspectedTransaction;
       /** The session's authority (spec §5.5: `payer`). */
       readonly payer: Address;

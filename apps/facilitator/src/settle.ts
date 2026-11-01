@@ -61,7 +61,7 @@ export async function settlePayment(
 
 /** A verified transaction, signed by every party, ready to submit. */
 export interface SignedSettlement {
-  readonly type: "open" | "close";
+  readonly type: "open" | "topUp" | "close";
   /** The fully signed transaction, base64. */
   readonly wire: string;
   /** Its ID: the fee payer's signature. */

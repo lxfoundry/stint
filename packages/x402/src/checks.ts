@@ -33,6 +33,7 @@ import {
   identifyStintInstruction,
   parseCloseInstruction,
   parseOpenInstruction,
+  parseTopUpInstruction,
   type CloseKind,
   type Session,
 } from "@lxfoundry/stint-program-client";
@@ -242,6 +243,64 @@ export async function checkOpenTransaction(
   const signers = await checkSigners(tx, new Set([keys.feePayer, keys.rentPayer, authority, t.accounts.authority.address]), keys);
   if (!signers.ok) return signers;
   return { ok: true, value: { session, authority, seed: o.data.seed, vault, refundOwner } };
+}
+
+export interface TopUpFacts {
+  readonly session: Address;
+  readonly authority: Address;
+}
+
+/**
+ * The static checks of spec §5.4 for a `topUp`, against the session as the chain stores it: the layout (one funding
+ * transfer, then `stint.top_up`), the session the entry names and its canonical vault, the session's authority, and the
+ * funding, which moves exactly `amount` of the session's mint from the refund owner's associated token account, so that a
+ * refund goes back where the money came from. A top-up creates nothing, so the rent payer appears nowhere. Simulation,
+ * the blockhash, the margin before `paid_until` and the `maxSeconds` total are the caller's.
+ */
+export async function checkTopUpTransaction(
+  tx: InspectedTransaction,
+  requirements: ElapsedRequirements,
+  stored: Pick<Session, "authority" | "mint" | "refundOwner">,
+  keys: FacilitatorKeys,
+): Promise<Check<TopUpFacts>> {
+  const positions = checkPayerPositions(tx, keys, () => false);
+  if (!positions.ok) return positions;
+  const body = layoutBody(tx);
+  if (!body.ok) return body;
+  const [transfer, topUp, ...rest] = body.value;
+  if (!transfer || !topUp || rest.length > 0 || !isTransferChecked(transfer) || !isStint(topUp, StintInstruction.TopUp)) {
+    return refuse("unexpected_instruction", "a top-up is: one funding transfer, stint.top_up");
+  }
+  const t = tryParse(() => parseTransferCheckedInstruction(transfer));
+  const u = tryParse(() => parseTopUpInstruction(topUp));
+  if (!t || !u) return refuse("unexpected_instruction", "an instruction of the top-up is malformed");
+
+  const extra = requirements.extra;
+  if (extra.programId !== STINT_PROGRAM_ADDRESS) return refuse("invalid_payment_requirements", "another program");
+  if (extra.session === undefined || u.accounts.session.address !== extra.session) {
+    return refuse("invalid_terms", "the top-up is for another session than the entry's");
+  }
+  if (u.accounts.authority.address !== stored.authority) return refuse("invalid_payload", "the top-up is not signed by the session's authority");
+  const session = address(extra.session);
+  const asset = address(requirements.asset);
+  const vault = await associatedTokenAddress(session, stored.mint);
+  if (stored.mint !== asset || u.accounts.vault.address !== vault) {
+    return refuse("invalid_terms", "the session's mint or vault is not the entry's");
+  }
+  if (
+    t.accounts.mint.address !== asset ||
+    t.accounts.destination.address !== vault ||
+    t.accounts.source.address !== (await associatedTokenAddress(stored.refundOwner, asset))
+  ) {
+    return refuse("invalid_terms", "the funding must move the asset from the refund owner's account into the vault");
+  }
+  if (t.data.amount !== BigInt(requirements.amount)) {
+    return refuse("invalid_amount", `the funding moves ${t.data.amount}, not ${requirements.amount}`);
+  }
+  // The authority and the transfer authority may be the same key.
+  const signers = await checkSigners(tx, new Set([keys.feePayer, stored.authority, t.accounts.authority.address]), keys);
+  if (!signers.ok) return signers;
+  return { ok: true, value: { session, authority: stored.authority } };
 }
 
 export interface CloseFacts {
