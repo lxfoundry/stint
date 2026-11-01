@@ -68,6 +68,8 @@ interface Tracked<U> {
   readonly pending: Partial<Record<TimerSlot, () => void>>;
   /** While forwarding is stopped: each socket's own `send` and `emit`, which `resume` puts back. */
   muted?: Map<WebSocket, { send: WebSocket["send"]; emit: WebSocket["emit"] }>;
+  /** Set when the end timer first fires at the current `paidUntil`: `since` on the session clock (ms), `delayMs` the wait last armed for a retry. `resume` clears it. */
+  endRetry?: { since: number; delayMs: number };
 }
 
 interface CloseOutcome {
@@ -111,6 +113,10 @@ const SESSION_PATH = /^\/sessions\/([1-9A-HJ-NP-Za-km-z]{32,44})\/(ws|close)$/;
 /** `GET /sessions/:id` (the status); `SESSION_PATH` holds the routes that end in `/ws` or `/close`. */
 const STATUS_PATH = /^\/sessions\/([1-9A-HJ-NP-Za-km-z]{32,44})$/;
 const TOKEN_SKEW_MS = 30_000;
+/** A failed end close is retried after `endRetrySeconds` for this long after the end timer first fired; after that each wait doubles. */
+const END_RETRY_STEADY_MS = 30_000;
+/** The longest wait between two end closes once the waits double, unless `endRetrySeconds` is longer. */
+const END_RETRY_MAX_MS = 60_000;
 /** The longest delay `setTimeout` takes: a longer one fires at once. */
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -308,6 +314,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       }
     }
     tracked.muted = undefined;
+    tracked.endRetry = undefined;
     tracked.paidUntil = until;
     armEnd(tracked);
     // The last connection may have dropped while forwarding was stopped, and a drop then does not arm the idle timer.
@@ -317,13 +324,18 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   /**
    * The end timer fired (spec §7.3): forwarding stops, and the session is closed at the end of its paid time. A session
    * that is gone, whose account now holds another session, or that was paid for longer, needs no close. A close that
-   * fails while the session is unchanged is tried again after `endRetrySeconds`, until the session ends or the gate
-   * stops.
+   * fails while the session is unchanged is tried again, until the session ends or the gate stops: after
+   * `endRetrySeconds` for the first 30 s since the timer first fired at this `paidUntil` (a `NotExpired` from a chain
+   * clock that lags clears within that), then after twice the previous wait each time, up to 60 s (or `endRetrySeconds`,
+   * if that is longer), so a failure that does not clear by itself costs one settlement a minute and not one every few
+   * seconds. `resume` starts the short waits again.
    */
   async function expire(tracked: Tracked<U>): Promise<void> {
     mute(tracked);
+    const retry = (tracked.endRetry ??= { since: sessionClock(), delayMs: endRetryMs });
     if (await attempt(tracked)) return;
-    arm(tracked, "end", sessionClock() + endRetryMs, expire);
+    if (sessionClock() - retry.since >= END_RETRY_STEADY_MS) retry.delayMs = Math.min(retry.delayMs * 2, Math.max(END_RETRY_MAX_MS, endRetryMs));
+    arm(tracked, "end", sessionClock() + retry.delayMs, expire);
   }
 
   /**

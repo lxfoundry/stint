@@ -443,6 +443,42 @@ describe("the gate's lifecycle", () => {
       expect(frames.filter((frame) => frame.startsWith("tick:"))).toEqual([]);
     });
 
+    /** Fires the pending end-close retry and waits for the next one to be armed; returns the delay of the timer it fired. */
+    async function failAgain(): Promise<number> {
+      await expect.poll(() => h.timers.pending.length).toBe(1);
+      const timer = h.timers.pending[0]!;
+      h.timers.fire(timer);
+      return timer.delayMs;
+    }
+
+    it("waits endRetrySeconds for the first 30 s after it fired, then twice as long each time, up to 60 s, while the close keeps failing", async () => {
+      await open();
+      h.fail.settleClose = true;
+      h.timers.fire(pendingDue(END_DUE));
+
+      const delays: number[] = [];
+      while (delays.length < 16) delays.push(await failAgain());
+
+      // endRetrySeconds is 3 in the harness: ten waits of 3 s cover the first 30 s, and each wait after that is twice the last.
+      expect(delays).toEqual([...Array<number>(10).fill(3_000), 6_000, 12_000, 24_000, 48_000, 60_000, 60_000]);
+      expect(h.calls.teardown).toEqual([]);
+    });
+
+    it("starts the short waits again after a resume: the next end timer's first failed close waits endRetrySeconds", async () => {
+      const { session } = await open();
+      h.fail.settleClose = true;
+      h.timers.fire(pendingDue(END_DUE));
+      for (let retries = 0; retries < 12; retries++) await failAgain(); // 3 s ten times, then 6 s and 12 s
+      await expect.poll(() => h.timers.pending.map((timer) => timer.delayMs)).toEqual([24_000]); // the waits have grown
+
+      h.sessions.set(session, { ...h.sessions.get(session)!, deposited: 200_000n }); // paid for 200 s in all
+      h.timers.fire(h.timers.pending[0]!);
+      await expect.poll(() => h.timers.pending.some((timer) => timer.dueMs === NOW_MS + 200_000)).toBe(true); // it has resumed
+      h.timers.fire(pendingDue(NOW_MS + 200_000));
+
+      await expect.poll(() => h.timers.pending.map((timer) => timer.delayMs)).toEqual([3_000]);
+    });
+
     it("sets itself again, without stopping forwarding, when it fires before paid_until on the session clock", async () => {
       const { server, frames } = await openConnected();
       const early = pendingDue(END_DUE);

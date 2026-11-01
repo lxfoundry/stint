@@ -71,7 +71,12 @@ export interface GateConfig<U = unknown> {
   readonly sessionClock?: () => number;
   /** The idle and end timers. Default: `setTimeout` and `clearTimeout`, without keeping the process alive. */
   readonly timers?: Timers;
-  /** Seconds to wait before the close at the end of the paid time is tried again, after it failed and the session was unchanged. Default 2; a value below 1 is raised to 1, and one that is not a finite number gives 2. */
+  /**
+   * Seconds to wait before the close at the end of the paid time is tried again, after it failed and the session was
+   * unchanged. It is the wait for the first 30 s after the end timer first fired at the session's `paid_until`; after
+   * that each wait is twice the previous one, up to 60 s (or this value, if it is longer), and a session paid for longer
+   * starts again from this value. Default 2; a value below 1 is raised to 1, and one that is not a finite number gives 2.
+   */
   readonly endRetrySeconds?: number;
   /**
    * How the session after a settled open, and the `Closed` event after a confirmed close, are
