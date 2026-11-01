@@ -29,7 +29,7 @@ the earlier stages confirmed (spec §14) and the versions they pinned, instead o
 | 2 | The redirect of a residual owed to a closed refund account; the session status; the example agent's task, scripted; the MCP server; the first devnet deployment, the `devnet` target and a run of scenarios 1 and 22 on it; the example agent | 22 | — | [02-agent-tools-and-devnet.md](02-agent-tools-and-devnet.md) |
 | 3 | Payment refusals and settlement records | 5, 6, 13, 14, 17, 18, 19, 32 | — | |
 | 4 | End of session: `claim`, `AtExpiry`, the gate's timers, the sweeper | 2, 3, 9, 16, 26 | — | [04-end-of-session.md](04-end-of-session.md) |
-| 5 | Top-up | 4, 34 | — | |
+| 5 | Top-up | 4, 34 | — | [05-top-up.md](05-top-up.md) |
 | 6 | Session tokens and adoption | 8, 20, 35 | — | |
 | 7 | Fallback closes: unilateral, sponsored, without the gate or the facilitator | 7, 15, 24, 25 | — | |
 | 8 | Closes that protect the buyer: outage and admin, `WaiveMinimum` | 10, 30 | — | |
