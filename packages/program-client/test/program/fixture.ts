@@ -38,6 +38,7 @@ import {
   getCloseInstruction,
   getOpenInstruction,
   getSessionDecoder,
+  getTopUpInstruction,
   type ProgramInstruction,
 } from "../../src/index.js";
 
@@ -89,6 +90,18 @@ export interface ClaimOptions {
   readonly session: Address;
   readonly vault?: Address;
   readonly receiverToken?: Address;
+}
+
+export interface TopUpOptions {
+  readonly session: Address;
+  /** The buyer: the funding comes from its token account, and it signs `top_up` unless `signer` is set. */
+  readonly authority: Wallet;
+  /** What the funding transfer sends to the session's canonical vault; 0n sends no transfer. */
+  readonly amount: bigint;
+  /** Signs `top_up` as its authority. Default: the buyer's key. */
+  readonly signer?: KeyPairSigner;
+  /** The vault account passed to `top_up`. Default: the session's canonical vault. */
+  readonly vault?: Address;
 }
 
 export interface Opened {
@@ -283,6 +296,31 @@ export class Fixture {
     });
     const sent = await this.send([...fund, open]);
     return { session, vault, sent };
+  }
+
+  /** The `topUp` layout of spec §5.3: fund the vault, then `top_up`. */
+  async topUp(options: TopUpOptions): Promise<Sent> {
+    const canonicalVault = await this.ata(options.session);
+    const fund: Instruction[] =
+      options.amount === 0n
+        ? []
+        : [
+            getTransferCheckedInstruction({
+              source: options.authority.token,
+              mint: this.mint,
+              destination: canonicalVault,
+              authority: options.authority.signer,
+              amount: options.amount,
+              decimals: DECIMALS,
+            }),
+          ];
+    const topUp = getTopUpInstruction({
+      authority: options.signer ?? options.authority.signer,
+      session: options.session,
+      vault: options.vault ?? canonicalVault,
+      ...(await eventAccounts()),
+    });
+    return this.send([...fund, topUp]);
   }
 
   /**
