@@ -8,7 +8,7 @@ import {
   type Rpc,
   type SolanaRpcApi,
 } from "@solana/kit";
-import { STINT_PROGRAM_ADDRESS, fetchMaybeSession, getSessionSize, paidUntil } from "@lxfoundry/stint-program-client";
+import { STINT_PROGRAM_ADDRESS, fetchMaybeSession, getSessionSize, paidUntil, type Session } from "@lxfoundry/stint-program-client";
 import {
   TOP_UP_MARGIN_SECONDS,
   X402_VERSION,
@@ -24,6 +24,7 @@ import {
   sellerTermsOf,
   sessionMatches,
   type Check,
+  type ElapsedRequirements,
   type FacilitatorKeys,
   type InspectedTransaction,
   type InvalidReason,
@@ -103,35 +104,27 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
     ]);
     funding = { destinations: [check.value.session, check.value.vault], budget: sessionRent + vaultRent };
   } else if (elapsed.type === "topUp") {
-    if (!extra.session) return refuse("invalid_payment_requirements", "a top-up names its session");
-    const session = address(extra.session);
-    const stored = await fetchMaybeSession(ctx.rpc, session, { commitment: "confirmed" });
-    if (!stored.exists) return refuse("unknown_session", "no such session");
-    if (!sessionMatches(stored.data, sellerTermsOf(requirements))) {
-      return refuse("invalid_terms", "the session's terms differ from the requirements");
-    }
+    const found = await loadMatchingSession(ctx, requirements, "top-up");
+    if (!found.ok) return found;
+    const { session, stored } = found.value;
     // The transaction must land before the end: from `paid_until` on, the program refuses it (spec §4.3).
     const now = BigInt(Math.floor((ctx.clock ?? Date.now)() / 1000));
-    if (paidUntil(stored.data) - now < BigInt(TOP_UP_MARGIN_SECONDS)) {
+    if (paidUntil(stored) - now < BigInt(TOP_UP_MARGIN_SECONDS)) {
       return refuse("session_expired", `the session's paid time ends in less than ${TOP_UP_MARGIN_SECONDS} s`);
     }
-    const check = await checkTopUpTransaction(tx, requirements, stored.data, ctx.keys);
+    const check = await checkTopUpTransaction(tx, requirements, stored, ctx.keys);
     if (!check.ok) return check;
-    if (stored.data.deposited + BigInt(requirements.amount) > stored.data.rate * BigInt(stored.data.maxSeconds)) {
+    if (stored.deposited + BigInt(requirements.amount) > stored.rate * BigInt(stored.maxSeconds)) {
       return refuse("invalid_amount", "the top-up would take the session past maxSeconds");
     }
-    facts = { payer: stored.data.authority, session };
+    facts = { payer: stored.authority, session };
   } else {
-    if (!extra.session) return refuse("invalid_payment_requirements", "a close names its session");
-    const session = address(extra.session);
-    const stored = await fetchMaybeSession(ctx.rpc, session, { commitment: "confirmed" });
-    if (!stored.exists) return refuse("unknown_session", "no such session");
-    if (!sessionMatches(stored.data, sellerTermsOf(requirements))) {
-      return refuse("invalid_terms", "the session's terms differ from the requirements");
-    }
-    const check = await checkCloseTransaction(tx, { session, closer: stored.data.receiverAuthorizer }, ctx.keys);
+    const found = await loadMatchingSession(ctx, requirements, "close");
+    if (!found.ok) return found;
+    const { session, stored } = found.value;
+    const check = await checkCloseTransaction(tx, { session, closer: stored.receiverAuthorizer }, ctx.keys);
     if (!check.ok) return check;
-    facts = { payer: stored.data.authority, session };
+    facts = { payer: stored.authority, session };
   }
 
   const { value: valid } = await ctx.rpc.isBlockhashValid(blockhash(tx.blockhash), { commitment: "confirmed" }).send();
@@ -140,6 +133,26 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
   const simulated = await simulate(ctx, tx, funding);
   if (!simulated.ok) return simulated;
   return { ok: true, type: elapsed.type, tx, ...facts };
+}
+
+/**
+ * The session an entry names, as the chain stores it, once its terms are known to match the requirements: what a
+ * top-up and a close sent through `/settle` read before any other check. `action` words the refusal when the entry
+ * names no session.
+ */
+async function loadMatchingSession(
+  ctx: FacilitatorContext,
+  requirements: ElapsedRequirements,
+  action: "top-up" | "close",
+): Promise<Check<{ readonly session: Address; readonly stored: Session }>> {
+  if (!requirements.extra.session) return refuse("invalid_payment_requirements", `a ${action} names its session`);
+  const session = address(requirements.extra.session);
+  const stored = await fetchMaybeSession(ctx.rpc, session, { commitment: "confirmed" });
+  if (!stored.exists) return refuse("unknown_session", "no such session");
+  if (!sessionMatches(stored.data, sellerTermsOf(requirements))) {
+    return refuse("invalid_terms", "the session's terms differ from the requirements");
+  }
+  return { ok: true, value: { session, stored: stored.data } };
 }
 
 /**
