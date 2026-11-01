@@ -503,6 +503,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     const tracked = sessions.get(session);
     if (!tracked) return sendJson(response, 404, { error: "unknown_session" });
     if (!(await authenticate(bearer(request), tracked, "close"))) return sendJson(response, 401, { error: "unauthorized" });
+    // The session may have ended while the token was checked.
+    if (tracked.ended) return sendJson(response, 404, { error: "unknown_session" });
     // Overlapping closes share one settlement and one outcome (the first assignment is synchronous).
     const outcome = await (tracked.closing ??= startClose(tracked, BUYER_CLOSE));
     sendJson(response, outcome.status, outcome.body);

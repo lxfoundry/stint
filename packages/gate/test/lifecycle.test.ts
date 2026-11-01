@@ -320,6 +320,27 @@ describe("the gate's lifecycle", () => {
       expect(closes()).toHaveLength(1);
     });
 
+    it("answers a buyer's close with 404, and starts no close, when the session ended while the request's token was checked", async () => {
+      const { session } = await open();
+      let release!: () => void;
+      h.hold.readSession = new Promise<void>((resolve) => (release = resolve));
+      h.sessions.delete(session); // the re-read will find the account gone
+      const reads = h.reads.session;
+      h.timers.fire(pendingDue(END_DUE));
+      await expect.poll(() => h.reads.session).toBe(reads + 1); // the re-read is waiting
+      const bearer = await token(session, "close");
+      // The read returns as the request reaches the server, before the gate's handler has checked its token: the end timer
+      // ends the session while the gate waits for the signature check.
+      h.server.prependListener("request", () => release());
+
+      const response = await fetch(`${h.url}/sessions/${session}/close`, { method: "POST", headers: { authorization: `Bearer ${bearer}` } });
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "unknown_session" });
+      expect(h.calls.teardown).toEqual(["expired"]);
+      expect(closes()).toEqual([]);
+    });
+
     it("does not arm the idle timer when the last connection drops while forwarding is stopped", async () => {
       const { socket } = await openConnected();
       const release = holdClose();
