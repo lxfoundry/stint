@@ -14,16 +14,17 @@ and the nine required scenarios pass there.
 the property tests of spec section 4.2. The scheme gains top-up offers, durations, payloads, the transaction and its
 static checks. The facilitator verifies and settles a top-up: the session's terms, its authority, the funding, the
 10 s margin and `maxSeconds`. The gate gains `POST /sessions/:id/top-up`, which moves its end timer once the top-up
-settles. Its end timer already re-reads the session, so a top-up that the gate did not settle is noticed there. The
-client gains `session.topUp`, and the tools gain `stint_top_up`, which the MCP server serves. The harness can top up
-on-chain and start the gate with its session clock ahead.
+settles, and a subscription to each session's account, which moves it for a top-up the gate did not settle; its end
+timer's re-read stays as the fallback. The client gains `session.topUp`, and the tools gain `stint_top_up`, which the
+MCP server serves. The harness can top up on-chain and start the gate with its session clock ahead.
 
 **Tech Stack:** Rust 1.99.1 with Anchor 1.2.1 (`proptest` as a dev-dependency), TypeScript 7.0.2, vitest 5.0.5,
 LiteSVM 1.6.1, Surfpool 1.6.1, Kora 2.0.5, `ws`.
 
 **Spec:** `docs/specs/stint-system.md`, sections 4.2 and 4.3 (`top_up`), 5.1 to 5.5 (top-up offers, durations,
-payloads, verification, settlement), 7.1 and 7.3 (the gate's top-up route and its end timer), 9.2 to 9.5 (the
-client's policy, its API and the tools), 11 (failure handling), 12.1, 12.2 and 12.7 (testing and the scenarios).
+payloads, verification, settlement), 7.1 and 7.3 (the gate's top-up route, its end timer and its subscription to the
+session account), 9.2 to 9.5 (the client's policy, its API and the tools), 11 (failure handling), 12.1, 12.2 and 12.7
+(testing and the scenarios).
 
 ## Global Constraints
 
@@ -61,14 +62,15 @@ client's policy, its API and the tools), 11 (failure handling), 12.1, 12.2 and 1
 Built: `top_up` and its maths, with property tests; the scheme's top-up offers, durations, payload, transaction and
 checks; the facilitator's verification and settlement of a top-up; the gate's top-up route; the client's
 `session.topUp`; the `stint_top_up` tool, which the MCP server and the example agent pick up; on-chain top-ups and a
-gate whose session clock runs ahead in the harness; scenarios 4 and 34.
+gate whose session clock runs ahead in the harness; scenarios 4 and 34; the gate's subscription to each session's
+account (spec section 7.3), for the top-ups it did not settle.
 
 Not built, and not to be built here:
-- **The gate's subscription to the session account** (spec sections 7.1 and 7.3). The gate moves its end timer when
-  a top-up it settled is confirmed. It notices any other top-up when its end timer fires and re-reads the session, as
-  stage 4 built: a top-up made on-chain directly, and one whose settlement was still pending when the gate answered.
-  Forwarding then stops for the length of one read, and resumes. The subscription comes with the stage that needs the
-  account-closed notification.
+- **What the subscription does with anything but a later end.** A notification that the account is gone, or holds
+  another session, is left to the end timer, as today: dropping the connections of a session another party closed
+  (spec section 7.3, `4402` or `4410` from the `Closed` event) comes with the stage that needs the account-closed
+  notification. A subscription that fails is logged and not replaced; the end timer's re-read still finds a later
+  `paid_until`. The subscription after a `202` to an open (spec section 7.1) comes with the settlement records.
 - **`autoTopUp`** and its policy fields `topUpAheadSeconds` and `topUpSeconds` (spec section 9.2). The client tops
   up when it is asked to: `session.topUp` or `stint_top_up`.
 - **Polling after a payment whose outcome is unknown** (spec section 9.3). After a `202`, a `5xx` or a time-out, the
@@ -89,7 +91,7 @@ Not built, and not to be built here:
 Start from a clean tree on a branch of its own, with this plan already merged: the steps that say `git status
 --short` prints nothing, or lists only what a step changed, rely on it.
 
-Tasks 1 to 6 need nothing but the repository. Task 7 uses the person's keys:
+Tasks 1 to 7 need nothing but the repository. Task 8 uses the person's keys:
 
 1. The deploying key and the upgrade authority of the first deployment: `~/.config/stint/devnet.json` (the payer,
    holding SOL) and `~/.config/stint/upgrade-authority.json`, and the program keypair
@@ -146,7 +148,7 @@ top-ups. Every step runs from the repository root, inside WSL. The program tests
     `findToppedUpEvent(instructions: Iterable<ProgramInstruction>): ToppedUpEvent | undefined`.
   - The fixture: `Fixture.topUp(options: TopUpOptions): Promise<Sent>` with
     `TopUpOptions = { session: Address; authority: Wallet; amount: bigint; signer?: KeyPairSigner; vault?: Address }`.
-  - The program deployed on devnet has no `top_up` until it is upgraded (Task 7).
+  - The program deployed on devnet has no `top_up` until it is upgraded (Task 8).
 
 - [ ] **Step 1: Write the failing unit tests of `top_up_amounts`**
 
@@ -2124,8 +2126,9 @@ Decisions this task makes, from the code and the spec:
   spec section 7.3 does not retry a close refused because the buyer's refund account is closed).
 - **The `200` reports the later end it knows.** If the end timer's re-read found a top-up made elsewhere while this one
   settled, the session already runs later than the worked-out end: the answer is the later of the two.
-- **A pending top-up** (`202`) needs nothing more from the gate: if it lands, the end timer finds the later end when it
-  fires. Forwarding then stops for the length of one read. The subscription that would avoid this is not built.
+- **A pending top-up** (`202`) needs nothing more from the route: if it lands, the gate finds the later end as it finds
+  any top-up it did not settle, through its subscription to the account (Task 7) or, failing that, the end timer's
+  re-read. `paidLonger` is what both the route and the subscription call with a later end.
 
 **Files:**
 - Modify: `packages/gate/src/gate.ts`, `docs/specs/stint-system.md` (section 7.1)
@@ -2726,6 +2729,16 @@ with
 
 ```ts
   /**
+   * The session is paid until `until`, if that is later than the end the gate knows: forwarding goes on if the end timer has
+   * fired, and otherwise only the end moves. A session that has ended stays ended.
+   */
+  function paidLonger(tracked: Tracked<U>, until: bigint): void {
+    if (tracked.ended || until <= tracked.paidUntil) return;
+    if (tracked.muted) resume(tracked, until);
+    else extend(tracked, until);
+  }
+
+  /**
    * `POST /sessions/:id/top-up` (spec §7.1): a 402 listing top-up offers, then the payment. Only a session this gate tracks
    * can be topped up. Once its end timer has fired, the session cannot be extended (spec §4.3): the answer is a 402 with
    * `session_expired` and offers for a new session, as a connect gets then. The durations that fit come from the chain,
@@ -2790,16 +2803,12 @@ with
     const paymentResponse = { [HEADERS.paymentResponse]: encodePaymentResponseHeader(settled) };
     log({ event: "topUp", session, success: settled.success, reason: settled.errorReason });
     if (!settled.success) {
-      // A pending top-up needs nothing more here: if it lands, the end timer finds the later end when it fires.
+      // A pending top-up needs nothing more here: if it lands, its later end is found as one this gate did not settle is.
       if (settled.errorReason === "settlement_pending") return sendJson(response, 202, { transaction: settled.transaction }, paymentResponse);
       return refusal(settled.errorReason ?? "simulation_failed");
     }
     const until = paidUntil({ ...stored, deposited: stored.deposited + BigInt(requirements.amount) });
-    if (!tracked.ended && until > tracked.paidUntil) {
-      // Forwarding goes on if the end timer fired while the top-up settled; otherwise only the end moves.
-      if (tracked.muted) resume(tracked, until);
-      else extend(tracked, until);
-    }
+    paidLonger(tracked, until);
     // The session may already run later than this top-up alone makes it: the end timer found one made elsewhere meanwhile.
     sendJson(response, 200, { paidUntil: Number(until > tracked.paidUntil ? until : tracked.paidUntil) }, paymentResponse);
   }
@@ -4839,10 +4848,739 @@ git commit -m "Run scenario 34, a top-up while the gate closes at expiry, and ma
 
 ---
 
-### Task 7: Upgrade the devnet program and run the required scenarios there
+### Task 7: The gate follows each session's account
+
+Spec section 7.3: when an open settles, the gate subscribes to the session account at `confirmed` and stays
+subscribed until the session ends; a top-up seen on the account moves the end timer. Until this task the gate learns of
+a top-up it did not settle (one made on-chain directly, or one whose settlement was pending) only when its end timer
+fires and re-reads the session, and forwarding stops for that read. This task adds the subscription. A later
+`paid_until` on the same session moves the end timer at once, through `paidLonger` (Task 4), which also resumes
+forwarding if the end timer has already fired, as in scenario 34.
+
+Decisions this task makes, from the code and the spec:
+- **The chain offers the subscription, optionally.** `GateChain` gains an optional `watchSession`; `createRpcChain`
+  provides it when it is given an RPC subscriptions client. A chain without it (the client package's test gate, built
+  from a literal) works as before: the end timer's re-read is the fallback, and stays in place with a subscription too.
+- **Only a later end is acted on here.** A notification that the account is gone, or holds another session (another
+  `started_at`, or terms this gate does not offer), changes nothing: the end timer deals with it at the end, as it does
+  today. Dropping the connections of a session another party closed, with `4402` or `4410` from the `Closed` event
+  (spec section 7.3), comes with the stage that needs it.
+- **A subscription that fails is logged and not replaced.** The end timer's re-read still finds a later `paid_until`,
+  so a dropped subscription costs a pause in forwarding for one read at the old end, as before this task. Task 7 states
+  this in spec section 7.3.
+- **One subscription per session, from `provision` to `end`.** It starts once, when the open settles and the session is
+  provisioned (a repeated open finds it tracked and starts nothing), and stops when the session ends, whatever ends it,
+  and when the gate stops. A top-up that lands before the subscription is in place is found by the end timer.
+
+**Files:**
+- Modify: `packages/gate/src/chain.ts`, `packages/gate/src/gate.ts`, `e2e/src/targets/services.ts`,
+  `docs/specs/stint-system.md` (section 7.3)
+- Modify (test support): `packages/gate/test/harness.ts`
+- Create: `packages/gate/test/follow.test.ts`
+- Test: `packages/gate/test/chain.test.ts`, `e2e/test/direct-chain.test.ts`
+
+**Interfaces:**
+- Consumes: Task 4's `paidLonger(tracked, until)`, `extend`, `resume`; Task 6's `DirectChain.topUp`; Kit's
+  `RpcSubscriptions<SolanaRpcSubscriptionsApi>`, `accountNotifications`, `parseBase64RpcAccount`,
+  `createSolanaRpcSubscriptions`.
+- Produces:
+  - `GateChain.watchSession?(session: Address, onChange: (stored: Session | undefined) => void, onError: (error:
+    unknown) => void): () => void`.
+  - `createRpcChain(rpc, subscriptions?)`: with `subscriptions`, a chain whose `watchSession` subscribes to the account
+    at `confirmed`, in base64, and decodes each notification as `readSession` decodes a read.
+  - The gate subscribes in `provision` and ends the subscription in `end` and in `close`; it logs `{ event:
+    "subscription_error", session, error }` for a subscription that fails.
+  - The test harness: `calls.watch: Address[]`, `watchers: Map<Address, { onChange, onError }>`, `unwatched: Address[]`.
+  - The harness's services give the gate `createRpcChain(rpc, createSolanaRpcSubscriptions(rpcWsUrl))`.
+
+- [ ] **Step 1: Write the failing tests of the chain's subscription**
+
+In `packages/gate/test/chain.test.ts`, replace
+
+```ts
+import { generateKeyPairSigner, getBase64Decoder, type Address, type Rpc, type SolanaRpcApi } from "@solana/kit";
+```
+
+with
+
+```ts
+import {
+  generateKeyPairSigner,
+  getBase64Decoder,
+  type Address,
+  type Rpc,
+  type RpcSubscriptions,
+  type SolanaRpcApi,
+  type SolanaRpcSubscriptionsApi,
+} from "@solana/kit";
+```
+
+and add at the end of the file:
+
+```ts
+
+/** An account notification as the node sends it, in base64. */
+const notification = (account: { owner: Address; data: Uint8Array }) => ({
+  context: { slot: 1n },
+  value: {
+    data: [getBase64Decoder().decode(account.data), "base64"],
+    executable: false,
+    lamports: 1_000_000n,
+    owner: account.owner,
+    space: BigInt(account.data.length),
+  },
+});
+
+/**
+ * Account subscriptions that yield `notifications`, then `hold` until aborted, `fail` with an error, or `end`. Each
+ * subscribe records its address, its configuration and its abort signal.
+ */
+function subscriptionsYielding(notifications: unknown[], then: "hold" | "fail" | "end" = "hold") {
+  const calls: { address: Address; config: unknown; signal: AbortSignal }[] = [];
+  const subscriptions = {
+    accountNotifications: (address: Address, config: unknown) => ({
+      subscribe: async ({ abortSignal }: { abortSignal: AbortSignal }) => {
+        calls.push({ address, config, signal: abortSignal });
+        return (async function* () {
+          yield* notifications;
+          if (then === "fail") throw new Error("socket closed");
+          if (then === "hold") await new Promise((resolve) => abortSignal.addEventListener("abort", resolve));
+        })();
+      },
+    }),
+  };
+  return { subscriptions: subscriptions as unknown as RpcSubscriptions<SolanaRpcSubscriptionsApi>, calls };
+}
+
+describe("the RPC chain's subscription to a session", () => {
+  const where = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDyLb" as Address;
+
+  it("reports the session after each change, and undefined once the account holds none", async () => {
+    const args = await sessionArgs();
+    const { subscriptions, calls } = subscriptionsYielding([
+      notification({ owner: STINT_PROGRAM_ADDRESS, data: new Uint8Array(getSessionEncoder().encode(args)) }),
+      notification({ owner: STINT_PROGRAM_ADDRESS, data: new Uint8Array(getSessionEncoder().encode({ ...args, deposited: 40_000n })) }),
+      notification({ owner: SYSTEM_PROGRAM, data: new Uint8Array() }), // closed
+    ]);
+    const seen: (bigint | undefined)[] = [];
+    const errors: unknown[] = [];
+
+    const stop = createRpcChain(rpcHolding(null), subscriptions).watchSession!(where, (stored) => seen.push(stored?.deposited), (error) => errors.push(error));
+
+    await expect.poll(() => seen).toEqual([30_000n, 40_000n, undefined]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ address: where, config: { commitment: "confirmed", encoding: "base64" } });
+    stop();
+    expect(calls[0]!.signal.aborted).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  it.each([
+    ["fails", "fail" as const, /socket closed/],
+    ["ends", "end" as const, /notifications ended/],
+  ])("reports a subscription that %s, once", async (_, then, message) => {
+    const { subscriptions } = subscriptionsYielding([], then);
+    const errors: unknown[] = [];
+
+    createRpcChain(rpcHolding(null), subscriptions).watchSession!(where, () => {}, (error) => errors.push(error));
+
+    await expect.poll(() => errors).toHaveLength(1);
+    expect(String(errors[0])).toMatch(message);
+  });
+
+  it("reports nothing once it has been stopped", async () => {
+    const { subscriptions } = subscriptionsYielding([]);
+    const errors: unknown[] = [];
+
+    const stop = createRpcChain(rpcHolding(null), subscriptions).watchSession!(where, () => {}, (error) => errors.push(error));
+    stop();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(errors).toEqual([]);
+  });
+
+  it("offers no subscription without an RPC subscriptions client", () => {
+    expect(createRpcChain(rpcHolding(null)).watchSession).toBeUndefined();
+  });
+});
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `pnpm --filter @lxfoundry/stint-gate test chain.test.ts`
+Expected: FAIL: `watchSession` is undefined, so every new test but the last fails with a `TypeError`.
+
+- [ ] **Step 3: Give the chain its subscription**
+
+Replace the contents of `packages/gate/src/chain.ts` with:
+
+```ts
+import {
+  containsBytes,
+  fetchEncodedAccount,
+  parseBase64RpcAccount,
+  type Address,
+  type MaybeEncodedAccount,
+  type Rpc,
+  type RpcSubscriptions,
+  type SolanaRpcApi,
+  type SolanaRpcSubscriptionsApi,
+} from "@solana/kit";
+import {
+  SESSION_DISCRIMINATOR,
+  STINT_PROGRAM_ADDRESS,
+  decodeSession,
+  getSessionSize,
+  type ClosedEvent,
+  type Session,
+} from "@lxfoundry/stint-program-client";
+import { fetchClosedEvent } from "@lxfoundry/stint-x402";
+
+/** The chain reads the gate needs, so tests can replace them. */
+export interface GateChain {
+  latestBlockhash(): Promise<{ readonly blockhash: string; readonly lastValidBlockHeight: bigint }>;
+  /** The session at `confirmed`, or undefined when the address holds no Stint session. */
+  readSession(session: Address): Promise<Session | undefined>;
+  closedEvent(signature: string): Promise<ClosedEvent | undefined>;
+  /**
+   * Follows the account at `session` at `confirmed` (spec §7.3): `onChange` receives the session after each change to the
+   * account, or undefined once the address holds no Stint session; `onError` receives a subscription that failed or ended,
+   * after which nothing more is reported. Returns what ends the subscription. Optional: a gate whose chain cannot follow an
+   * account finds a top-up it did not settle when its end timer fires.
+   */
+  watchSession?(session: Address, onChange: (stored: Session | undefined) => void, onError: (error: unknown) => void): () => void;
+}
+
+/** The session an account holds, or undefined: no account, a wallet, an account of another program, or a closed one. */
+function sessionIn(account: MaybeEncodedAccount): Session | undefined {
+  if (!account.exists || account.programAddress !== STINT_PROGRAM_ADDRESS) return undefined;
+  if (account.data.length < getSessionSize() || !containsBytes(account.data, SESSION_DISCRIMINATOR, 0)) return undefined;
+  return decodeSession(account).data;
+}
+
+/** The chain over an RPC client and, to follow session accounts, an RPC subscriptions client. */
+export function createRpcChain(rpc: Rpc<SolanaRpcApi>, subscriptions?: RpcSubscriptions<SolanaRpcSubscriptionsApi>): GateChain {
+  const chain: GateChain = {
+    latestBlockhash: async () => (await rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value,
+    // Any address can be asked about: a wallet, or an account of another program, is not a session.
+    readSession: async (session) => sessionIn(await fetchEncodedAccount(rpc, session, { commitment: "confirmed" })),
+    closedEvent: (signature) => fetchClosedEvent(rpc, signature),
+  };
+  if (!subscriptions) return chain;
+  return {
+    ...chain,
+    watchSession(session, onChange, onError) {
+      const controller = new AbortController();
+      (async () => {
+        const notifications = await subscriptions
+          .accountNotifications(session, { commitment: "confirmed", encoding: "base64" })
+          .subscribe({ abortSignal: controller.signal });
+        for await (const { value } of notifications) onChange(sessionIn(parseBase64RpcAccount(session, value)));
+        throw new Error(`${session}: notifications ended`);
+      })().catch((error: unknown) => {
+        // Ending the subscription ends its notifications too: that is not a failure.
+        if (!controller.signal.aborted) onError(error);
+      });
+      return () => controller.abort();
+    },
+  };
+}
+```
+
+- [ ] **Step 4: Run them to see them pass, and commit**
+
+Run: `pnpm --filter @lxfoundry/stint-gate test chain.test.ts && pnpm --filter @lxfoundry/stint-gate typecheck`
+Expected: PASS: the new tests and the earlier tests of `readSession`, whose behaviour did not change; no type error.
+
+```bash
+git add packages/gate/src/chain.ts packages/gate/test/chain.test.ts
+git commit -m "Let the gate's chain follow a session account over RPC subscriptions"
+```
+
+- [ ] **Step 5: Give the test harness a chain that follows accounts**
+
+In `packages/gate/test/harness.ts`, replace
+
+```ts
+  readonly calls: { verify: PaymentPayload[]; settle: PaymentPayload[]; provision: SessionInfo[]; attach: SessionInfo[]; teardown: EndReason[] };
+```
+
+with
+
+```ts
+  readonly calls: {
+    verify: PaymentPayload[];
+    settle: PaymentPayload[];
+    provision: SessionInfo[];
+    attach: SessionInfo[];
+    teardown: EndReason[];
+    /** The session of each subscription the gate started. */
+    watch: Address[];
+  };
+```
+
+replace
+
+```ts
+  /** What the gate logged. */
+  readonly logs: Record<string, unknown>[];
+}
+```
+
+with
+
+```ts
+  /** What the gate logged. */
+  readonly logs: Record<string, unknown>[];
+  /** The gate's subscriptions to session accounts, until it ends them: a test reports a change to the account through one. */
+  readonly watchers: Map<Address, { onChange: (stored: Session | undefined) => void; onError: (error: unknown) => void }>;
+  /** The sessions whose subscription the gate has ended, in order. */
+  readonly unwatched: Address[];
+}
+```
+
+replace
+
+```ts
+    calls: { verify: [], settle: [], provision: [], attach: [], teardown: [] },
+```
+
+with
+
+```ts
+    calls: { verify: [], settle: [], provision: [], attach: [], teardown: [], watch: [] },
+```
+
+replace
+
+```ts
+    attached: [],
+    logs: [],
+  } as unknown as Harness;
+```
+
+with
+
+```ts
+    attached: [],
+    logs: [],
+    watchers: new Map(),
+    unwatched: [],
+  } as unknown as Harness;
+```
+
+and replace
+
+```ts
+      return { claimed: 0n, owed: 8_000n, refunded: 22_000n, redirected: 0n, kind: CloseKind.Standard } as ClosedEvent;
+    },
+  };
+```
+
+with
+
+```ts
+      return { claimed: 0n, owed: 8_000n, refunded: 22_000n, redirected: 0n, kind: CloseKind.Standard } as ClosedEvent;
+    },
+    watchSession: (session, onChange, onError) => {
+      harness.calls.watch.push(session);
+      harness.watchers.set(session, { onChange, onError });
+      return () => {
+        harness.watchers.delete(session);
+        harness.unwatched.push(session);
+      };
+    },
+  };
+```
+
+Run: `pnpm --filter @lxfoundry/stint-gate test && pnpm --filter @lxfoundry/stint-gate typecheck`
+Expected: PASS: the gate does not call `watchSession` yet, and no test reports a change.
+
+- [ ] **Step 6: Write the failing tests of the gate's subscription**
+
+Create `packages/gate/test/follow.test.ts`:
+
+```ts
+import type { Address } from "@solana/kit";
+import type { Session } from "@lxfoundry/stint-program-client";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { NOW_MS, helpers, startHarness, type FakeTimer, type Harness } from "./harness.js";
+
+/** What a deposit of 30,000 at 1,000 per second lasts, in the harness's sessions. */
+const END_DUE = NOW_MS + 30_000;
+/** The end once 10 s more have been paid for. */
+const EXTENDED_DUE = NOW_MS + 40_000;
+
+describe("the gate's subscription to the session account (spec §7.3)", () => {
+  let h: Harness;
+  const { open, prepareOpen, send, closeWith, token, connect } = helpers(() => h);
+
+  beforeEach(async () => {
+    h = await startHarness();
+  });
+
+  afterEach(async () => {
+    expect(h.escaped).toEqual([]);
+    await h.gate.close();
+    h.server.closeAllConnections();
+    await new Promise((resolve) => h.server.close(resolve));
+  });
+
+  /** The one timer still waiting that is due at `dueMs` on the session clock. */
+  function pendingDue(dueMs: number): FakeTimer {
+    const found = h.timers.pending.filter((timer) => timer.dueMs === dueMs);
+    expect(found).toHaveLength(1);
+    return found[0]!;
+  }
+  /** Reports a change to the session's account as the chain would: the account as it now stands, or none. */
+  function notify(session: Address, change: Partial<Session> | "gone"): void {
+    const watcher = h.watchers.get(session);
+    if (!watcher) throw new Error(`no subscription to ${session}`);
+    const now = change === "gone" ? undefined : { ...h.sessions.get(session)!, ...change };
+    if (now) h.sessions.set(session, now);
+    else h.sessions.delete(session);
+    watcher.onChange(now);
+  }
+  /** An open session with one connection: `frames` collects what the buyer's socket receives. */
+  async function openConnected() {
+    const { session } = await open();
+    const { socket } = await connect(session, await token(session, "connect"));
+    const frames: string[] = [];
+    socket!.on("message", (data) => frames.push(String(data)));
+    return { session, server: h.attached.at(-1)!, frames };
+  }
+
+  it("subscribes once when an open settles, and ends the subscription when the session ends", async () => {
+    const { session, payload } = await prepareOpen();
+    expect((await send(payload)).status).toBe(201);
+    expect((await send(payload)).status).toBe(201); // a repeated open finds the session tracked
+
+    expect(h.calls.watch).toEqual([session]);
+    expect((await closeWith(session)).status).toBe(200);
+    expect(h.unwatched).toEqual([session]);
+    expect(h.watchers.size).toBe(0);
+  });
+
+  it("moves the end timer when a top-up made elsewhere shows on the account, and hands later connections the new end", async () => {
+    const { session } = await open();
+
+    notify(session, { deposited: 40_000n });
+
+    expect(pendingDue(EXTENDED_DUE)).toBeDefined();
+    expect(h.timers.pending.filter((timer) => timer.dueMs === END_DUE)).toEqual([]);
+    await connect(session, await token(session, "connect"));
+    expect(h.calls.attach.at(-1)?.paidUntil).toBe(BigInt(EXTENDED_DUE / 1000));
+  });
+
+  it("resumes forwarding at once when the top-up shows after the end timer fired", async () => {
+    const { session, server, frames } = await openConnected();
+    h.fail.settleClose = true; // the end close fails, as an AtExpiry close does before the chain's clock reaches the end
+    h.timers.fire(pendingDue(END_DUE));
+    await expect.poll(() => h.timers.pending.map((timer) => timer.delayMs)).toEqual([3_000]);
+
+    notify(session, { deposited: 40_000n });
+
+    expect(h.timers.pending.map((timer) => timer.dueMs)).toEqual([EXTENDED_DUE]);
+    server.send("tick:resumed");
+    await expect.poll(() => frames).toContain("tick:resumed");
+    expect(h.calls.teardown).toEqual([]);
+  });
+
+  it.each<[string, Partial<Session> | "gone"]>([
+    ["the same end", { claimed: 8_000n }],
+    ["an account that is gone", "gone"],
+    ["another session opened at the address", { startedAt: BigInt(NOW_MS / 1000) + 5n, deposited: 90_000n }],
+    ["a session with other terms", { rate: 2_000n, deposited: 120_000n }],
+  ])("leaves the session as it is on a notification of %s", async (_, change) => {
+    const { session } = await open();
+
+    notify(session, change);
+
+    expect(pendingDue(END_DUE)).toBeDefined();
+    expect(h.calls.teardown).toEqual([]);
+  });
+
+  it("logs a subscription that fails, and keeps the session and its end timer", async () => {
+    const { session } = await open();
+
+    h.watchers.get(session)!.onError(new Error("socket closed"));
+
+    expect(h.logs).toContainEqual({ event: "subscription_error", session, error: "socket closed" });
+    expect(pendingDue(END_DUE)).toBeDefined();
+  });
+
+  it("ends every subscription when the gate stops", async () => {
+    const first = await open();
+    const second = await open();
+
+    await h.gate.close();
+
+    expect([...h.unwatched].sort()).toEqual([first.session, second.session].sort());
+  });
+});
+```
+
+- [ ] **Step 7: Run them to see them fail**
+
+Run: `pnpm --filter @lxfoundry/stint-gate test follow.test.ts`
+Expected: FAIL: the gate starts no subscription, so `h.calls.watch` is empty and `notify` throws `no subscription to …`.
+The test of a gate that stops fails on an empty `unwatched`.
+
+- [ ] **Step 8: Follow the account in the gate**
+
+In `packages/gate/src/gate.ts`, make these replacements.
+
+The tracked session holds the subscription: replace
+
+```ts
+  /** Cancels each pending timer. */
+  readonly pending: Partial<Record<TimerSlot, () => void>>;
+```
+
+with
+
+```ts
+  /** Cancels each pending timer. */
+  readonly pending: Partial<Record<TimerSlot, () => void>>;
+  /** Ends the subscription to the session's account, when the chain offers one. */
+  unwatch?: () => void;
+```
+
+The subscription starts when the session is provisioned: replace
+
+```ts
+  async function provision(session: Address, stored: Session): Promise<Tracked<U>> {
+```
+
+with
+
+```ts
+  /**
+   * Follows the session's account (spec §7.3), when the chain can: a later `paid_until` on the same session, a top-up this
+   * gate did not settle, moves the end timer at once and resumes forwarding if the end timer has fired. An account that is
+   * gone, or that holds another session, is left to the end timer. A subscription that fails is logged and not replaced:
+   * the end timer's re-read still finds a later `paid_until`.
+   */
+  function follow(tracked: Tracked<U>): void {
+    if (!config.chain.watchSession) return;
+    const session = tracked.info.session;
+    tracked.unwatch = config.chain.watchSession(
+      session,
+      (stored) => {
+        if (!stored || stored.startedAt !== tracked.stored.startedAt || !sessionMatches(stored, seller)) return;
+        paidLonger(tracked, paidUntil(stored));
+      },
+      (error) => log({ event: "subscription_error", session, error: error instanceof Error ? error.message : String(error) }),
+    );
+  }
+
+  async function provision(session: Address, stored: Session): Promise<Tracked<U>> {
+```
+
+and replace
+
+```ts
+    sessions.set(session, tracked);
+    armIdle(tracked);
+    armEnd(tracked);
+    return tracked;
+```
+
+with
+
+```ts
+    sessions.set(session, tracked);
+    follow(tracked);
+    armIdle(tracked);
+    armEnd(tracked);
+    return tracked;
+```
+
+It ends with the session: replace
+
+```ts
+    disarm(tracked, "idle");
+    disarm(tracked, "end");
+    sessions.delete(tracked.info.session);
+```
+
+with
+
+```ts
+    disarm(tracked, "idle");
+    disarm(tracked, "end");
+    sessions.delete(tracked.info.session);
+    tracked.unwatch?.();
+```
+
+and with the gate: replace
+
+```ts
+      for (const tracked of sessions.values()) {
+        disarm(tracked, "idle");
+        disarm(tracked, "end");
+        for (const socket of tracked.connections) socket.close(1001, "gate stopping");
+```
+
+with
+
+```ts
+      for (const tracked of sessions.values()) {
+        disarm(tracked, "idle");
+        disarm(tracked, "end");
+        tracked.unwatch?.();
+        for (const socket of tracked.connections) socket.close(1001, "gate stopping");
+```
+
+and replace
+
+```ts
+  /** Stops the gate's timers and drops every connection. It does not end the sessions: nothing is closed on chain. */
+```
+
+with
+
+```ts
+  /** Stops the gate's timers and subscriptions, and drops every connection. It does not end the sessions: nothing is closed on chain. */
+```
+
+- [ ] **Step 9: Run the gate's tests to see them pass**
+
+Run: `pnpm --filter @lxfoundry/stint-gate test && pnpm --filter @lxfoundry/stint-gate typecheck`
+Expected: PASS: the new file's 9 tests and every earlier one; no type error.
+
+- [ ] **Step 10: Check that the tests rest on the subscription**
+
+Put `//` in front of the line `paidLonger(tracked, paidUntil(stored));` in `follow`.
+
+Run: `pnpm --filter @lxfoundry/stint-gate test follow.test.ts`
+Expected: FAIL in the two tests that move the end timer and resume forwarding, and only in those.
+
+Remove the `//`. Run the same command: PASS.
+
+- [ ] **Step 11: State in the spec what a failed subscription costs**
+
+In `docs/specs/stint-system.md`, section 7.3, replace
+
+```markdown
+**From open to end.** When an open settles, the gate provisions the resource and subscribes to the
+session account at `confirmed` commitment. It stays subscribed until the session ends, whether or
+not a connection is live.
+```
+
+with
+
+```markdown
+**From open to end.** When an open settles, the gate provisions the resource and subscribes to the
+session account at `confirmed` commitment. It stays subscribed until the session ends, whether or
+not a connection is live. A subscription that fails is logged and not replaced: the end timer's
+re-read (below) still finds a later `paid_until`, at the cost of stopping forwarding for that read.
+```
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add packages/gate docs/specs/stint-system.md
+git commit -m "Follow each session's account in the gate, and move the end timer on a top-up it did not settle"
+```
+
+- [ ] **Step 13: Write the failing end-to-end test**
+
+In `e2e/test/direct-chain.test.ts`, replace
+
+```ts
+import { fetchToken } from "@solana-program/token";
+```
+
+with
+
+```ts
+import { fetchToken } from "@solana-program/token";
+import { createStintClient } from "@lxfoundry/stint-client";
+```
+
+and replace
+
+```ts
+  it("tops up a session on the program, signed by the buyer, until its paid time runs out: then SessionExpired", async () => {
+```
+
+with
+
+```ts
+  it("has the stack's gate follow a top-up made on the program: it accepts a connection within its margin of the old end", async () => {
+    const buyer = await buyerWith(1_000_000n);
+    const client = createStintClient({
+      signer: buyer.signer,
+      policy: { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } },
+    });
+    // 8 s, and no connection until near its end: under the stack's idle close of 10 s.
+    const session = await client.open(stack.stream.url, { seconds: 8 });
+    const oldEndMs = session.paidUntil * 1_000;
+
+    await direct.topUp({ buyer, session: session.id, seconds: 20 });
+    await sleep(Math.max(0, oldEndMs - 1_000 - Date.now()));
+
+    // 1 s before the old end, within the gate's 2 s margin: a gate that has not seen the top-up refuses with 402.
+    const socket = await session.connect();
+    socket.terminate();
+    await session.close();
+  }, 60_000);
+
+  it("tops up a session on the program, signed by the buyer, until its paid time runs out: then SessionExpired", async () => {
+```
+
+- [ ] **Step 14: Run it to see it fail**
+
+Run: `pnpm --filter @lxfoundry/stint-e2e test direct-chain.test.ts`
+Expected: FAIL in the new test only: `The gate refused the connection (HTTP 402)`. The harness gives the gate a chain
+without subscriptions, so it still holds the old end.
+
+- [ ] **Step 15: Give the harness's gate a chain that follows accounts**
+
+In `e2e/src/targets/services.ts`, replace
+
+```ts
+import type { Rpc, SolanaRpcApi } from "@solana/kit";
+```
+
+with
+
+```ts
+import { createSolanaRpcSubscriptions, type Rpc, type SolanaRpcApi } from "@solana/kit";
+```
+
+and replace
+
+```ts
+        chain: createRpcChain(options.rpc),
+```
+
+with
+
+```ts
+        // The gate follows each session's account over the node's WebSocket (spec §7.3).
+        chain: createRpcChain(options.rpc, createSolanaRpcSubscriptions(options.rpcWsUrl)),
+```
+
+- [ ] **Step 16: Run every check, and commit**
+
+Run: `pnpm typecheck && pnpm test && pnpm e2e:local`
+Expected: PASS, the new end-to-end test included; the report reads `Status: required 9, pending 26 · Result: pass 9,
+fail 0, pending 25, not applicable 1`. In scenario 34 the gate now resumes on the account's notification rather than at
+its next retry; its checks are the same.
+
+```bash
+git add e2e
+git commit -m "Give the harness's gate a chain that follows session accounts"
+```
+
+---
+
+### Task 8: Upgrade the devnet program and run the required scenarios there
 
 This task is done with the person who holds the keys. It changes no code except the timing and configuration values that
-its rules allow: it upgrades the program on devnet to the build of Tasks 1 to 6, checks the bytes, runs the nine
+its rules allow: it upgrades the program on devnet to the build of Tasks 1 to 7, checks the bytes, runs the nine
 required scenarios on devnet, and records the result.
 
 **Files:**
@@ -4850,7 +5588,7 @@ required scenarios on devnet, and records the result.
   timing or configuration value, if the run measures one that must change
 
 **Interfaces:**
-- Consumes: Task 1's program, Tasks 2 to 6's services and scenarios, `scripts/deploy-devnet.sh`,
+- Consumes: Task 1's program, Tasks 2 to 7's services and scenarios, `scripts/deploy-devnet.sh`,
   `scripts/verify-deployment.sh`, `pnpm e2e:devnet`, and the keys of "Before you start".
 - Produces: the upgraded program on devnet, its verified hash, and a devnet run in which every required scenario
   passes.
@@ -4981,6 +5719,9 @@ git commit -m "Record the upgraded devnet program and the scenarios that pass th
 - A buyer tops up through the gate with `session.topUp` or `stint_top_up`; the gate moves its end timer; a top-up within
   10 s of the end, or after it, is refused and costs nothing; a top-up that lands on-chain while the gate is closing at
   expiry makes the gate resume.
+- The gate follows each session's account: a top-up it did not settle moves its end timer at once (the end-to-end test
+  of Task 7 connects within the margin of the old end), and a subscription that fails leaves the end timer's re-read as
+  the fallback.
 - The upgraded program is on devnet, `scripts/verify-deployment.sh` confirms its bytes, and `pnpm e2e:devnet` passes
   the nine required scenarios twice in a row and leaves no session open.
 - The pull request's description records the verified executable hash, the devnet report, and any deviation from this
@@ -4994,9 +5735,10 @@ Each is made in the task that needs it, and states a fact the code relies on:
   owner's account, `invalid_amount` past `maxSeconds`, no place for the rent payer; and `session_expired` within
   10 s of the end (Task 3);
 - §7.1: the top-up route's answers, `404` and the `session_expired` refusal among them (Task 4);
-- §12.2 (stack control): the harness can start the gate with its session clock ahead (Task 6).
+- §12.2 (stack control): the harness can start the gate with its session clock ahead (Task 6);
+- §7.3: a subscription that fails is logged and not replaced, and the end timer's re-read is the fallback (Task 7).
 
-Not edited, on purpose: §7.1's and §7.3's subscription to the session account, and §12.2's isolation groups. The spec
-describes the system as it is meant to be: the gate subscribes to every session it tracks, and scenario 34 has a stack
-of its own. This stage's gate learns of a top-up it did not settle when its end timer fires, and scenario 34 runs on the
-common stack, the deviations recorded under "What this stage builds, and what it leaves for later".
+Not edited, on purpose: §7.3's handling of an account closed by another party, §7.1's subscription after a `202` to an
+open, and §12.2's isolation groups. The spec describes the system as it is meant to be. This stage's gate acts on a
+later end only, leaves a closed account to its end timer, and scenario 34 runs on the common stack: the deviations
+recorded under "What this stage builds, and what it leaves for later".
