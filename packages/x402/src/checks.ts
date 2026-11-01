@@ -12,6 +12,7 @@ import {
   identifyTokenInstruction,
   parseCreateAssociatedTokenIdempotentInstruction,
   parseTransferCheckedInstruction,
+  type ParsedTransferCheckedInstruction,
 } from "@solana-program/token";
 import {
   address,
@@ -159,6 +160,27 @@ async function vaultOf(tx: InspectedTransaction): Promise<Address | undefined> {
   return undefined;
 }
 
+/**
+ * The funding transfer of an `open` or a `topUp` (spec §5.4): it moves exactly `amount` of `asset` from the refund owner's
+ * associated token account into the vault, so that a refund goes back where the money came from.
+ */
+async function checkFunding(
+  transfer: ParsedTransferCheckedInstruction<string>,
+  expected: { readonly asset: Address; readonly vault: Address; readonly refundOwner: Address; readonly amount: string },
+): Promise<Check<null>> {
+  if (
+    transfer.accounts.mint.address !== expected.asset ||
+    transfer.accounts.destination.address !== expected.vault ||
+    transfer.accounts.source.address !== (await associatedTokenAddress(expected.refundOwner, expected.asset))
+  ) {
+    return refuse("invalid_terms", "the funding must move the asset from the refund owner's account into the vault");
+  }
+  if (transfer.data.amount !== BigInt(expected.amount)) {
+    return refuse("invalid_amount", `the funding moves ${transfer.data.amount}, not ${expected.amount}`);
+  }
+  return { ok: true, value: null };
+}
+
 export interface OpenFacts {
   readonly session: Address;
   readonly authority: Address;
@@ -229,16 +251,8 @@ export async function checkOpenTransaction(
   }
 
   const refundOwner = o.accounts.refundOwner.address;
-  if (
-    t.accounts.mint.address !== asset ||
-    t.accounts.destination.address !== vault ||
-    t.accounts.source.address !== (await associatedTokenAddress(refundOwner, asset))
-  ) {
-    return refuse("invalid_terms", "the funding must move the asset from the refund owner's account into the vault");
-  }
-  if (t.data.amount !== BigInt(requirements.amount)) {
-    return refuse("invalid_amount", `the funding moves ${t.data.amount}, not ${requirements.amount}`);
-  }
+  const funding = await checkFunding(t, { asset, vault, refundOwner, amount: requirements.amount });
+  if (!funding.ok) return funding;
   // The authority and the transfer authority may be the same key.
   const signers = await checkSigners(tx, new Set([keys.feePayer, keys.rentPayer, authority, t.accounts.authority.address]), keys);
   if (!signers.ok) return signers;
@@ -287,16 +301,8 @@ export async function checkTopUpTransaction(
   if (stored.mint !== asset || u.accounts.vault.address !== vault) {
     return refuse("invalid_terms", "the session's mint or vault is not the entry's");
   }
-  if (
-    t.accounts.mint.address !== asset ||
-    t.accounts.destination.address !== vault ||
-    t.accounts.source.address !== (await associatedTokenAddress(stored.refundOwner, asset))
-  ) {
-    return refuse("invalid_terms", "the funding must move the asset from the refund owner's account into the vault");
-  }
-  if (t.data.amount !== BigInt(requirements.amount)) {
-    return refuse("invalid_amount", `the funding moves ${t.data.amount}, not ${requirements.amount}`);
-  }
+  const funding = await checkFunding(t, { asset, vault, refundOwner: stored.refundOwner, amount: requirements.amount });
+  if (!funding.ok) return funding;
   // The authority and the transfer authority may be the same key.
   const signers = await checkSigners(tx, new Set([keys.feePayer, stored.authority, t.accounts.authority.address]), keys);
   if (!signers.ok) return signers;
