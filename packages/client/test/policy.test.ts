@@ -1,7 +1,7 @@
 import { buildOpenOffer, type ElapsedRequirements } from "@lxfoundry/stint-x402";
 import { address } from "@solana/kit";
 import { describe, expect, it } from "vitest";
-import { checkOffer, type Policy } from "../src/index.js";
+import { checkOffer, checkTopUp, type Policy, type TopUpContext } from "../src/index.js";
 
 const signer = address("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU");
 const policy: Policy = { maxRate: 1_000n, maxPerSession: 100_000n, budget: { amount: 200_000n, periodSeconds: 3_600 } };
@@ -54,6 +54,45 @@ describe("checkOffer (spec §9.2, §9.3)", () => {
     expect(checkOffer(policy, withExtra(extra), 30, 0n, signer)).toEqual({
       ok: false,
       reason: `the offer names this client's own signer as the ${role}`,
+    });
+  });
+});
+
+describe("checkTopUp (spec §9.2, §9.3)", () => {
+  const session = address("SysvarS1otHashes111111111111111111111111111");
+  const topUp: ElapsedRequirements = { ...offer, amount: "10000", extra: { ...offer.extra, action: "topUp", session, seconds: 10 } };
+  const context: TopUpContext = { opened: offer, session, sessionTotal: 30_000n, locked: 30_000n, signer };
+  const withTopUpExtra = (extra: object): ElapsedRequirements => ({ ...topUp, extra: { ...topUp.extra, ...extra } });
+
+  it("accepts a top-up within every limit, with the asset's decimals", () => {
+    expect(checkTopUp(policy, topUp, 10, context)).toEqual({ ok: true, decimals: 6, amount: 10_000n });
+  });
+
+  it("accepts a duration below minSeconds, which a top-up does not have to meet", () => {
+    const short = { ...withTopUpExtra({ seconds: 1 }), amount: "1000" };
+    expect(checkTopUp(policy, short, 1, context)).toEqual({ ok: true, decimals: 6, amount: 1_000n });
+  });
+
+  it.each<[string, ElapsedRequirements, number, Partial<TopUpContext>?]>([
+    ["an open offer", offer, 30],
+    ["another session", withTopUpExtra({ session: signer }), 10],
+    ["another rate than the session's", { ...withTopUpExtra({ rate: "999" }), amount: "9990" }, 10],
+    ["another seller than the session's", { ...topUp, payTo: signer }, 10],
+    ["another receiver authorizer than the session's", withTopUpExtra({ receiverAuthorizer: signer }), 10],
+    ["another maxSeconds than the session's", withTopUpExtra({ maxSeconds: 200 }), 10],
+    ["another duration than requested", topUp, 11],
+    ["more than maxSeconds leaves after what the session covers", { ...withTopUpExtra({ seconds: 91 }), amount: "91000" }, 91],
+    ["an amount that is not rate × seconds", { ...topUp, amount: "10001" }, 10],
+    ["more than maxPerSession with what the session holds", topUp, 10, { sessionTotal: 90_001n }],
+    ["more than the period budget", topUp, 10, { locked: 190_001n }],
+  ])("refuses %s", (_, candidate, requested, overrides) => {
+    expect(checkTopUp(policy, candidate, requested, { ...context, ...overrides }).ok).toBe(false);
+  });
+
+  it("refuses an offer that names the client's own signer as the fee payer, as an open's check does", () => {
+    expect(checkTopUp(policy, withTopUpExtra({ feePayer: signer }), 10, context)).toEqual({
+      ok: false,
+      reason: "the offer names this client's own signer as the fee payer",
     });
   });
 });

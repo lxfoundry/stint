@@ -62,6 +62,7 @@ function fakeTools(calls: string[], failing?: string): SessionTools {
     tools: {
       stint_open_session: tool("stint_open_session", { sessionId: "S1", paidUntil: 1, cost: "120000", remainingBudget: "880000" }),
       stint_session_status: tool("stint_session_status", { paidUntil: 1, timeLeftSeconds: 100, spent: "5000", refundable: "115000" }),
+      stint_top_up: tool("stint_top_up", { paidUntil: 2, cost: "10000" }),
       stint_send: tool("stint_send", { ok: true }),
       stint_receive: tool("stint_receive", { messages: [{ type: "account", slot: "42" }], timedOut: false }, receiveSchema),
       stint_close_session: tool("stint_close_session", { paid: "5000", refunded: "115000", transaction: "sig" }),
@@ -100,8 +101,10 @@ describe("runAgent", () => {
       "stint_receive",
       "stint_send",
       "stint_session_status",
+      "stint_top_up",
     ]);
     expect(JSON.stringify(first.body.system)).toMatch(/Open a session first/);
+    expect(JSON.stringify(first.body.system)).toMatch(/stint_top_up/);
     expect(JSON.stringify(first.body.messages)).toMatch(/WATCHED/);
     // Each request carries the whole conversation, and the conversation is not kept on the server.
     expect(first.body).not.toHaveProperty("thread");
