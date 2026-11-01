@@ -5,9 +5,11 @@ import { CloseKind, type ClosedEvent, type Session } from "@lxfoundry/stint-prog
 import {
   USDC_DEVNET,
   buildOpenTransaction,
+  buildTopUpTransaction,
   createSessionToken,
   encodePaymentSignatureHeader,
   readElapsedPayload,
+  readElapsedRequirements,
   type PaymentPayload,
   type PaymentRequired,
   type SettleResponse,
@@ -77,7 +79,7 @@ export interface Harness {
   sessions: Map<Address, Session>;
   /** Faults and pauses a test switches on. */
   fail: { supported: boolean; settleClose: boolean; closedEvent: boolean; provision: boolean; teardown: boolean };
-  hold: { provision?: Promise<void>; settleClose?: Promise<void>; readSession?: Promise<void> };
+  hold: { provision?: Promise<void>; settleClose?: Promise<void>; settleTopUp?: Promise<void>; readSession?: Promise<void> };
   /** Runs inside the fake facilitator's close, after `hold` and before `fail`: a test changes the chain here. */
   onSettleClose?: () => void;
   /** How many reads the fake chain answers with nothing before the real answer, and the reads made. */
@@ -169,12 +171,19 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
       verify: async (payload) => (harness.calls.verify.push(payload), harness.verifyAnswer),
       settle: async (payload) => {
         harness.calls.settle.push(payload);
-        if (readElapsedPayload(payload)?.type === "close") {
+        const type = readElapsedPayload(payload)?.type;
+        if (type === "close") {
           await harness.hold.settleClose;
           harness.onSettleClose?.();
           if (harness.fail.settleClose) throw new Error("facilitator down");
         }
-        return harness.settleAnswer(payload);
+        if (type === "topUp") await harness.hold.settleTopUp;
+        const answer = harness.settleAnswer(payload);
+        // A top-up that settles is credited on the fake chain, as the program credits it.
+        const session = type === "topUp" && answer.success ? (readElapsedRequirements(payload.accepted)?.extra.session as Address | undefined) : undefined;
+        const stored = session && harness.sessions.get(session);
+        if (session && stored) harness.sessions.set(session, { ...stored, deposited: stored.deposited + BigInt(payload.accepted.amount) });
+        return answer;
       },
     },
     chain,
@@ -287,5 +296,35 @@ export function helpers(get: () => Harness) {
     });
   }
 
-  return { offers, open, send, prepareOpen, closeWith, settleDown, token, connect };
+  const topUpUrl = (session: Address, seconds?: number) =>
+    `${get().url}/sessions/${session}/top-up${seconds === undefined ? "" : `?seconds=${seconds}`}`;
+
+  /** The gate's answer to a top-up request without a payment: 402 with its offers, or a refusal. */
+  async function topUpOffers(session: Address, seconds?: number): Promise<{ status: number; body: Record<string, unknown>; header: string | null }> {
+    const response = await fetch(topUpUrl(session, seconds), { method: "POST" });
+    return { status: response.status, body: (await response.json()) as Record<string, unknown>, header: response.headers.get("payment-required") };
+  }
+
+  /** A payment for the top-up of `seconds` that the gate offers for `session`, signed by the harness's buyer. */
+  async function prepareTopUp(session: Address, seconds = 10): Promise<PaymentPayload> {
+    const { body } = await topUpOffers(session, seconds);
+    const required = body as unknown as PaymentRequired;
+    const offer = required.accepts[0]!;
+    const transaction = await buildTopUpTransaction({ requirements: offer as never, authority: get().buyer, decimals: 6 });
+    return { x402Version: 2, resource: required.resource, accepted: offer, payload: { type: "topUp", transaction } };
+  }
+
+  async function sendTopUp(
+    session: Address,
+    payload: PaymentPayload,
+    seconds = 10,
+  ): Promise<{ status: number; body: Record<string, unknown>; paymentResponse: string | null }> {
+    const response = await fetch(topUpUrl(session, seconds), {
+      method: "POST",
+      headers: { "PAYMENT-SIGNATURE": encodePaymentSignatureHeader(payload) },
+    });
+    return { status: response.status, body: (await response.json()) as Record<string, unknown>, paymentResponse: response.headers.get("payment-response") };
+  }
+
+  return { offers, open, send, prepareOpen, closeWith, settleDown, token, connect, topUpOffers, prepareTopUp, sendTopUp };
 }

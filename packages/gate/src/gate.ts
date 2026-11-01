@@ -20,7 +20,9 @@ import {
   buildCloseRequirements,
   buildCloseTransaction,
   buildOpenOffer,
+  buildTopUpOffer,
   checkOpenDuration,
+  checkTopUpDuration,
   decodePaymentSignatureHeader,
   encodePaymentRequiredHeader,
   encodePaymentResponseHeader,
@@ -31,6 +33,7 @@ import {
   sendJson,
   sessionMatches,
   verifySessionToken,
+  type ElapsedRequirements,
   type FacilitatorExtra,
   type OfferInput,
   type PaymentPayload,
@@ -55,7 +58,8 @@ export interface Gate {
 type TimerSlot = "idle" | "end";
 
 interface Tracked<U> {
-  readonly info: SessionInfo;
+  /** What the resource is handed. Its `paidUntil` follows the session's, so a connection attached after a top-up gets the new end. */
+  info: SessionInfo;
   readonly stored: Session;
   readonly upstream: U;
   readonly connections: Set<WebSocket>;
@@ -109,8 +113,8 @@ async function upstream<T>(call: () => Promise<T>): Promise<T> {
 }
 
 /** The shape of a route; the id still has to be a real address (32 bytes), which the regex cannot say. */
-const SESSION_PATH = /^\/sessions\/([1-9A-HJ-NP-Za-km-z]{32,44})\/(ws|close)$/;
-/** `GET /sessions/:id` (the status); `SESSION_PATH` holds the routes that end in `/ws` or `/close`. */
+const SESSION_PATH = /^\/sessions\/([1-9A-HJ-NP-Za-km-z]{32,44})\/(ws|close|top-up)$/;
+/** `GET /sessions/:id` (the status); `SESSION_PATH` holds the routes that end in `/ws`, `/close` or `/top-up`. */
 const STATUS_PATH = /^\/sessions\/([1-9A-HJ-NP-Za-km-z]{32,44})$/;
 const TOKEN_SKEW_MS = 30_000;
 /** A failed end close is retried after `endRetrySeconds` for this long after the end timer first fired; after that each wait doubles. */
@@ -224,15 +228,21 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     };
   }
 
-  async function paymentRequired(response: ServerResponse, durations: readonly number[], error?: string): Promise<void> {
-    const base = await offerBase();
+  /** A 402 listing `accepts` for the payment at `resource` (spec §5.1), in the body and in the `PAYMENT-REQUIRED` header. */
+  function sendPaymentRequired(response: ServerResponse, resource: string, accepts: readonly ElapsedRequirements[], error?: string): void {
     const body: PaymentRequired = {
       x402Version: X402_VERSION,
       ...(error === undefined ? {} : { error }),
-      resource: { url: `${config.origin}/sessions` },
-      accepts: durations.map((seconds) => buildOpenOffer({ ...base, seconds })),
+      resource: { url: resource },
+      accepts: [...accepts],
     };
     sendJson(response, 402, body, { [HEADERS.paymentRequired]: encodePaymentRequiredHeader(body) });
+  }
+
+  /** A 402 offering a new session, one entry per duration. */
+  async function paymentRequired(response: ServerResponse, durations: readonly number[], error?: string): Promise<void> {
+    const base = await offerBase();
+    sendPaymentRequired(response, `${config.origin}/sessions`, durations.map((seconds) => buildOpenOffer({ ...base, seconds })), error);
   }
 
   /** The session the payload's `stint.open` creates, read from the transaction itself. */
@@ -311,7 +321,19 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     }
   }
 
-  /** The session was paid for longer: forwarding resumes in both directions, and the end timer is set for the new end of the paid time. */
+  /**
+   * The session was paid for longer: the end timer is set for the new end of the paid time, which the resource's
+   * `SessionInfo` carries from then on. Nothing else changes: an idle timer whose close failed is not armed again, since a
+   * failed close leaves the session to run to the end of its paid time.
+   */
+  function extend(tracked: Tracked<U>, until: bigint): void {
+    tracked.endRetry = undefined;
+    tracked.paidUntil = until;
+    tracked.info = { ...tracked.info, paidUntil: until };
+    armEnd(tracked);
+  }
+
+  /** The session was paid for longer while forwarding was stopped: forwarding resumes in both directions, and the session is extended. */
   function resume(tracked: Tracked<U>, until: bigint): void {
     if (tracked.muted) {
       for (const [socket, original] of tracked.muted) {
@@ -320,9 +342,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       }
     }
     tracked.muted = undefined;
-    tracked.endRetry = undefined;
-    tracked.paidUntil = until;
-    armEnd(tracked);
+    extend(tracked, until);
     // The last connection may have dropped while forwarding was stopped, and a drop then does not arm the idle timer.
     if (tracked.connections.size === 0 && !tracked.pending.idle) armIdle(tracked);
   }
@@ -334,12 +354,15 @@ export function createGate<U>(config: GateConfig<U>): Gate {
    * `endRetrySeconds` for the first 30 s since the timer first fired at this `paidUntil` (a `NotExpired` from a chain
    * clock that lags clears within that), then after twice the previous wait each time, up to 60 s (or `endRetrySeconds`,
    * if that is longer), so a failure that does not clear by itself costs one settlement a minute and not one every few
-   * seconds. `resume` starts the short waits again.
+   * seconds. `resume` starts the short waits again. A top-up through this gate can resume the session while a pass runs
+   * (its settlement was in flight when the timer fired): the pass then arms nothing, since the end timer is set already.
    */
   async function expire(tracked: Tracked<U>): Promise<void> {
     mute(tracked);
     const retry = (tracked.endRetry ??= { since: sessionClock(), delayMs: endRetryMs });
     if (await attempt(tracked)) return;
+    // `resume` clears `endRetry`: the session runs on to its new end, for which the end timer is set.
+    if (tracked.endRetry !== retry) return;
     if (sessionClock() - retry.since >= END_RETRY_STEADY_MS) retry.delayMs = Math.min(retry.delayMs * 2, Math.max(END_RETRY_MAX_MS, endRetryMs));
     arm(tracked, "end", sessionClock() + retry.delayMs, expire);
   }
@@ -464,6 +487,91 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       tracked = await pending;
     }
     sendJson(response, 201, { session, paidUntil: Number(tracked.paidUntil), wsUrl: wsUrl(session) }, paymentResponse);
+  }
+
+  /**
+   * The session is paid until `until`, if that is later than the end the gate knows: forwarding goes on if the end timer has
+   * fired, and otherwise only the end moves. A session that has ended stays ended.
+   */
+  function paidLonger(tracked: Tracked<U>, until: bigint): void {
+    if (tracked.ended || until <= tracked.paidUntil) return;
+    if (tracked.muted) resume(tracked, until);
+    else extend(tracked, until);
+  }
+
+  /**
+   * `POST /sessions/:id/top-up` (spec §7.1): a 402 listing top-up offers, then the payment. Only a session this gate tracks
+   * can be topped up. Once its end timer has fired, the session cannot be extended (spec §4.3): the answer is a 402 with
+   * `session_expired` and offers for a new session, as a connect gets then. The durations that fit come from the chain,
+   * since a top-up made elsewhere may have moved the deposit (spec §5.2). Once the top-up settles, the end timer moves to
+   * the end of the deposit read before the payment plus the amount: the program credits at least that (spec §4.3), and
+   * if it credited more, the end timer finds the later end when it fires, as it finds any top-up this gate did not settle.
+   */
+  async function topUp(request: IncomingMessage, response: ServerResponse, url: URL, session: Address): Promise<void> {
+    const tracked = sessions.get(session);
+    if (!tracked || tracked.ended) return sendJson(response, 404, { error: "unknown_session" });
+    if (tracked.muted) return paymentRequired(response, menu, "session_expired");
+    const stored = await upstream(() => config.chain.readSession(session));
+    if (!stored || stored.startedAt !== tracked.stored.startedAt || !sessionMatches(stored, seller)) {
+      return sendJson(response, 404, { error: "unknown_session" });
+    }
+    const covered = stored.deposited / stored.rate;
+    const requested = url.searchParams.get("seconds");
+    const durations =
+      requested === null ? menu.filter((seconds) => checkTopUpDuration(config.terms, covered, seconds).ok) : [Number(requested)];
+    // When no duration of the menu fits, the 400 states the bounds, so that the buyer can ask for one that does.
+    const checks =
+      durations.length === 0 ? [checkTopUpDuration(config.terms, covered, 0)] : durations.map((seconds) => checkTopUpDuration(config.terms, covered, seconds));
+    for (const check of checks) {
+      if (!check.ok) return sendJson(response, 400, { error: "invalid_duration", minSeconds: check.minSeconds, maxSeconds: check.maxSeconds });
+    }
+
+    const resource = `${config.origin}/sessions/${session}/top-up`;
+    const offers = async () => {
+      const base = await offerBase();
+      return durations.map((seconds) => buildTopUpOffer({ ...base, seconds, session }));
+    };
+    // A refusal because the session has run out offers a new session; any other offers the top-up again.
+    const refusal = async (reason: string) =>
+      reason === "session_expired" ? paymentRequired(response, menu, reason) : sendPaymentRequired(response, resource, await offers(), reason);
+
+    const header = request.headers[HEADERS.paymentSignature.toLowerCase()];
+    if (typeof header !== "string") return sendPaymentRequired(response, resource, await offers());
+    let payload: PaymentPayload;
+    try {
+      payload = decodePaymentSignatureHeader(header);
+    } catch {
+      return refusal("invalid_payload");
+    }
+    const accepted = readElapsedRequirements(payload.accepted);
+    if (!accepted || accepted.extra.action !== "topUp" || accepted.extra.session !== session || !durations.includes(accepted.extra.seconds)) {
+      return refusal("invalid_payment_requirements");
+    }
+    // The requirements as this gate issues them, with the advisory fields of the entry the client accepted (spec §5.5).
+    const requirements = buildTopUpOffer({
+      ...(await offerBase({
+        blockhash: accepted.extra.recentBlockhash,
+        lastValidBlockHeight: BigInt(accepted.extra.lastValidBlockHeight),
+      })),
+      maxTimeoutSeconds: accepted.maxTimeoutSeconds,
+      seconds: accepted.extra.seconds,
+      session,
+    });
+
+    const verified = await upstream(() => config.facilitator.verify(payload, requirements));
+    if (!verified.isValid) return refusal(verified.invalidReason ?? "invalid_payload");
+    const settled = await upstream(() => config.facilitator.settle(payload, requirements));
+    const paymentResponse = { [HEADERS.paymentResponse]: encodePaymentResponseHeader(settled) };
+    log({ event: "topUp", session, success: settled.success, reason: settled.errorReason });
+    if (!settled.success) {
+      // A pending top-up needs nothing more here: if it lands, its later end is found as one this gate did not settle is.
+      if (settled.errorReason === "settlement_pending") return sendJson(response, 202, { transaction: settled.transaction }, paymentResponse);
+      return refusal(settled.errorReason ?? "simulation_failed");
+    }
+    const until = paidUntil({ ...stored, deposited: stored.deposited + BigInt(requirements.amount) });
+    paidLonger(tracked, until);
+    // The session may already run later than this top-up alone makes it: the end timer found one made elsewhere meanwhile.
+    sendJson(response, 200, { paidUntil: Number(until > tracked.paidUntil ? until : tracked.paidUntil) }, paymentResponse);
   }
 
   /** Checks 1 to 3 of spec §7.2. Check 4 holds for every tracked session: it opened with this gate's terms. */
@@ -638,10 +746,11 @@ export function createGate<U>(config: GateConfig<U>): Gate {
           return true;
         }
         const match = SESSION_PATH.exec(url.pathname);
-        if (request.method === "POST" && match?.[2] === "close") {
+        if (request.method === "POST" && (match?.[2] === "close" || match?.[2] === "top-up")) {
           const id = match[1]!;
           if (!isAddress(id)) sendJson(response, 404, { error: "unknown_session" });
-          else await closeSession(request, response, id);
+          else if (match[2] === "close") await closeSession(request, response, id);
+          else await topUp(request, response, url, id);
           return true;
         }
         if (request.method === "GET") {
