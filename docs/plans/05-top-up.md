@@ -71,8 +71,13 @@ Not built, and not to be built here:
 - **What the subscription does with anything but a later end.** A notification that the account is gone, or holds
   another session, is left to the end timer, as today: dropping the connections of a session another party closed
   (spec section 7.3, `4402` or `4410` from the `Closed` event) comes with the stage that needs the account-closed
-  notification. A subscription that fails is logged and not replaced; the end timer's re-read still finds a later
-  `paid_until`. The subscription after a `202` to an open (spec section 7.1) comes with the settlement records.
+  notification. The subscription after a `202` to an open (spec section 7.1) comes with the settlement records.
+- **Replacing a subscription that fails.** One that fails, or cannot start, is logged and not replaced, while spec
+  section 7.3 keeps the gate subscribed until the session ends. Until the end timer's re-read at the old end finds a
+  later `paid_until`, the gate holds the old end: a connect within its margin of the old end is refused with `402`,
+  forwarding stops for the length of that read, and if the read itself fails, the gate tries `AtExpiry` closes (refused
+  with `NotExpired`) and re-reads at each retry until one read succeeds. That is how the gate behaves without a
+  subscription today.
 - **`autoTopUp`** and its policy fields `topUpAheadSeconds` and `topUpSeconds` (spec section 9.2). The client tops
   up when it is asked to: `session.topUp` or `stint_top_up`.
 - **Polling after a payment whose outcome is unknown** (spec section 9.3). After a `202`, a `5xx` or a time-out, the
@@ -4915,16 +4920,20 @@ Decisions this task makes, from the code and the spec:
   `started_at`, or terms this gate does not offer), changes nothing: the end timer deals with it at the end, as it does
   today. Dropping the connections of a session another party closed, with `4402` or `4410` from the `Closed` event
   (spec section 7.3), comes with the stage that needs it.
-- **A subscription that fails is logged and not replaced.** The end timer's re-read still finds a later `paid_until`,
-  so a dropped subscription costs a pause in forwarding for one read at the old end, as before this task. Task 7 states
-  this in spec section 7.3.
+- **A subscription that fails, or cannot start, is logged and not replaced.** This is a limitation of the stage, not
+  the design, so the spec is not edited; its cost is under "What this stage builds, and what it leaves for later": the
+  gate behaves as it did without a subscription.
 - **One subscription per session, from `provision` to `end`.** It starts once, when the open settles and the session is
-  provisioned (a repeated open finds it tracked and starts nothing), and stops when the session ends, whatever ends it,
-  and when the gate stops. A top-up that lands before the subscription is in place is found by the end timer.
+  provisioned (a repeated open finds it tracked and starts nothing), after the session's timers, so that the session
+  ends by itself whatever becomes of its subscription. It stops when the session ends, whatever ends it, and when the
+  gate stops; a gate that has stopped starts none. A top-up that lands before the subscription is in place is found by
+  the end timer.
+- **A later end seen during the end timer's re-read leaves nothing to close.** The notification resumes the session
+  while the re-read is in flight; the re-read then finds no later end than the one the gate now knows, and `attempt`
+  would send an `AtExpiry` close the program refuses. `attempt` returns once the session is no longer muted.
 
 **Files:**
-- Modify: `packages/gate/src/chain.ts`, `packages/gate/src/gate.ts`, `e2e/src/targets/services.ts`,
-  `docs/specs/stint-system.md` (section 7.3)
+- Modify: `packages/gate/src/chain.ts`, `packages/gate/src/gate.ts`, `e2e/src/targets/services.ts`
 - Modify (test support): `packages/gate/test/harness.ts`
 - Create: `packages/gate/test/follow.test.ts`
 - Test: `packages/gate/test/chain.test.ts`, `e2e/test/direct-chain.test.ts`
@@ -4994,7 +5003,8 @@ function subscriptionsYielding(notifications: unknown[], then: "hold" | "fail" |
         return (async function* () {
           yield* notifications;
           if (then === "fail") throw new Error("socket closed");
-          if (then === "hold") await new Promise((resolve) => abortSignal.addEventListener("abort", resolve));
+          // Like Kit's, the notifications end once the subscription is aborted, at once if it already is.
+          if (then === "hold" && !abortSignal.aborted) await new Promise((resolve) => abortSignal.addEventListener("abort", resolve));
         })();
       },
     }),
@@ -5022,6 +5032,8 @@ describe("the RPC chain's subscription to a session", () => {
     expect(calls[0]).toMatchObject({ address: where, config: { commitment: "confirmed", encoding: "base64" } });
     stop();
     expect(calls[0]!.signal.aborted).toBe(true);
+    // The notifications end once stopped; that is not reported as a failure.
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(errors).toEqual([]);
   });
 
@@ -5125,7 +5137,10 @@ export function createRpcChain(rpc: Rpc<SolanaRpcApi>, subscriptions?: RpcSubscr
         const notifications = await subscriptions
           .accountNotifications(session, { commitment: "confirmed", encoding: "base64" })
           .subscribe({ abortSignal: controller.signal });
-        for await (const { value } of notifications) onChange(sessionIn(parseBase64RpcAccount(session, value)));
+        for await (const { value } of notifications) {
+          // Typed as possibly missing, the account parses to a `MaybeEncodedAccount`, as a read's does.
+          onChange(sessionIn(parseBase64RpcAccount(session, value as typeof value | null)));
+        }
         throw new Error(`${session}: notifications ended`);
       })().catch((error: unknown) => {
         // Ending the subscription ends its notifications too: that is not a failure.
@@ -5141,6 +5156,11 @@ export function createRpcChain(rpc: Rpc<SolanaRpcApi>, subscriptions?: RpcSubscr
 
 Run: `pnpm --filter @lxfoundry/stint-gate test chain.test.ts && pnpm --filter @lxfoundry/stint-gate typecheck`
 Expected: PASS: the new tests and the earlier tests of `readSession`, whose behaviour did not change; no type error.
+
+Check that the tests rest on the abort guard: replace `if (!controller.signal.aborted) onError(error);` with
+`onError(error);`, and run `pnpm --filter @lxfoundry/stint-gate test chain.test.ts`. Expected: FAIL in "reports the
+session after each change…" and "reports nothing once it has been stopped", and only there. Put the guard back and run
+it again: PASS.
 
 ```bash
 git add packages/gate/src/chain.ts packages/gate/test/chain.test.ts
@@ -5192,6 +5212,18 @@ with
 replace
 
 ```ts
+  fail: { supported: boolean; settleClose: boolean; closedEvent: boolean; provision: boolean; teardown: boolean };
+```
+
+with
+
+```ts
+  fail: { supported: boolean; settleClose: boolean; closedEvent: boolean; provision: boolean; teardown: boolean; watch: boolean };
+```
+
+replace
+
+```ts
     calls: { verify: [], settle: [], provision: [], attach: [], teardown: [] },
 ```
 
@@ -5199,6 +5231,18 @@ with
 
 ```ts
     calls: { verify: [], settle: [], provision: [], attach: [], teardown: [], watch: [] },
+```
+
+replace
+
+```ts
+    fail: { supported: false, settleClose: false, closedEvent: false, provision: false, teardown: false },
+```
+
+with
+
+```ts
+    fail: { supported: false, settleClose: false, closedEvent: false, provision: false, teardown: false, watch: false },
 ```
 
 replace
@@ -5233,6 +5277,7 @@ with
       return { claimed: 0n, owed: 8_000n, refunded: 22_000n, redirected: 0n, kind: CloseKind.Standard } as ClosedEvent;
     },
     watchSession: (session, onChange, onError) => {
+      if (harness.fail.watch) throw new Error("subscriptions down");
       harness.calls.watch.push(session);
       harness.watchers.set(session, { onChange, onError });
       return () => {
@@ -5253,6 +5298,7 @@ Create `packages/gate/test/follow.test.ts`:
 ```ts
 import type { Address } from "@solana/kit";
 import type { Session } from "@lxfoundry/stint-program-client";
+import { readElapsedPayload } from "@lxfoundry/stint-x402";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { NOW_MS, helpers, startHarness, type FakeTimer, type Harness } from "./harness.js";
 
@@ -5263,7 +5309,7 @@ const EXTENDED_DUE = NOW_MS + 40_000;
 
 describe("the gate's subscription to the session account (spec §7.3)", () => {
   let h: Harness;
-  const { open, prepareOpen, send, closeWith, token, connect } = helpers(() => h);
+  const { open, prepareOpen, send, closeWith, settleDown, token, connect } = helpers(() => h);
 
   beforeEach(async () => {
     h = await startHarness();
@@ -5367,14 +5413,58 @@ describe("the gate's subscription to the session account (spec §7.3)", () => {
 
     expect([...h.unwatched].sort()).toEqual([first.session, second.session].sort());
   });
+
+  it("sends no close when the top-up shows on the account while the end timer's re-read is in flight", async () => {
+    const { session, server, frames } = await openConnected();
+    const reads = h.reads.session;
+    let release!: () => void;
+    h.hold.readSession = new Promise<void>((resolve) => (release = resolve));
+    h.timers.fire(pendingDue(END_DUE)); // forwarding stops; the end timer's re-read waits
+    await expect.poll(() => h.reads.session).toBe(reads + 1);
+
+    notify(session, { deposited: 40_000n }); // the session resumes while the re-read is in flight
+    release();
+    await settleDown();
+
+    expect(h.calls.settle.filter((payload) => readElapsedPayload(payload)?.type === "close")).toEqual([]);
+    expect(h.timers.pending.map((timer) => timer.dueMs)).toEqual([EXTENDED_DUE]);
+    server.send("tick:resumed");
+    await expect.poll(() => frames).toContain("tick:resumed");
+    expect(h.calls.teardown).toEqual([]);
+  });
+
+  it("starts no subscription for a session provisioned after the gate stopped", async () => {
+    let release!: () => void;
+    h.hold.provision = new Promise<void>((resolve) => (release = resolve));
+    const { payload } = await prepareOpen();
+    const opening = send(payload);
+    await expect.poll(() => h.calls.provision).toHaveLength(1);
+
+    await h.gate.close();
+    release();
+    await opening;
+
+    expect(h.calls.watch).toEqual([]);
+  });
+
+  it("logs a subscription that cannot start, and still opens the session with its timers", async () => {
+    h.fail.watch = true;
+
+    const { session, status } = await open();
+
+    expect(status).toBe(201);
+    expect(h.logs).toContainEqual({ event: "subscription_error", session, error: "subscriptions down" });
+    expect(pendingDue(END_DUE)).toBeDefined();
+  });
 });
 ```
 
 - [ ] **Step 7: Run them to see them fail**
 
 Run: `pnpm --filter @lxfoundry/stint-gate test follow.test.ts`
-Expected: FAIL: the gate starts no subscription, so `h.calls.watch` is empty and `notify` throws `no subscription to …`.
-The test of a gate that stops fails on an empty `unwatched`.
+Expected: FAIL: the gate starts no subscription, so `h.calls.watch` is empty and `notify` throws `no subscription to …`;
+the test of a gate that stops fails on an empty `unwatched`, and the test of a subscription that cannot start finds no
+log entry. The test of a session provisioned after the gate stopped passes already: nothing subscribes yet.
 
 - [ ] **Step 8: Follow the account in the gate**
 
@@ -5408,20 +5498,26 @@ with
   /**
    * Follows the session's account (spec §7.3), when the chain can: a later `paid_until` on the same session, a top-up this
    * gate did not settle, moves the end timer at once and resumes forwarding if the end timer has fired. An account that is
-   * gone, or that holds another session, is left to the end timer. A subscription that fails is logged and not replaced:
-   * the end timer's re-read still finds a later `paid_until`.
+   * gone, or that holds another session, is left to the end timer. A subscription that fails, or cannot start, is logged
+   * and not replaced: the end timer's re-read still finds a later `paid_until`. A gate that has stopped starts none, since
+   * nothing would end it.
    */
   function follow(tracked: Tracked<U>): void {
-    if (!config.chain.watchSession) return;
+    if (stopped || !config.chain.watchSession) return;
     const session = tracked.info.session;
-    tracked.unwatch = config.chain.watchSession(
-      session,
-      (stored) => {
-        if (!stored || stored.startedAt !== tracked.stored.startedAt || !sessionMatches(stored, seller)) return;
-        paidLonger(tracked, paidUntil(stored));
-      },
-      (error) => log({ event: "subscription_error", session, error: error instanceof Error ? error.message : String(error) }),
-    );
+    const failed = (error: unknown) => log({ event: "subscription_error", session, error: error instanceof Error ? error.message : String(error) });
+    try {
+      tracked.unwatch = config.chain.watchSession(
+        session,
+        (stored) => {
+          if (!stored || stored.startedAt !== tracked.stored.startedAt || !sessionMatches(stored, seller)) return;
+          paidLonger(tracked, paidUntil(stored));
+        },
+        failed,
+      );
+    } catch (error) {
+      failed(error);
+    }
   }
 
   async function provision(session: Address, stored: Session): Promise<Tracked<U>> {
@@ -5440,10 +5536,25 @@ with
 
 ```ts
     sessions.set(session, tracked);
-    follow(tracked);
     armIdle(tracked);
     armEnd(tracked);
+    // After the timers: the session ends by itself whatever becomes of its subscription.
+    follow(tracked);
     return tracked;
+```
+
+A later end seen during the end timer's re-read leaves nothing to close: replace
+
+```ts
+    if (!tracked.closing && (await settledByChain(tracked))) return true;
+```
+
+with
+
+```ts
+    if (!tracked.closing && (await settledByChain(tracked))) return true;
+    // The account's subscription (or the route) resumed the session during the re-read: there is nothing to close.
+    if (!tracked.muted) return true;
 ```
 
 It ends with the session: replace
@@ -5497,7 +5608,8 @@ with
 - [ ] **Step 9: Run the gate's tests to see them pass**
 
 Run: `pnpm --filter @lxfoundry/stint-gate test && pnpm --filter @lxfoundry/stint-gate typecheck`
-Expected: PASS: the new file's 9 tests and every earlier one; no type error.
+Expected: PASS: the new file's 12 tests and every earlier one; no type error. If "sends no close when the top-up shows on
+the account…" fails with a close settled, the guard in `attempt` is missing or comes before the re-read.
 
 - [ ] **Step 10: Check that the tests rest on the subscription**
 
@@ -5508,33 +5620,18 @@ Expected: FAIL in the two tests that move the end timer and resume forwarding, a
 
 Remove the `//`. Run the same command: PASS.
 
-- [ ] **Step 11: State in the spec what a failed subscription costs**
+- [ ] **Step 11: Commit**
 
-In `docs/specs/stint-system.md`, section 7.3, replace
-
-```markdown
-**From open to end.** When an open settles, the gate provisions the resource and subscribes to the
-session account at `confirmed` commitment. It stays subscribed until the session ends, whether or
-not a connection is live.
-```
-
-with
-
-```markdown
-**From open to end.** When an open settles, the gate provisions the resource and subscribes to the
-session account at `confirmed` commitment. It stays subscribed until the session ends, whether or
-not a connection is live. A subscription that fails is logged and not replaced: the end timer's
-re-read (below) still finds a later `paid_until`, at the cost of stopping forwarding for that read.
-```
-
-- [ ] **Step 12: Commit**
+The spec is not edited: section 7.3 describes a gate that stays subscribed until the session ends, and a subscription
+that is not replaced when it fails is this stage's limitation, recorded under "What this stage builds, and what it
+leaves for later".
 
 ```bash
-git add packages/gate docs/specs/stint-system.md
+git add packages/gate
 git commit -m "Follow each session's account in the gate, and move the end timer on a top-up it did not settle"
 ```
 
-- [ ] **Step 13: Write the failing end-to-end test**
+- [ ] **Step 12: Write the failing end-to-end test**
 
 In `e2e/test/direct-chain.test.ts`, replace
 
@@ -5567,6 +5664,8 @@ with
     // 8 s, and no connection until near its end: under the stack's idle close of 10 s.
     const session = await client.open(stack.stream.url, { seconds: 8 });
     const oldEndMs = session.paidUntil * 1_000;
+    // The gate's subscription is not acknowledged when the open answers; the local target's subscription wait covers it.
+    await sleep(1_500);
 
     await direct.topUp({ buyer, session: session.id, seconds: 20 });
     await sleep(Math.max(0, oldEndMs - 1_000 - Date.now()));
@@ -5580,13 +5679,13 @@ with
   it("tops up a session on the program, signed by the buyer, until its paid time runs out: then SessionExpired", async () => {
 ```
 
-- [ ] **Step 14: Run it to see it fail**
+- [ ] **Step 13: Run it to see it fail**
 
 Run: `pnpm --filter @lxfoundry/stint-e2e test direct-chain.test.ts`
 Expected: FAIL in the new test only: `The gate refused the connection (HTTP 402)`. The harness gives the gate a chain
 without subscriptions, so it still holds the old end.
 
-- [ ] **Step 15: Give the harness's gate a chain that follows accounts**
+- [ ] **Step 14: Give the harness's gate a chain that follows accounts**
 
 In `e2e/src/targets/services.ts`, replace
 
@@ -5613,7 +5712,7 @@ with
         chain: createRpcChain(options.rpc, createSolanaRpcSubscriptions(options.rpcWsUrl)),
 ```
 
-- [ ] **Step 16: Run every check, and commit**
+- [ ] **Step 15: Run every check, and commit**
 
 Run: `pnpm typecheck && pnpm test && pnpm e2e:local`
 Expected: PASS, the new end-to-end test included; the report reads `Status: required 9, pending 26 · Result: pass 9,
@@ -5713,7 +5812,7 @@ URL in it is cut to its host). Diagnose by the symptom:
 | Scenario 4: the top-up 5 s before the end is not refused | The facilitator's clock and the chain's disagree by more than 5 s | Stop and report: the facilitator decides the margin on its own clock (spec §5.4), and a gap that large is a finding |
 | Scenario 34: the on-chain top-up fails with error 6003 (`SessionExpired`) | It landed after `paidUntil`: the confirmation took longer than the 2.5 s lead, or devnet's clock runs ahead of the wall clock | Raise `TOP_UP_LEAD_MS` to the measured time, at most 3,500, so that `IN_FLIGHT_MS` still fits before it. Record the measurement |
 | Scenario 34: `the gate stopped forwarding when its end timer fired` fails | A frame forwarded just before the gate stopped arrived more than 1 s later | Raise `IN_FLIGHT_MS` to the measured delay, keeping `GATE_AHEAD_MS - IN_FLIGHT_MS > TOP_UP_LEAD_MS`. If no frame should have been in flight, stop and report: the gate did not stop forwarding |
-| Scenario 34: `the gate forwards again after the first paid_until` times out | The gate's re-read after its failed close does not see the top-up before its next end-timer firing, or the payments are too slow to land in the window | Look at the timestamps of the frames and of the top-up's confirmation; if the gate never resumed, stop and report |
+| Scenario 34: `the gate forwards again after the first paid_until` times out | The gate resumes on the account's notification (Task 7), or, if its subscription failed, at the re-read after its next failed close. Neither saw the top-up before the end timer's next firing, or the payments were too slow to land in the window. The harness does not capture the gate's log, so a `subscription_error` is not visible | Look at the timestamps of the frames and of the top-up's confirmation. If the gate never resumed, stop and report: whether the subscription failed is the first thing to find out, from a run with the gate's `log` set |
 | Scenario 3, 4 or 34: `4402` not received within 30 s | Confirmations are slow, or the devnet clock lags the gate's, so the gate's `AtExpiry` close fails with `NotExpired` and is retried | A `4402` later than the 30 s after `paid_until` that the specification allows is a finding about the design: stop and report it. Only the slack that `awaitClose` adds for the chain to confirm (15 s) may be lengthened, to the observed lag |
 | Scenario 26 times out | The sweeper did not close the session: its interval (5 s on devnet) and the confirmation outlasted the scenario's wait | Lengthen the scenario's wait by the measured delay; never shorten the check |
 | `Cleaning up what earlier runs left failed` at start-up | A session or account was left by a run that ended abnormally, or the provider refuses the listing of the program's accounts | `pnpm e2e:devnet clean`, then run again; set `STINT_DEVNET_SCAN_RPC_URL=https://api.devnet.solana.com` in `.env.devnet` if the listing is refused |
@@ -5785,10 +5884,10 @@ Each is made in the task that needs it, and states a fact the code relies on:
   owner's account, `invalid_amount` past `maxSeconds`, no place for the rent payer; and `session_expired` within
   10 s of the end (Task 3);
 - §7.1: the top-up route's answers, `404` and the `session_expired` refusal among them (Task 4);
-- §12.2 (stack control): the harness can start the gate with its session clock ahead (Task 6);
-- §7.3: a subscription that fails is logged and not replaced, and the end timer's re-read is the fallback (Task 7).
+- §12.2 (stack control): the harness can start the gate with its session clock ahead (Task 6).
 
-Not edited, on purpose: §7.3's handling of an account closed by another party, §7.1's subscription after a `202` to an
-open, and §12.2's isolation groups. The spec describes the system as it is meant to be. This stage's gate acts on a
-later end only, leaves a closed account to its end timer, and scenario 34 runs on the common stack: the deviations
-recorded under "What this stage builds, and what it leaves for later".
+Not edited, on purpose: §7.3's handling of an account closed by another party and its subscription that lasts until the
+session ends, §7.1's subscription after a `202` to an open, and §12.2's isolation groups. The spec describes the system
+as it is meant to be. This stage's gate acts on a later end only, leaves a closed account to its end timer, does not
+replace a subscription that fails, and scenario 34 runs on the common stack: the deviations recorded under "What this
+stage builds, and what it leaves for later".
