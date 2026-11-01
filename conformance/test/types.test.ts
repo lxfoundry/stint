@@ -1,6 +1,6 @@
 import type { Address, KeyPairSigner } from "@solana/kit";
 import { describe, expectTypeOf, it } from "vitest";
-import type { DirectChain, DirectSession, ScenarioContext, StackControl } from "../src/index.js";
+import type { Buyer, DirectChain, DirectSession, GateStartOptions, ScenarioContext, StackControl } from "../src/index.js";
 
 describe("the scenario context's members for stack control and direct sessions", () => {
   it("are optional, and exported with the other types", () => {
@@ -19,5 +19,12 @@ describe("the scenario context's members for stack control and direct sessions",
     expectTypeOf<DirectSession["deposit"]>().toEqualTypeOf<bigint>();
     expectTypeOf<Parameters<DirectChain["open"]>[0]["remainder"]>().toEqualTypeOf<bigint | undefined>();
     expectTypeOf<Parameters<DirectChain["open"]>[0]["seconds"]>().toEqualTypeOf<number>();
+  });
+
+  it("describe a gate started with its session clock ahead, and a top-up made straight on the program", () => {
+    expectTypeOf<Parameters<StackControl["startGate"]>>().toEqualTypeOf<[options?: GateStartOptions]>();
+    expectTypeOf<GateStartOptions["sessionClockAheadMs"]>().toEqualTypeOf<number | undefined>();
+    expectTypeOf<Parameters<DirectChain["topUp"]>[0]>().toEqualTypeOf<{ readonly buyer: Buyer; readonly session: Address; readonly seconds: number }>();
+    expectTypeOf<ReturnType<DirectChain["topUp"]>>().toEqualTypeOf<Promise<string>>();
   });
 });

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Rpc, SolanaRpcApi } from "@solana/kit";
+import type { GateStartOptions } from "@lxfoundry/stint-conformance";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import { startStream, type RunningStream, type StreamConfig } from "@lxfoundry/stint-example-stream";
 import { startFacilitator, type RunningFacilitator } from "@lxfoundry/stint-facilitator";
@@ -57,11 +58,12 @@ export interface Services {
    */
   stopGate(): Promise<void>;
   /**
-   * Starts the gate again on the port it had. The new gate has no memory of earlier sessions. Safe to repeat when the calls are
+   * Starts the gate again on the port it had. The new gate has no memory of earlier sessions. `options` hold for that gate only:
+   * the next start without them brings up an ordinary one. Safe to repeat when the calls are
    * made one after another, not for two that overlap: they race for the port. It does nothing once `stop()` has been called: a
    * gate started then would be one that nothing stops.
    */
-  startGate(): Promise<void>;
+  startGate(options?: GateStartOptions): Promise<void>;
   /** Stops everything that is running, a stopped gate included. Safe to repeat. */
   stop(): Promise<void>;
 }
@@ -150,9 +152,13 @@ export async function startServices(options: ServicesOptions): Promise<Services>
       for (let hop = 0; hop < 2; hop++) await new Promise((resolve) => setImmediate(resolve));
     };
     let stopped = false;
-    const startGate = async (): Promise<void> => {
+    const startGate = async (options: GateStartOptions = {}): Promise<void> => {
       if (running || stopped) return;
-      const started = await startStreamOn(streamConfig, port);
+      const ahead = options.sessionClockAheadMs ?? 0;
+      // Its idle and end timers fire `ahead` early; the chain's clock still decides every amount.
+      const config: StreamConfig =
+        ahead === 0 ? streamConfig : { ...streamConfig, gate: { ...streamConfig.gate, sessionClock: () => Date.now() + ahead } };
+      const started = await startStreamOn(config, port);
       // A stop that landed during the start's tries found no gate to stop: this one would run on, with nothing to stop it.
       if (stopped) return started.stop();
       latest = running = started;

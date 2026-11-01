@@ -66,7 +66,7 @@ export async function startLocalStack(): Promise<LocalStack> {
     const control: StackControl = {
       rentPayer: services.facilitator.rentPayer,
       stopGate: () => services.stopGate(),
-      startGate: () => services.startGate(),
+      startGate: (options) => services.startGate(options),
     };
     const target: Target = { name: "local", capabilities: new Set(["chain", "stack", "facilitatorApi"]) };
     return {

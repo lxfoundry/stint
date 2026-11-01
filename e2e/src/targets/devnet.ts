@@ -174,7 +174,7 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
   const control: StackControl = {
     rentPayer: services.facilitator.rentPayer,
     stopGate: () => services.stopGate(),
-    startGate: () => services.startGate(),
+    startGate: (options) => services.startGate(options),
   };
   const sellerWallet = keys.stack.seller.signer.address;
   const direct = createDirectChain({

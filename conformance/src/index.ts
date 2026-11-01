@@ -6,3 +6,4 @@ export { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
 export { readUntil } from "./reads.js";
 export { awaitClose, findClose, type FoundClose } from "./closes.js";
 export { expectEqual, expectTrue, sleep, waitFor } from "./assert.js";
+export { rejectedWithProgramError } from "./helpers.js";

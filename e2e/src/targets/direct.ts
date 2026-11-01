@@ -8,6 +8,7 @@ import {
   findSessionPda,
   getCloseInstruction,
   getOpenInstruction,
+  getTopUpInstruction,
   paidUntil,
 } from "@lxfoundry/stint-program-client";
 import { associatedTokenAddress, randomSeed, type RetryOptions, type Terms } from "@lxfoundry/stint-x402";
@@ -39,8 +40,9 @@ interface Parties {
 }
 
 /**
- * Sessions opened and closed straight on the program, for the scenarios that need one that no gate, facilitator or
- * sweeper holds (spec §12.2). The open is the layout of spec §5.3 with real signers: the rent payer creates the vault,
+ * Sessions opened, topped up and closed straight on the program, for the scenarios that need one that no gate, facilitator
+ * or sweeper holds, or a top-up that none of them makes (spec §12.2). The open is the layout of spec §5.3 with real
+ * signers: the rent payer creates the vault,
  * the buyer funds it, and the program opens the session. The receiver authorizer is a throwaway key whose secret is
  * dropped: only the buyer can close the session before its paid time, and anyone from then on.
  */
@@ -133,6 +135,27 @@ export function createDirectChain(options: DirectChainOptions): DirectChain {
             ...(await eventAccounts()),
             kind: CloseKind.Standard,
           }),
+        ],
+        send,
+      );
+    },
+
+    async topUp({ buyer, session, seconds }) {
+      if (!Number.isInteger(seconds) || seconds < 1) throw new Error(`A top-up buys a whole number of seconds, at least 1: got ${seconds}`);
+      const vault = await associatedTokenAddress(session, USDC_DEVNET_MINT);
+      return sendInstructions(
+        rpc,
+        feePayer,
+        [
+          getTransferCheckedInstruction({
+            source: buyer.usdcAccount,
+            mint: USDC_DEVNET_MINT,
+            destination: vault,
+            authority: buyer.signer,
+            amount: terms.rate * BigInt(seconds),
+            decimals: USDC_DECIMALS,
+          }),
+          getTopUpInstruction({ authority: buyer.signer, session, vault, ...(await eventAccounts()) }),
         ],
         send,
       );
