@@ -5,10 +5,12 @@
 > tracking.
 
 **Goal:** A buyer can extend a session while it runs. A top-up through the gate adds paid time and moves the end
-of the session. A top-up within the facilitator's margin before the end, or after the end, is refused and costs
-nothing. A top-up that lands on-chain while the gate is closing at expiry makes the gate resume, and the session
-runs on to its new end. Scenarios 4 and 34 pass on `local` and become `required`, the devnet program is upgraded,
-and the nine required scenarios pass there.
+of the session. A top-up paid through the gate is accepted until 10 s before the end of the paid time, on the
+facilitator's clock; a later one, or one after the end, is refused and costs nothing. The program itself accepts a
+top-up until its own `paid_until`, so a top-up sent to the chain directly can land after the gate has started closing
+at expiry, when the gate's clock runs ahead of the chain's: the gate's `AtExpiry` close then fails, the gate resumes
+forwarding, and the session runs on to its new end ("Timing of a top-up", below). Scenarios 4 and 34 pass on `local`
+and become `required`, the devnet program is upgraded, and the nine required scenarios pass there.
 
 **Architecture:** Stage 4's stack, extended through every component. The program gains `top_up`, whose maths join
 the property tests of spec section 4.2. The scheme gains top-up offers, durations, payloads, the transaction and its
@@ -85,6 +87,54 @@ Not built, and not to be built here:
 - **The isolation groups of spec section 12.2.** Scenario 34 belongs to the own-stack group but runs on the run's
   common stack, as scenario 26 does: it stops the common gate, starts one whose session clock runs ahead, and starts
   an ordinary one again at the end. That is safe only because the runner runs scenarios one after another.
+
+## Timing of a top-up
+
+A top-up reaches the chain by one of two paths, and the path, not the moment alone, decides whether it is accepted:
+
+| Path | Who checks | Accepted when | Refused when |
+|---|---|---|---|
+| **A. Through the gate** (an x402 payment: gate, then facilitator, then chain) | the gate, the facilitator, then the program | at least 10 s before `paid_until`, on the facilitator's clock | (1) less than 10 s left: `402 session_expired` from the facilitator; the gate answers the same once its end timer has fired. (2) After the end: `402 session_expired` while the gate is closing, `404` once it has closed |
+| **B. Sent to the chain directly** (signed by the buyer, its fee paid by any key that holds SOL) | the program alone | before `paid_until`, on the chain's clock | (3) from `paid_until` on: `SessionExpired`; the transaction fails with its funding, so nothing moves |
+
+The 10 s margin is the facilitator's rule, not the program's: it makes sure that a payment, which has to go through
+verification, Kora and confirmation, lands before the end. The program has no margin.
+
+```
+ Time on the chain's clock, relative to the session's paid_until P (2 characters = 1 s)
+
+ P−20                P−10      P−5 P−2.5 P             P+7       P+12
+ |-------------------|---------|----|----|-------------|---------|--->
+
+ A. Through the gate
+ ├─── accepted ──────┤├── refused (1) ───┤├── refused (2) ─────────────────►
+
+ B. Sent to the chain directly
+ ├─────────────── accepted ───────────────┤├── refused (3) ─────────────────►
+
+ Scenario 34: the gate's clock runs 5 s ahead of the chain's
+                               ▲     ▲   ▲             ▲         ▲
+                               1     2   3             4         5
+```
+
+1. **P−5:** the gate's clock reads P, so its end timer fires. It stops forwarding and tries an `AtExpiry` close, which
+   the program refuses with `NotExpired` (the chain is at P−5); the gate retries every 2 s.
+2. **About P−2:** the authority's 12 s top-up, sent to the chain directly at P−2.5, lands. That is path B, before P,
+   so the program accepts it. The gate sees the later end, through its subscription to the account (Task 7) or its
+   next re-read; it resumes forwarding and sets its end timer for P+12.
+3. **P:** the old end passes on the chain with no effect: `paid_until` is now P+12.
+4. **P+7:** the end timer fires again, 5 s early, as in step 1.
+5. **P+12:** the chain reaches the new end. The close succeeds, the connection is dropped with `4402`, and the
+   receiver is paid both deposits.
+
+"While the gate is closing" (from P−5 here) comes after the start of the margin (P−10) but still before P: the
+scenario's top-up is accepted only because it does not go through the facilitator. The same top-up through the gate
+would be refused, by the margin and by the gate, whose end timer has fired. The gate starts closing before the
+chain's end only when its clock runs ahead of the chain's, a normal skew; the program decides by the chain's clock,
+so a direct top-up can still land, and the gate must not end a session that has just been extended.
+
+Scenario 4 uses path A only: a top-up about 19 s before the first end is accepted, and the new end is P' = P + 10;
+one at P' − 5 is refused (1); one after the gate has closed the session at P' is refused (2), with `404`.
 
 ## Before you start: what a person must prepare
 
