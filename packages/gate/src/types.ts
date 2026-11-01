@@ -28,7 +28,7 @@ export interface Timers {
 /**
  * Spec §7.6. `provision` once when the open settles, `attach` per connection, `teardown` once. At the end of the paid
  * time the gate stops forwarding, both ways, by replacing each socket's `send` and `emit`: only sends made through
- * `socket.send` at send time are dropped, so an adapter that captured the method earlier is not muted. The buyer's
+ * `socket.send` at send time are dropped, so an adapter that captured `send` earlier is not muted. The buyer's
  * frames are withheld from the socket's `message` listeners while the session is muted, dropped and not queued; the
  * socket's other events, its `close` included, are delivered as usual. Both come back if the session continues.
  */
@@ -53,7 +53,8 @@ export interface GateConfig<U = unknown> {
   /**
    * Seconds a session may go without a connection, from its open or from the drop of its last connection,
    * before the gate closes it. Default 60 (spec §7.5); a value that is not a finite number gives 60, and a negative
-   * one gives 0. Announced in offers.
+   * one gives 0. 0 does not turn the timer off: it fires at once, so the gate starts to close a session as soon as its
+   * open settles, before the buyer has had time to connect, and as soon as its last connection drops. Announced in offers.
    */
   readonly idleCloseSeconds?: number;
   /** Default true (spec §7.5). Announced in offers. The gate does not act on it: no close follows a failure of the resource. */

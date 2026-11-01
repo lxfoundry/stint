@@ -50,11 +50,16 @@ export interface Services {
   readonly facilitatorApiKey: string;
   /** The gate and the example stream that are current: after `stopGate()` and `startGate()`, the new ones, at the same URL. */
   readonly stream: RunningStream;
-  /** Stops the gate and its connections; the facilitator, its sweeper and Kora keep running. Safe to repeat. */
+  /**
+   * Stops the gate and its connections; the facilitator, its sweeper and Kora keep running. Safe to repeat when the calls are
+   * made one after another, not while a `startGate()` is under way: there is no gate to stop yet, and the one that start then
+   * brings up keeps running.
+   */
   stopGate(): Promise<void>;
   /**
-   * Starts the gate again on the port it had. The new gate has no memory of earlier sessions. Safe to repeat. It does nothing
-   * once `stop()` has been called: a gate started then would be one that nothing stops.
+   * Starts the gate again on the port it had. The new gate has no memory of earlier sessions. Safe to repeat when the calls are
+   * made one after another, not for two that overlap: they race for the port. It does nothing once `stop()` has been called: a
+   * gate started then would be one that nothing stops.
    */
   startGate(): Promise<void>;
   /** Stops everything that is running, a stopped gate included. Safe to repeat. */
