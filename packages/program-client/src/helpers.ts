@@ -7,6 +7,7 @@ import {
   type ProgramDerivedAddress,
   type ReadonlyUint8Array,
 } from "@solana/kit";
+import { CLAIMED_EVENT_DISCRIMINATOR, parseClaimedEvent, type ClaimedEvent } from "./generated/events/claimed.js";
 import { CLOSED_EVENT_DISCRIMINATOR, parseClosedEvent, type ClosedEvent } from "./generated/events/closed.js";
 import { OPENED_EVENT_DISCRIMINATOR, parseOpenedEvent, type OpenedEvent } from "./generated/events/opened.js";
 import { STINT_PROGRAM_ADDRESS } from "./generated/programs/stint.js";
@@ -61,6 +62,11 @@ export function findOpenedEvent(instructions: Iterable<ProgramInstruction>): Ope
 export function findClosedEvent(instructions: Iterable<ProgramInstruction>): ClosedEvent | undefined {
   const payload = eventPayloads(instructions).find((data) => containsBytes(data, CLOSED_EVENT_DISCRIMINATOR, 0));
   return payload && parseClosedEvent(payload);
+}
+
+export function findClaimedEvent(instructions: Iterable<ProgramInstruction>): ClaimedEvent | undefined {
+  const payload = eventPayloads(instructions).find((data) => containsBytes(data, CLAIMED_EVENT_DISCRIMINATOR, 0));
+  return payload && parseClaimedEvent(payload);
 }
 
 interface Terms {

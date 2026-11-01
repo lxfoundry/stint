@@ -16,7 +16,10 @@ function withTimeout<T>(work: Promise<T>, timeoutMs: number | undefined, id: num
 
 /**
  * Runs scenarios one after another, in the order of their numbers. Concurrency and the isolation
- * groups of spec section 12.2 arrive with the first scenarios that need them.
+ * groups of spec section 12.2 are not built: a scenario's `group` is not acted on. Scenario 26, of
+ * the own-stack group, stops and restarts the common gate, which is safe only because no other
+ * scenario runs meanwhile. A scenario that times out is not cancelled, so a later scenario may run
+ * while its work goes on: after a timed-out scenario 26, it may find the gate stopped.
  */
 export async function runScenarios(
   scenarios: readonly Scenario[],

@@ -3,6 +3,8 @@ import { catalogue } from "../src/catalogue.js";
 import type { Capability, IsolationGroup } from "../src/types.js";
 
 const byId = new Map(catalogue.map((scenario) => [scenario.id, scenario]));
+/** The scenarios the build has made required: each passes on `local`, and none goes back to pending (spec §12.2). */
+const REQUIRED = [1, 2, 3, 9, 16, 22, 26];
 
 function idsWhere(predicate: (needs: readonly Capability[]) => boolean): number[] {
   return catalogue.filter((scenario) => predicate(scenario.needs)).map((scenario) => scenario.id);
@@ -15,9 +17,9 @@ describe("scenario catalogue", () => {
     );
   });
 
-  it("has scenarios 1 and 22 required with their implementations, and every other scenario pending without one", () => {
+  it("has the scenarios of REQUIRED required with their implementations, and every other scenario pending without one", () => {
     for (const scenario of catalogue) {
-      if (scenario.id === 1 || scenario.id === 22) {
+      if (REQUIRED.includes(scenario.id)) {
         expect(scenario.status).toBe("required");
         expect(scenario.run).toBeDefined();
       } else {

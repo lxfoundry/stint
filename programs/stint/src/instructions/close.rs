@@ -45,13 +45,19 @@ pub struct Close<'info> {
 }
 
 pub fn close_handler(ctx: Context<Close>, kind: CloseKind) -> Result<()> {
-    // Only `Standard` is supported so far; the other kinds are refused rather than guessed at.
-    require!(kind == CloseKind::Standard, StintError::InvalidTerms);
+    // `WaiveMinimum` is not supported yet: it is refused rather than guessed at.
+    require!(kind != CloseKind::WaiveMinimum, StintError::InvalidTerms);
 
     let now = Clock::get()?.unix_timestamp;
     let session = &ctx.accounts.session;
     let paid_until = maths::paid_until(session.started_at, session.deposited, session.rate)?;
     let closer = ctx.accounts.closer.key();
+    // An `AtExpiry` close is for a session whose paid time has run out, and anyone may sign it (spec
+    // section 4.3). A top-up that lands first moves `paid_until`, so this close then fails instead of
+    // ending an extended session.
+    if kind == CloseKind::AtExpiry {
+        require!(now >= paid_until, StintError::NotExpired);
+    }
     if now < paid_until {
         require!(
             closer == session.authority || closer == session.receiver_authorizer,
@@ -59,32 +65,19 @@ pub fn close_handler(ctx: Context<Close>, kind: CloseKind) -> Result<()> {
         );
     }
 
-    let elapsed = maths::elapsed(session.started_at, paid_until, now);
-    let charged = maths::charged(session.min_seconds, elapsed, false);
-    let due = maths::due(session.deposited, session.rate, charged);
-    let owed = maths::owed(session.claimed, due);
-    let residual = ctx
-        .accounts
-        .vault
-        .amount
-        .checked_sub(owed)
-        .ok_or_else(|| error!(StintError::MathOverflow))?;
-
     // From `paid_until` on, a residual owed to a refund account that no longer exists goes to the
     // receiver (spec section 4.3), so the account's owner cannot keep a session open by closing it
     // and sending the vault one base unit. "No longer exists" means owned by the System program,
     // whatever its lamports (S12): anyone can send lamports to a closed address, so a balance check
     // would let them block the redirect.
     let refund_account_gone = *ctx.accounts.refund_to.owner == System::id();
-    let (to_receiver, refunded, redirected) =
-        if maths::redirects(residual, now, paid_until, refund_account_gone) {
-            let to_receiver = owed
-                .checked_add(residual)
-                .ok_or_else(|| error!(StintError::MathOverflow))?;
-            (to_receiver, 0, residual)
-        } else {
-            (owed, residual, 0)
-        };
+    // `AtExpiry` charges the elapsed time alone: from `paid_until` on, that is the whole covered time.
+    let waive_minimum = kind == CloseKind::AtExpiry;
+    let maths::CloseAmounts { owed, refunded, redirected } =
+        maths::close_amounts(session, ctx.accounts.vault.amount, now, waive_minimum, refund_account_gone)?;
+    let to_receiver = owed
+        .checked_add(redirected)
+        .ok_or_else(|| error!(StintError::MathOverflow))?;
 
     let authority = session.authority;
     let seed = session.seed.to_le_bytes();

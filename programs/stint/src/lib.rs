@@ -19,6 +19,10 @@ pub mod stint {
         instructions::open::open_handler(ctx, seed, rate, min_seconds, max_seconds)
     }
 
+    pub fn claim(ctx: Context<Claim>) -> Result<()> {
+        instructions::claim::claim_handler(ctx)
+    }
+
     pub fn close(ctx: Context<Close>, kind: CloseKind) -> Result<()> {
         instructions::close::close_handler(ctx, kind)
     }

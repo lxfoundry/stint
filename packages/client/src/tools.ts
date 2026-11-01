@@ -72,7 +72,10 @@ export interface SessionTools {
   };
   /** The close code of the session's connection, once it has closed. */
   closeCode(sessionId: string): number | undefined;
-  /** Closes every session still open, for a runtime that is shutting down; none can be opened afterwards. A failure is reported, never thrown. */
+  /**
+   * Closes every session still open, for a runtime that is shutting down; none can be opened afterwards. A failure is reported, never thrown.
+   * A session the gate has ended (its connection closed with 4402 or 4410) is left alone: it is neither closed nor failed.
+   */
   closeAll(): Promise<CloseAllOutput>;
 }
 
@@ -98,6 +101,12 @@ const strict = (properties: Record<string, unknown>, required: string[]) => ({
 const sessionIdSchema = { type: "string", description: "The session's address, from stint_open_session" };
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 
+/** The close codes with which a gate ends a session by itself (spec §7.4), and what a tool says about each. */
+const ENDED_BY_GATE: ReadonlyMap<number, string> = new Map([
+  [4402, "The session has ended: the paid time ran out (4402)"],
+  [4410, "The session was closed (4410)"],
+]);
+
 /** The session tools of spec §9.5, sharing one runtime. */
 export function createSessionTools(client: StintClient): SessionTools {
   const live = new Map<string, Live>();
@@ -113,6 +122,9 @@ export function createSessionTools(client: StintClient): SessionTools {
     for (const waiter of state.waiters) waiter();
     state.waiters.clear();
   };
+  /** What to tell about a session the gate ended, read from its connection's close code; any other code says nothing. */
+  const endedByGate = (state: Live): string | undefined =>
+    state.closeCode === undefined ? undefined : ENDED_BY_GATE.get(state.closeCode);
 
   async function connect(state: Live): Promise<WebSocket> {
     const socket = await state.session.connect();
@@ -183,6 +195,8 @@ export function createSessionTools(client: StintClient): SessionTools {
             await state.closing.catch(() => undefined);
             if (state.closed) return;
           }
+          // The gate ended it by itself: nothing is left to close, and the gate would answer 404. Not a failure.
+          if (endedByGate(state)) return;
           try {
             await closeSession(state);
             outcome.closed.push(sessionId);
@@ -295,7 +309,11 @@ export function createSessionTools(client: StintClient): SessionTools {
           "Closes the session as soon as your task is done: the seller is paid for the time used and the rest of the deposit is refunded.",
         inputSchema: strict({ sessionId: sessionIdSchema }, ["sessionId"]),
         async run(input) {
-          const receipt = await closeSession(get(input.sessionId));
+          const state = get(input.sessionId);
+          // A close of the buyer's own in flight is answered with its receipt, even when the gate's 4410 arrives before it.
+          const ended = state.closing ? undefined : endedByGate(state);
+          if (ended) throw new ToolError(ended);
+          const receipt = await closeSession(state);
           return {
             ...(receipt.paid === undefined ? {} : { paid: receipt.paid.toString() }),
             ...(receipt.refunded === undefined ? {} : { refunded: receipt.refunded.toString() }),
