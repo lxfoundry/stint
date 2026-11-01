@@ -1074,7 +1074,7 @@ Decisions this task makes, from the code and the spec:
 - Modify: `packages/x402/src/constants.ts`, `packages/x402/src/types.ts`, `packages/x402/src/offer.ts`,
   `packages/x402/src/wire.ts`, `packages/x402/src/transactions.ts`, `packages/x402/src/checks.ts`,
   `docs/specs/stint-system.md` (section 5.3)
-- Modify (types only, Step 12): `apps/facilitator/src/verify.ts`, `apps/facilitator/src/settle.ts`
+- Modify (types only, Step 11): `apps/facilitator/src/verify.ts`, `apps/facilitator/src/settle.ts`
 - Test: `packages/x402/test/offer.test.ts`, `packages/x402/test/wire.test.ts`, `packages/x402/test/checks.test.ts`
 
 **Interfaces:**
@@ -1612,14 +1612,7 @@ with
   `accepted.extra.session`.
 ```
 
-- [ ] **Step 11: Commit**
-
-```bash
-git add packages/x402 docs/specs/stint-system.md
-git commit -m "Add top-up offers, durations, payloads, transactions and checks to the scheme"
-```
-
-- [ ] **Step 12: Let the facilitator's types hold a `topUp` payload**
+- [ ] **Step 11: Let the facilitator's types hold a `topUp` payload**
 
 `ElapsedPayload` gained a member, so the `type: elapsed.type` that `verifyPayment` returns
 (`apps/facilitator/src/verify.ts`) can now be `"topUp"`, and `settlePayment` passes it on to `submitSettlement`. Both
@@ -1652,15 +1645,16 @@ export interface SignedSettlement {
   readonly type: "open" | "topUp" | "close";
 ```
 
-- [ ] **Step 13: Check the packages that use the scheme, and commit**
+- [ ] **Step 12: Check the packages that use the scheme, and commit**
 
-Run: `pnpm typecheck && pnpm --filter @lxfoundry/stint-facilitator test && pnpm --filter @lxfoundry/stint-gate test`
+Run: `pnpm typecheck && pnpm --filter @lxfoundry/stint-x402 test && pnpm --filter @lxfoundry/stint-facilitator test && pnpm --filter @lxfoundry/stint-gate test`
 Expected: PASS. A `topUp` payload now reaches the facilitator's close branch, which refuses it; Task 3 gives it its
-own branch, and until then no test sends one.
+own branch, and until then no test sends one. One commit holds the scheme and the facilitator's types, so that every
+commit type-checks.
 
 ```bash
-git add apps/facilitator/src/verify.ts apps/facilitator/src/settle.ts
-git commit -m "Name the topUp payload in the facilitator's verification and settlement types"
+git add packages/x402 docs/specs/stint-system.md apps/facilitator/src/verify.ts apps/facilitator/src/settle.ts
+git commit -m "Add top-up offers, durations, payloads, transactions and checks to the scheme"
 ```
 
 ---
@@ -3911,9 +3905,10 @@ gate or the facilitator.
 What each scenario proves, on `local` and on `devnet`:
 - **Scenario 4.** A session of 20 s (30 s on devnet, where every step takes longer). A top-up of 10 s (20 s on devnet),
   made right after the open, answers the new `paidUntil` (the old one plus its seconds), and the chain shows the
-  deposit grown by its cost. It comes before the connection, so the target's subscription wait (5 s on devnet) does not
-  bring it near the facilitator's 10 s margin. Then the buyer connects, a payer changes a watched account every 500 ms,
-  and frames keep arriving after the first `paidUntil`. Five seconds before the new end, a top-up is refused with `402
+  deposit grown by its cost. It comes before the connection that watches the session, so the target's subscription
+  wait (5 s on devnet) does not bring it near the facilitator's 10 s margin; a plain connection holds the session
+  meanwhile, since the test gate closes a session that has had no connection for 10 s. Then the watching connection
+  replaces it, a payer changes a watched account every 500 ms, and frames keep arriving after the first `paidUntil`. Five seconds before the new end, a top-up is refused with `402
   session_expired` (the margin) and the buyer's USDC does not move. The connection is dropped with `4402` within 30 s
   of the new end; the `AtExpiry` close's `paid_until` is the new one, and it pays the receiver the opening deposit and
   the top-up. After the close, a top-up is refused with `404 unknown_session`, the buyer's USDC does not move, and the
@@ -4406,8 +4401,8 @@ Create `conformance/src/scenarios/04-top-up.ts`:
 
 ```ts
 import type { Address } from "@solana/kit";
-import { StintError } from "@lxfoundry/stint-client";
-import { CloseKind, fetchMaybeSession, paidUntil } from "@lxfoundry/stint-program-client";
+import { StintError, type StintSession } from "@lxfoundry/stint-client";
+import { CloseKind, fetchMaybeSession, paidUntil, type Session } from "@lxfoundry/stint-program-client";
 import { associatedTokenAddress, tokenBalanceChanges } from "@lxfoundry/stint-x402";
 import { expectEqual, expectTrue, sleep, waitFor } from "../assert.js";
 import { awaitClose } from "../closes.js";
@@ -4415,6 +4410,32 @@ import { buyerClient, closePollMs, sessionSeconds } from "../helpers.js";
 import { readUntil } from "../reads.js";
 import type { ScenarioContext } from "../types.js";
 import { watchWhilePaying } from "../watch.js";
+
+/**
+ * The top-up before expiry, made right after the open, and what it changed: the session's deposit and its new end. It comes
+ * before the connection that watches the session and its subscription wait, so it is well outside the facilitator's 10 s
+ * margin whatever the target; the chain's clock, which set the end, can lag the facilitator's.
+ */
+async function topUpBeforeExpiry(
+  context: ScenarioContext,
+  session: StintSession,
+  stored: Session,
+  seconds: number,
+): Promise<{ readonly deposited: bigint; readonly endMs: number }> {
+  const firstEndMs = session.paidUntil * 1_000;
+  expectTrue(firstEndMs - Date.now() > 12_000, "the first top-up is more than 12 s before the end: the open took too long");
+  const extended = await session.topUp({ seconds });
+  expectEqual(extended.cost, stored.rate * BigInt(seconds), "the top-up costs rate x seconds");
+  expectEqual(extended.paidUntil * 1_000, firstEndMs + seconds * 1_000, "the top-up moves paid_until by the seconds it bought");
+  expectEqual(session.paidUntil, extended.paidUntil, "the session reports the new paid_until");
+  const readSession = () => fetchMaybeSession(context.rpc, session.id, { commitment: "confirmed" });
+  const toppedUp = await readUntil(context.readRetry, readSession, (read) => read.exists && read.data.deposited > stored.deposited);
+  expectTrue(toppedUp.exists, "the session is still open after the top-up");
+  expectEqual(toppedUp.data.deposited, stored.deposited + extended.cost, "the top-up is credited to the deposit");
+  expectEqual(toppedUp.data.startedAt, stored.startedAt, "the session keeps its start");
+  expectEqual(paidUntil(toppedUp.data), BigInt(extended.paidUntil), "the chain's paid_until is the one the gate answered");
+  return { deposited: toppedUp.data.deposited, endMs: extended.paidUntil * 1_000 };
+}
 
 /** How a top-up was refused: the gate's HTTP status and the reason its body gives; undefined if it went through. */
 async function refusalOf(attempt: Promise<unknown>): Promise<{ readonly status?: number; readonly reason?: unknown } | undefined> {
@@ -4447,22 +4468,14 @@ export async function topUpBeforeAndAfterExpiry(context: ScenarioContext): Promi
     BigInt((await context.rpc.getTokenAccountBalance(account, { commitment: "confirmed" }).send()).value.amount);
   const firstEndMs = session.paidUntil * 1_000;
 
-  // Before expiry: the top-up adds its seconds to the end of the paid time, and its cost to the deposit. It comes right
-  // after the open, before the connection and its subscription wait, so it is well outside the facilitator's 10 s margin
-  // whatever the target; the chain's clock, which set the end, can lag the facilitator's.
-  expectTrue(firstEndMs - Date.now() > 12_000, "the first top-up is more than 12 s before the end: the open took too long");
-  const seconds = sessionSeconds(context.target, 10);
-  const extended = await session.topUp({ seconds });
-  expectEqual(extended.cost, stored.rate * BigInt(seconds), "the top-up costs rate x seconds");
-  expectEqual(extended.paidUntil * 1_000, firstEndMs + seconds * 1_000, "the top-up moves paid_until by the seconds it bought");
-  expectEqual(session.paidUntil, extended.paidUntil, "the session reports the new paid_until");
-  const toppedUp = await readUntil(context.readRetry, readSession, (read) => read.exists && read.data.deposited > stored.deposited);
-  expectTrue(toppedUp.exists, "the session is still open after the top-up");
-  expectEqual(toppedUp.data.deposited, stored.deposited + extended.cost, "the top-up is credited to the deposit");
-  expectEqual(toppedUp.data.startedAt, stored.startedAt, "the session keeps its start");
-  expectEqual(paidUntil(toppedUp.data), BigInt(extended.paidUntil), "the chain's paid_until is the one the gate answered");
-  const deposited = toppedUp.data.deposited;
-  const endMs = extended.paidUntil * 1_000;
+  // Before expiry: the top-up adds its seconds to the end of the paid time, and its cost to the deposit. A connection holds
+  // the session meanwhile, since the gate closes a session that has had none for 10 s (its idle close), and an open and a
+  // top-up confirmed one after the other can take that long on devnet. The watching connection replaces it at once.
+  const holding = await session.connect();
+  holding.on("error", () => {});
+  const { deposited, endMs } = await topUpBeforeExpiry(context, session, stored, sessionSeconds(context.target, 10)).finally(() =>
+    holding.terminate(),
+  );
 
   const watch = await watchWhilePaying(context, session, payer, watched);
   try {
