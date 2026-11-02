@@ -107,7 +107,10 @@ export interface ClientOptions {
   readonly policy: Policy;
   /** Milliseconds; runs the period budget. Default `Date.now`. */
   readonly now?: () => number;
-  /** Milliseconds between reads of the gate's status while its close is pending (spec §9.3). Default 1,000. */
+  /**
+   * Milliseconds between reads of the gate's status while its close is pending (spec §9.3). Default 1,000. A whole number
+   * from 1 to 2,147,483,647.
+   */
   readonly closePollMs?: number;
   /**
    * Milliseconds after which a read of the close fallback chain that has no answer is given up (spec §9.3): the gate's
@@ -204,7 +207,7 @@ const amountsOf = (event: ClosedEvent) => ({ paid: event.claimed + event.owed + 
 /** The longest delay Node's timers keep: `AbortSignal.timeout` takes up to 2^32 - 1, but fires at once past this. */
 const MAX_TIME_LIMIT_MS = 2_147_483_647;
 
-/** A time limit as `AbortSignal.timeout` keeps it, whole milliseconds up to `MAX_TIME_LIMIT_MS`, checked when the client is created. */
+/** A time limit or a delay as Node's timers keep it, whole milliseconds up to `MAX_TIME_LIMIT_MS`, checked when the client is created. */
 function timeLimitMs(name: string, value: number | undefined, fallback: number): number {
   const ms = value ?? fallback;
   if (!Number.isInteger(ms) || ms < 1 || ms > MAX_TIME_LIMIT_MS) {
@@ -241,7 +244,12 @@ type CloseStep =
 /** The buyer's runtime (spec §9.4). It needs only a signer: no SOL and no node access (spec §9.1). */
 export function createStintClient(options: ClientOptions): StintClient {
   const now = options.now ?? Date.now;
-  const closePollMs = options.closePollMs ?? DEFAULT_CLOSE_POLL_MS;
+  const closePollMs = timeLimitMs("closePollMs", options.closePollMs, DEFAULT_CLOSE_POLL_MS);
+  const closeWaitSeconds = options.policy.closeWaitSeconds ?? DEFAULT_CLOSE_WAIT_SECONDS;
+  // A wait that is not a positive, finite number of seconds would never end (`NaN`, `Infinity`), or would not wait at all.
+  if (!Number.isFinite(closeWaitSeconds) || closeWaitSeconds <= 0) {
+    throw new RangeError(`closeWaitSeconds must be a positive, finite number of seconds: got ${closeWaitSeconds}`);
+  }
   const requestTimeoutMs = timeLimitMs("requestTimeoutMs", options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
   const closeRequestTimeoutMs = timeLimitMs("closeRequestTimeoutMs", options.closeRequestTimeoutMs, DEFAULT_CLOSE_REQUEST_TIMEOUT_MS);
   /** A read of the client's node, given up after `requestTimeoutMs`: the default transport of `@solana/kit` never gives up. */
@@ -298,7 +306,6 @@ export function createStintClient(options: ClientOptions): StintClient {
     let cost = deposit;
     /** The close fallback chain in flight: overlapping calls of `close()` share it. */
     let closing: Promise<CloseReceipt> | undefined;
-    const closeWaitSeconds = options.policy.closeWaitSeconds ?? DEFAULT_CLOSE_WAIT_SECONDS;
 
     /**
      * The close fallback chain (spec §9.3): the gate's close, then the facilitator's sponsored close through the offer's
@@ -430,8 +437,10 @@ export function createStintClient(options: ClientOptions): StintClient {
     /**
      * Step 2: the facilitator's sponsored close (spec §6.1, §9.3). `GET closeUrl?session=` says whether the session is
      * still open (`404 unknown_session`: it is closed) and gives the fee payer, a blockhash and the session's fields. The
-     * client builds the close from them, signs it as the session's authority, and posts it. Any failure moves the chain on:
-     * the facilitator cannot be reached or does not answer in time, answers something else, or does not close it.
+     * client builds the close from them, signs it as the session's authority, and posts it. A refusal with
+     * `unknown_session` means the session is closed too: another close, such as the gate's pending one, landed between the
+     * `GET` and the `POST`. Any other failure moves the chain on: the facilitator cannot be reached or does not answer in
+     * time, answers something else, or does not close it.
      */
     async function closeThroughFacilitator(): Promise<CloseStep> {
       const closeUrl = offer.extra.closeUrl;
@@ -462,6 +471,9 @@ export function createStintClient(options: ClientOptions): StintClient {
           return { kind: "next", reason, unanswered: true };
         }
         if (posted.status === 200 && answer.success) return { kind: "closed", receipt: receiptFrom(answer, "sponsored") };
+        if (posted.status === 200 && !answer.success && answer.errorReason === "unknown_session") {
+          return { kind: "gone", reason: "POST closeUrl finds no session" };
+        }
         const reason = `the facilitator did not close it (HTTP ${posted.status}: ${describeBody(answer)})`;
         // A close the facilitator sent and could not confirm may still land: if a later check finds the session closed, it is the receipt.
         const unconfirmed = posted.status === 200 && !answer.success && answer.errorReason === "settlement_pending";
@@ -624,6 +636,8 @@ export function createStintClient(options: ClientOptions): StintClient {
         return body as SessionStatus;
       },
       async close() {
+        // A session closed through this client, or found closed, is not closed again.
+        if (closed) throw new StintError("The session is already closed", 404);
         // Overlapping calls share one chain: two chains would each send a close, and only one can land.
         closing ??= closeWithFallbacks().finally(() => {
           closing = undefined;

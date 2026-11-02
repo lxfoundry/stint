@@ -1247,8 +1247,10 @@ wait for the close to confirm; that close may still land. A step whose close may
 `202` past `closeWaitSeconds`, `settlement_pending` from the facilitator, or the client's own close
 that is still pending, or whose sending or confirmation could not be read in time) passes its
 signature on. The check finds the session closed when the gate's status or `GET closeUrl`
-answers `404 unknown_session`: the latest close passed on is then the receipt, and with none
-the client reports the session closed by another party. When no step closes the session, the
+answers `404 unknown_session`, and so does a sponsored close that the facilitator refuses with
+`unknown_session` (another close, such as the gate's pending one, landed between the `GET` and
+the `POST`): the latest close passed on is then the receipt, and with none the client reports
+the session closed by another party. When no step closes the session, the
 client names the closes that may still land. Overlapping closes of one session share one chain.
 The receipt says which step closed the session.
 

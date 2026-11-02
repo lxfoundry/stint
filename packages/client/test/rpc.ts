@@ -46,6 +46,8 @@ export interface FakeNode {
   listFails?: boolean;
   /** While set, the status of a transaction sent cannot be read, so its confirmation cannot be told. */
   statusFails?: boolean;
+  /** The `err` that the status of a transaction sent carries: it landed and failed. */
+  failed?: unknown;
   /** While set, a transaction cannot be fetched, so the `Closed` event of a close cannot be read. */
   transactionFails?: boolean;
   /**
@@ -91,7 +93,7 @@ export function fakeRpc(node: FakeNode): Rpc<SolanaRpcApi> {
     getSignatureStatuses: () =>
       node.statusFails
         ? failing()
-        : answer({ context: { slot: 1n }, value: [{ slot: 1n, confirmations: null, err: null, confirmationStatus: "confirmed" }] }),
+        : answer({ context: { slot: 1n }, value: [{ slot: 1n, confirmations: null, err: node.failed ?? null, confirmationStatus: "confirmed" }] }),
     isBlockhashValid: () => answer({ context: { slot: 1n }, value: true }),
     getTransaction: () => (node.transactionFails ? failing() : answer(node.closed ? closeTransaction(node.closed) : null)),
   };

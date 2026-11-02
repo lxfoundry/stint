@@ -161,6 +161,24 @@ describe("the close fallback chain (spec §9.3)", () => {
     expect(await session.close()).toMatchObject({ via: "gate" });
   });
 
+  it("takes POST closeUrl's unknown_session for the session closed: the gate's pending close, which landed after the GET, is the receipt", async () => {
+    const session = await openSession({ closeWaitSeconds: 0.2 });
+    gate.closeSettlement = PENDING;
+    gate.sponsoredAnswer = { success: false, errorReason: "unknown_session", errorMessage: "no such session", transaction: "" };
+
+    expect(await session.close()).toEqual({ transaction: "pending-sig", via: "gate" });
+    expect(gate.sponsored).toHaveLength(1);
+  });
+
+  it("refuses a close at once, with 404, once a close of the session has succeeded", async () => {
+    const session = await openSession();
+    expect(await session.close()).toMatchObject({ via: "gate" });
+    gate.gateDown = true;
+    gate.facilitatorDown = true;
+
+    await expect(session.close()).rejects.toMatchObject({ status: 404, message: "The session is already closed" });
+  });
+
   it("moves past a sponsored close that the facilitator refuses, and names the refusal", async () => {
     const session = await openSession();
     gate.gateDown = true;
@@ -247,6 +265,15 @@ describe("the close fallback chain (spec §9.3)", () => {
     expect(() => createStintClient({ signer: buyer, policy, closeRequestTimeoutMs: 1.5 })).toThrow(RangeError);
     expect(() => createStintClient({ signer: buyer, policy, closeRequestTimeoutMs: 2 ** 31 })).toThrow(RangeError);
     expect(() => createStintClient({ signer: buyer, policy, requestTimeoutMs: 2 ** 31 - 1 })).not.toThrow();
+  });
+
+  it("refuses a closePollMs that is not a whole number of milliseconds, and a closeWaitSeconds that is not a positive, finite number of seconds", () => {
+    expect(() => createStintClient({ signer: buyer, policy, closePollMs: NaN })).toThrow(RangeError);
+    expect(() => createStintClient({ signer: buyer, policy, closePollMs: 0 })).toThrow(RangeError);
+    expect(() => createStintClient({ signer: buyer, policy: { ...policy, closeWaitSeconds: NaN } })).toThrow(RangeError);
+    expect(() => createStintClient({ signer: buyer, policy: { ...policy, closeWaitSeconds: Infinity } })).toThrow(RangeError);
+    expect(() => createStintClient({ signer: buyer, policy: { ...policy, closeWaitSeconds: 0 } })).toThrow(RangeError);
+    expect(() => createStintClient({ signer: buyer, policy: { ...policy, closeWaitSeconds: 0.2 }, closePollMs: 20 })).not.toThrow();
   });
 
   it("shares one chain between overlapping calls: one close is sent, and both get its receipt", async () => {
@@ -361,6 +388,18 @@ describe("the client's own close on the chain (spec §9.3, step 3)", () => {
     expect(node.sent).toHaveLength(1);
     expect((error as Error).message).toContain(`A close sent may still land: ${signatureOf(node.sent[0]!)} (unilateral)`);
     expect((error as Error).message).toContain("confirmation could not be read");
+    expect((error as Error).message).toMatch(/runs to the end of its paid time/);
+  });
+
+  it("does not pass on a close of its own that the chain reports failed: it cannot land", async () => {
+    const node: FakeNode = { session: gate.stored, lamports: 1_000_000n, failed: { InstructionError: [0, { Custom: 6004 }] }, sent: [] };
+    const session = await strandedSession(node);
+
+    const error = await session.close().catch((caught: unknown) => caught);
+
+    expect(node.sent).toHaveLength(1);
+    expect((error as Error).message).toMatch(/own close failed \(Transaction \w+ failed: /);
+    expect((error as Error).message).not.toContain("may still land");
     expect((error as Error).message).toMatch(/runs to the end of its paid time/);
   });
 
