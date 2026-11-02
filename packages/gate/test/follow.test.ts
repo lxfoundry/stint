@@ -1,9 +1,10 @@
 import type { Address } from "@solana/kit";
 import { CloseKind, type ClosedEvent, type Session } from "@lxfoundry/stint-program-client";
-import { readElapsedPayload } from "@lxfoundry/stint-x402";
+import { readElapsedPayload, type SettleResponse } from "@lxfoundry/stint-x402";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { NOW_MS, helpers, startHarness, type FakeTimer, type Harness } from "./harness.js";
 
+const NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
 /** What a deposit of 30,000 at 1,000 per second lasts, in the harness's sessions. */
 const END_DUE = NOW_MS + 30_000;
 /** The end once 10 s more have been paid for. */
@@ -398,6 +399,27 @@ describe("the gate's subscription to the session account (spec §7.3)", () => {
       held.release();
 
       expect((await closing).status).toBe(502);
+      expect(await dropped).toBe(4410);
+      expect(h.calls.teardown).toEqual(["closedElsewhere"]);
+      expect(h.reads.lastClose).toBe(1);
+    });
+
+    it.each<[string, SettleResponse, number]>([
+      ["fails, as when another party's close landed first", { success: false, errorReason: "simulation_failed", transaction: "", network: NETWORK }, 502],
+      ["is still pending", { success: false, errorReason: "settlement_pending", transaction: "pending-sig", network: NETWORK }, 202],
+    ])("looks the close up once the facilitator answers that a close of its own in flight %s", async (_, answer, status) => {
+      const { session, dropped } = await openConnected();
+      const held = latch();
+      h.hold.settleClose = held.promise;
+      h.settleAnswer = () => answer; // the open has settled: the close is the only settlement left
+      h.closes.set(session, closedAt(session, EARLY));
+      const closing = closeWith(session);
+      await expect.poll(() => closesSent()).toHaveLength(1);
+
+      notify(session, "gone");
+      held.release();
+
+      expect((await closing).status).toBe(status);
       expect(await dropped).toBe(4410);
       expect(h.calls.teardown).toEqual(["closedElsewhere"]);
       expect(h.reads.lastClose).toBe(1);
