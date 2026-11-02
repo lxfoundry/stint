@@ -50,7 +50,7 @@ export interface Gate {
   handleRequest(request: IncomingMessage, response: ServerResponse): Promise<boolean>;
   /** Serves `GET /sessions/:id/ws`; returns false for any other upgrade. */
   handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): boolean;
-  /** Stops the gate's timers and drops every connection. It does not end the sessions: nothing is closed on chain. */
+  /** Stops the gate's timers and subscriptions, and drops every connection. It does not end the sessions: nothing is closed on chain. */
   close(): Promise<void>;
 }
 
@@ -70,6 +70,8 @@ interface Tracked<U> {
   paidUntil: bigint;
   /** Cancels each pending timer. */
   readonly pending: Partial<Record<TimerSlot, () => void>>;
+  /** Ends the subscription to the session's account, when the chain offers one. */
+  unwatch?: () => void;
   /** While forwarding is stopped: each socket's own `send` and `emit`, which `resume` puts back. */
   muted?: Map<WebSocket, { send: WebSocket["send"]; emit: WebSocket["emit"] }>;
   /** Set when the end timer first fires at the current `paidUntil`: `since` on the session clock (ms), `delayMs` the wait last armed for a retry. `resume` clears it. */
@@ -374,6 +376,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
    */
   async function attempt(tracked: Tracked<U>): Promise<boolean> {
     if (!tracked.closing && (await settledByChain(tracked))) return true;
+    // The account's subscription (or the route) resumed the session during the re-read: there is nothing to close.
+    if (!tracked.muted) return true;
     try {
       const outcome = await (tracked.closing ??= startClose(tracked, END_CLOSE));
       if (outcome.ended) return true;
@@ -415,6 +419,31 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     }
   }
 
+  /**
+   * Follows the session's account (spec §7.3), when the chain can: a later `paid_until` on the same session, a top-up this
+   * gate did not settle, moves the end timer at once and resumes forwarding if the end timer has fired. An account that is
+   * gone, or that holds another session, is left to the end timer. A subscription that fails, or cannot start, is logged
+   * and not replaced: the end timer's re-read still finds a later `paid_until`. A gate that has stopped starts none, since
+   * nothing would end it.
+   */
+  function follow(tracked: Tracked<U>): void {
+    if (stopped || !config.chain.watchSession) return;
+    const session = tracked.info.session;
+    const failed = (error: unknown) => log({ event: "subscription_error", session, error: error instanceof Error ? error.message : String(error) });
+    try {
+      tracked.unwatch = config.chain.watchSession(
+        session,
+        (stored) => {
+          if (!stored || stored.startedAt !== tracked.stored.startedAt || !sessionMatches(stored, seller)) return;
+          paidLonger(tracked, paidUntil(stored));
+        },
+        failed,
+      );
+    } catch (error) {
+      failed(error);
+    }
+  }
+
   async function provision(session: Address, stored: Session): Promise<Tracked<U>> {
     const info: SessionInfo = { session, authority: stored.authority, paidUntil: paidUntil(stored) };
     const resource = await config.adapter.provision(info);
@@ -422,6 +451,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     sessions.set(session, tracked);
     armIdle(tracked);
     armEnd(tracked);
+    // After the timers: the session ends by itself whatever becomes of its subscription.
+    follow(tracked);
     return tracked;
   }
 
@@ -604,6 +635,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     disarm(tracked, "idle");
     disarm(tracked, "end");
     sessions.delete(tracked.info.session);
+    tracked.unwatch?.();
     for (const socket of tracked.connections) socket.close(code, "session closed");
     try {
       await config.adapter.teardown(tracked.info, reason);
@@ -796,6 +828,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       for (const tracked of sessions.values()) {
         disarm(tracked, "idle");
         disarm(tracked, "end");
+        tracked.unwatch?.();
         for (const socket of tracked.connections) socket.close(1001, "gate stopping");
       }
       await new Promise<void>((resolve) => wss.close(() => resolve()));

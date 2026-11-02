@@ -73,12 +73,20 @@ export interface Harness {
   readonly server: Server;
   readonly buyer: KeyPairSigner;
   readonly authorizer: KeyPairSigner;
-  readonly calls: { verify: PaymentPayload[]; settle: PaymentPayload[]; provision: SessionInfo[]; attach: SessionInfo[]; teardown: EndReason[] };
+  readonly calls: {
+    verify: PaymentPayload[];
+    settle: PaymentPayload[];
+    provision: SessionInfo[];
+    attach: SessionInfo[];
+    teardown: EndReason[];
+    /** The session of each subscription the gate started. */
+    watch: Address[];
+  };
   verifyAnswer: VerifyResponse;
   settleAnswer: (payload: PaymentPayload) => SettleResponse;
   sessions: Map<Address, Session>;
   /** Faults and pauses a test switches on. */
-  fail: { supported: boolean; settleClose: boolean; closedEvent: boolean; provision: boolean; teardown: boolean };
+  fail: { supported: boolean; settleClose: boolean; closedEvent: boolean; provision: boolean; teardown: boolean; watch: boolean };
   hold: { provision?: Promise<void>; settleClose?: Promise<void>; settleTopUp?: Promise<void>; readSession?: Promise<void> };
   /** Runs inside the fake facilitator's close, after `hold` and before `fail`: a test changes the chain here. */
   onSettleClose?: () => void;
@@ -94,6 +102,10 @@ export interface Harness {
   readonly attached: WebSocket[];
   /** What the gate logged. */
   readonly logs: Record<string, unknown>[];
+  /** The gate's subscriptions to session accounts, until it ends them: a test reports a change to the account through one. */
+  readonly watchers: Map<Address, { onChange: (stored: Session | undefined) => void; onError: (error: unknown) => void }>;
+  /** The sessions whose subscription the gate has ended, in order. */
+  readonly unwatched: Address[];
 }
 
 export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" | "endRetrySeconds"> = {}): Promise<Harness> {
@@ -112,11 +124,11 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
     server,
     buyer,
     authorizer,
-    calls: { verify: [], settle: [], provision: [], attach: [], teardown: [] },
+    calls: { verify: [], settle: [], provision: [], attach: [], teardown: [], watch: [] },
     verifyAnswer: { isValid: true },
     settleAnswer: () => ({ success: true, transaction: "sig", network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" }),
     sessions: new Map<Address, Session>(),
-    fail: { supported: false, settleClose: false, closedEvent: false, provision: false, teardown: false },
+    fail: { supported: false, settleClose: false, closedEvent: false, provision: false, teardown: false, watch: false },
     hold: {},
     missing: { session: 0, closedEvent: 0 },
     reads: { session: 0, closedEvent: 0 },
@@ -125,6 +137,8 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
     timers: new FakeTimers(clock),
     attached: [],
     logs: [],
+    watchers: new Map(),
+    unwatched: [],
   } as unknown as Harness;
 
   const chain: GateChain = {
@@ -139,6 +153,15 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
       if (harness.fail.closedEvent) throw new Error("rpc down");
       if (harness.reads.closedEvent++ < harness.missing.closedEvent) return undefined;
       return { claimed: 0n, owed: 8_000n, refunded: 22_000n, redirected: 0n, kind: CloseKind.Standard } as ClosedEvent;
+    },
+    watchSession: (session, onChange, onError) => {
+      if (harness.fail.watch) throw new Error("subscriptions down");
+      harness.calls.watch.push(session);
+      harness.watchers.set(session, { onChange, onError });
+      return () => {
+        harness.watchers.delete(session);
+        harness.unwatched.push(session);
+      };
     },
   };
   const gate = createGate({
