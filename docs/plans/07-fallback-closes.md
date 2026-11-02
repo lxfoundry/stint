@@ -48,8 +48,8 @@ sponsored close, verified by spec section 5.4's sponsored row and settled as `/s
 integration tests for both; scenario 15 on `local` and on devnet.
 
 Part 2 of this stage, scenarios 7, 24 and 25, builds on the gate's subscription to each session's account and on the
-client's top-up code, from stage 5, and is planned once those are in. It reuses `readCloseInfo` and
-`buildSponsoredClose` for the client's fallback (spec section 9.3, step 2).
+client's top-up code, from stage 5: [07-fallback-closes-part-2.md](07-fallback-closes-part-2.md). It reuses
+`readCloseInfo` and `buildSponsoredClose` for the client's fallback (spec section 9.3, step 2).
 
 Not built here:
 - **The gate does not learn of a sponsored close until its end timer.** It keeps forwarding to the session's
