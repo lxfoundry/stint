@@ -106,6 +106,16 @@ describe("open transactions (spec §5.3, §5.4)", () => {
     expect(await checkOpenTransaction(inspectTransaction(withPrice)!, offer, keys())).toMatchObject({ ok: false, reason: "unexpected_instruction" });
   });
 
+  it("refuses an instruction after stint.open, even a compute-unit limit", async () => {
+    const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
+    const trailing = await rebuild(built.transaction, buyer, (ixs) => [...ixs, getSetComputeUnitLimitInstruction({ units: 200_000 })]);
+    expect(await checkOpenTransaction(inspectTransaction(trailing)!, offer, keys())).toEqual({
+      ok: false,
+      reason: "unexpected_instruction",
+      message: "an open is: create the vault, one funding transfer, stint.open",
+    });
+  });
+
   it("refuses the rent payer funding any account but the vault", async () => {
     const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6 });
     const mint = offer.asset as Address;
@@ -383,6 +393,15 @@ describe("top-up transactions (spec §5.3, §5.4)", () => {
     expect(await check(reversed)).toMatchObject({ ok: false, reason: "unexpected_instruction" });
     const twice = await rebuild(wire, buyer, (ixs) => [ixs[0]!, ...ixs]);
     expect(await check(twice)).toMatchObject({ ok: false, reason: "unexpected_instruction" });
+  });
+
+  it("refuses an instruction after stint.top_up, even a compute-unit limit", async () => {
+    const trailing = await rebuild(await built(), buyer, (ixs) => [...ixs, getSetComputeUnitLimitInstruction({ units: 100_000 })]);
+    expect(await check(trailing)).toEqual({
+      ok: false,
+      reason: "unexpected_instruction",
+      message: "a top-up is: one funding transfer, stint.top_up",
+    });
   });
 
   it("refuses the rent payer anywhere in a top-up", async () => {
