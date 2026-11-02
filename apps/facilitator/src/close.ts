@@ -1,10 +1,6 @@
 import {
   blockhash,
   fetchEncodedAccount,
-  getBase64EncodedWireTransaction,
-  getBase64Encoder,
-  getSignatureFromTransaction,
-  getTransactionDecoder,
   isInstructionWithAccounts,
   isInstructionWithData,
   type Address,
@@ -30,7 +26,7 @@ import {
   type InspectedTransaction,
   type SponsoredCloseResponse,
 } from "@lxfoundry/stint-x402";
-import { DEFAULT_READ_RETRY, submitSettlement } from "./settle.js";
+import { DEFAULT_READ_RETRY, signAsFeePayer, submitSettlement } from "./settle.js";
 import { simulate, type FacilitatorContext } from "./verify.js";
 
 /** How long `GET /close` serves the same blockhash and block height (spec §6.1: cached for a few seconds). */
@@ -150,8 +146,6 @@ export async function verifySponsoredClose(ctx: FacilitatorContext, transaction:
   return { ok: true, value: { tx, session: named.session, payer: stored.authority } };
 }
 
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
-
 /**
  * Kora signs as fee payer, then the close is submitted and waited for as `/settle` does (spec §5.5, without settlement
  * records). `paid` counts the claims made before the close, as the gate's answer does.
@@ -159,13 +153,9 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
 async function submitSponsoredClose(ctx: FacilitatorContext, verified: VerifiedSponsoredClose): Promise<SponsoredCloseResponse> {
   const { tx, payer } = verified;
 
-  let wire;
-  try {
-    wire = await ctx.kora.signTransaction(getBase64EncodedWireTransaction(tx.transaction));
-  } catch (error) {
-    return { success: false, errorReason: "simulation_failed", errorMessage: `Kora: ${message(error)}`, transaction: "" };
-  }
-  const signature = getSignatureFromTransaction(getTransactionDecoder().decode(getBase64Encoder().encode(wire)));
+  const signed = await signAsFeePayer(ctx, tx.transaction);
+  if (!signed.ok) return { success: false, errorReason: "simulation_failed", errorMessage: signed.errorMessage, transaction: "" };
+  const { wire, signature } = signed;
   const settled = await submitSettlement(ctx, { type: "close", wire, signature, blockhash: tx.blockhash, payer, amount: "0" });
   if (!settled.success) {
     return { success: false, errorReason: settled.errorReason ?? "simulation_failed", errorMessage: settled.errorMessage, transaction: settled.transaction };
