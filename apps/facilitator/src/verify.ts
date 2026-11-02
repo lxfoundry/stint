@@ -171,7 +171,7 @@ async function loadMatchingSession(
  * so only System Program instructions can debit them, and the fee is implicit. Reading the
  * instructions rather than balances keeps the check independent of concurrent settlements.
  */
-async function simulate(ctx: FacilitatorContext, tx: InspectedTransaction, funding: Funding): Promise<Check<null>> {
+export async function simulate(ctx: FacilitatorContext, tx: InspectedTransaction, funding: Funding): Promise<Check<null>> {
   const { value } = await ctx.rpc
     .simulateTransaction(tx.wire as Base64EncodedWireTransaction, {
       encoding: "base64",
