@@ -107,9 +107,10 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
     const found = await loadMatchingSession(ctx, requirements, "top-up");
     if (!found.ok) return found;
     const { session, stored } = found.value;
-    // The transaction must land before the end: from `paid_until` on, the program refuses it (spec §4.3).
-    const now = BigInt(Math.floor((ctx.clock ?? Date.now)() / 1000));
-    if (paidUntil(stored) - now < BigInt(TOP_UP_MARGIN_SECONDS)) {
+    // The transaction must land before the end: from `paid_until` on, the program refuses it (spec §4.3). Compared in
+    // milliseconds, so that 9.5 s left is less than the margin.
+    const left = Number(paidUntil(stored)) * 1000 - (ctx.clock ?? Date.now)();
+    if (left < TOP_UP_MARGIN_SECONDS * 1000) {
       return refuse("session_expired", `the session's paid time ends in less than ${TOP_UP_MARGIN_SECONDS} s`);
     }
     const check = await checkTopUpTransaction(tx, requirements, stored, ctx.keys);

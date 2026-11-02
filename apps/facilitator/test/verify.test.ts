@@ -423,6 +423,13 @@ describe("verifyPayment (spec §5.4)", () => {
       expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: true, type: "topUp" });
     });
 
+    it("refuses a top-up 1 ms less than 10 s before the end: the margin is not rounded to whole seconds", async () => {
+      await withSession();
+      ctx = { ...ctx, clock: () => Number(STARTED_AT + 20n) * 1000 + 1 };
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "session_expired" });
+      expect(node.simulated).toBe(0);
+    });
+
     it("refuses a top-up that would take the session past maxSeconds", async () => {
       // Paid for 110 s of 120: 12 s more would make 122.
       await withSession({ deposited: 110_000n });
