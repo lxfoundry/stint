@@ -143,7 +143,7 @@ least 0.5 SOL from a devnet faucet and 5 USDC from Circle's (Solana Devnet). It 
 watch: it plays no part in any scenario, and the fees that runs spend are the only thing that does not
 come back to it.
 
-Scenarios 1, 2, 3, 4, 9, 16, 22, 26 and 34 pass on devnet.
+Scenarios 1, 2, 3, 4, 9, 15, 16, 22, 26 and 34 pass on devnet.
 
 A run checks that the endpoint is devnet and that the program is deployed, then cleans up: it closes
 every session that the seed's keys have open and returns what they hold to the funding key. On a first
