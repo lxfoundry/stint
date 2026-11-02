@@ -103,6 +103,25 @@ describe("facilitator HTTP interface (spec §6.1)", () => {
     expect(await response.json()).toMatchObject({ isValid: false, invalidReason: "invalid_x402_version" });
   });
 
+  it("serves /close without an API key: 404 for a session that is not an address, a refusal for a body without a transaction", async () => {
+    const lookup = await fetch(`${facilitator.closeUrl}?session=not-an-address`);
+    expect(lookup.status).toBe(404);
+    expect(await lookup.json()).toEqual({ error: "unknown_session" });
+
+    const empty = await post("/close", {});
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toEqual({
+      success: false,
+      errorReason: "invalid_payload",
+      errorMessage: "the body carries no transaction",
+      transaction: "",
+    });
+
+    const garbled = await post("/close", "{");
+    expect(garbled.status).toBe(400);
+    expect(await garbled.json()).toEqual({ error: "invalid_json" });
+  });
+
   it("answers 404 elsewhere", async () => {
     expect((await fetch(`${facilitator.url}/nowhere`)).status).toBe(404);
   });

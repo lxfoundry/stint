@@ -6,6 +6,8 @@ import {
   partiallySignTransaction,
   type Address,
   type Base64EncodedWireTransaction,
+  type Signature,
+  type Transaction,
 } from "@solana/kit";
 import {
   TransactionFailedError,
@@ -19,6 +21,25 @@ import {
 import { verifyPayment, type FacilitatorContext } from "./verify.js";
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/**
+ * Kora signs `transaction` as fee payer, for `/settle` and for the sponsored close alike. A refusal is an answer, not a
+ * throw: its message comes back for the caller to report. The signature is read from the signed wire outside that try,
+ * so a wire whose signature cannot be read still throws.
+ */
+export async function signAsFeePayer(
+  ctx: Pick<FacilitatorContext, "kora">,
+  transaction: Transaction,
+): Promise<{ readonly ok: true; readonly wire: string; readonly signature: Signature } | { readonly ok: false; readonly errorMessage: string }> {
+  let wire;
+  try {
+    wire = await ctx.kora.signTransaction(getBase64EncodedWireTransaction(transaction));
+  } catch (error) {
+    return { ok: false, errorMessage: `Kora: ${message(error)}` };
+  }
+  const signature = getSignatureFromTransaction(getTransactionDecoder().decode(getBase64Encoder().encode(wire)));
+  return { ok: true, wire, signature };
+}
 
 /** How `/settle` re-reads a confirmed close whose transaction the node does not return yet. */
 export const DEFAULT_READ_RETRY: RetryOptions = { attempts: 5, delayMs: 400 };
@@ -42,17 +63,14 @@ export async function settlePayment(
   let transaction = verified.tx.transaction;
   if (verified.type === "open") transaction = await partiallySignTransaction([ctx.rentPayer.keyPair], transaction);
 
-  let wire;
-  try {
-    wire = await ctx.kora.signTransaction(getBase64EncodedWireTransaction(transaction));
-  } catch (error) {
-    return { success: false, errorReason: "simulation_failed", errorMessage: `Kora: ${message(error)}`, transaction: "", network, payer };
+  const signed = await signAsFeePayer(ctx, transaction);
+  if (!signed.ok) {
+    return { success: false, errorReason: "simulation_failed", errorMessage: signed.errorMessage, transaction: "", network, payer };
   }
-  const signature = getSignatureFromTransaction(getTransactionDecoder().decode(getBase64Encoder().encode(wire)));
   return submitSettlement(ctx, {
     type: verified.type,
-    wire,
-    signature,
+    wire: signed.wire,
+    signature: signed.signature,
     blockhash: verified.tx.blockhash,
     payer,
     amount: String(requirements.amount),

@@ -1,9 +1,10 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { address, createKeyPairSignerFromBytes, createSolanaRpc, type Address } from "@solana/kit";
+import { address, createKeyPairSignerFromBytes, createSolanaRpc, isAddress, type Address } from "@solana/kit";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import { HttpError, SCHEME, X402_VERSION, readJson, sendJson, type Network, type RetryOptions, type SupportedResponse } from "@lxfoundry/stint-x402";
+import { createCloseInfoSource, createSponsoredCloser } from "./close.js";
 import { createKoraClient } from "./kora.js";
 import { settlePayment } from "./settle.js";
 import { DEFAULT_SWEEP_INTERVAL_MS, createSweeper, type SweepReport, type SweeperConfig } from "./sweeper.js";
@@ -23,6 +24,8 @@ export interface FacilitatorConfig {
   readonly confirmTimeoutMs?: number;
   /** How a confirmed close's transaction is re-read while the node returns nothing (default 5 reads, 400 ms apart). */
   readonly readRetry?: RetryOptions;
+  /** How long `GET /close` serves the same blockhash and block height (default 2,000 ms; spec §6.1). */
+  readonly closeInfoTtlMs?: number;
   /** Absent: no periodic sweep (spec §6.4). `sweepOnce()` works either way. */
   readonly sweeper?: SweeperConfig;
   readonly log?: (entry: Record<string, unknown>) => void;
@@ -67,6 +70,8 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
     confirmTimeoutMs: config.confirmTimeoutMs ?? 30_000,
     readRetry: config.readRetry,
   };
+  const closeInfo = createCloseInfoSource(ctx, { ttlMs: config.closeInfoTtlMs });
+  const sponsoredClose = createSponsoredCloser(ctx);
   // The sweeper builds and signs its own closes with `ctx`: they do not pass `verifyPayment`, which refuses the rent payer as a closer.
   const sweeper = createSweeper({
     ctx,
@@ -91,7 +96,8 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
   });
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const path = new URL(request.url ?? "/", "http://facilitator").pathname;
+    const requested = new URL(request.url ?? "/", "http://facilitator");
+    const path = requested.pathname;
     if (request.method === "GET" && path === "/health") return sendJson(response, 200, { ok: true });
     if (request.method === "GET" && path === "/supported") return sendJson(response, 200, supported());
     if (request.method === "POST" && (path === "/verify" || path === "/settle")) {
@@ -112,6 +118,19 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
       }
       const settled = await settlePayment(ctx, paymentPayload, (paymentRequirements ?? {}) as { amount?: unknown });
       log({ event: "settle", success: settled.success, reason: settled.errorReason, transaction: settled.transaction });
+      return sendJson(response, 200, settled);
+    }
+    // The buyers' endpoint (spec §6.1): no API key.
+    if (request.method === "GET" && path === "/close") {
+      const session = requested.searchParams.get("session");
+      if (session !== null && !isAddress(session)) return sendJson(response, 404, { error: "unknown_session" });
+      const info = await closeInfo.read(session ?? undefined);
+      return info ? sendJson(response, 200, info) : sendJson(response, 404, { error: "unknown_session" });
+    }
+    if (request.method === "POST" && path === "/close") {
+      const { transaction } = ((await readJson(request)) ?? {}) as Record<string, unknown>;
+      const settled = await sponsoredClose(transaction);
+      log({ event: "sponsored_close", success: settled.success, ...(settled.success ? {} : { reason: settled.errorReason }), transaction: settled.transaction });
       return sendJson(response, 200, settled);
     }
     sendJson(response, 404, { error: "not_found" });

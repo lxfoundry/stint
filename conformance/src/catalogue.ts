@@ -3,6 +3,7 @@ import { closeBeforeMinSeconds } from "./scenarios/02-close-before-min-seconds.j
 import { expiry } from "./scenarios/03-expiry.js";
 import { topUpBeforeAndAfterExpiry } from "./scenarios/04-top-up.js";
 import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
+import { sponsoredClose } from "./scenarios/15-sponsored-close.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
 import { expiredSessionNobodyCloses } from "./scenarios/26-expired-session-nobody-closes.js";
@@ -45,7 +46,7 @@ export const catalogue: readonly Scenario[] = [
   pending(12, "Allowance funding", ["allowance"]),
   pending(13, "Payment whose accepted differs by one byte; x402Version 1"),
   pending(14, "The same payment sent twice"),
-  pending(15, "Sponsored close through closeUrl"),
+  required(15, "Sponsored close through closeUrl", sponsoredClose),
   required(16, "Close by an unrelated key after paid_until", closeAfterPaidUntil),
   pending(17, "Top-up for an unknown session"),
   pending(18, "Fee payer or rent payer in a forbidden position", ["facilitatorApi"]),
