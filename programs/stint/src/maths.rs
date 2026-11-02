@@ -110,7 +110,34 @@ pub fn close_amounts(
     })
 }
 
-/// `rate × seconds`, for the deposit bounds of `open`.
+/// What a top-up credits: `added` reached the vault since the last credit, after which the session's `deposited` is
+/// `deposited` and its paid time runs to `paid_until`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TopUpAmounts {
+    pub added: u64,
+    pub deposited: u64,
+    pub paid_until: i64,
+}
+
+/// A top-up at `now` of a vault holding `vault` (spec section 4.3). Only claims take tokens out of an open session's
+/// vault, so `vault + claimed` is everything that has reached it, and what exceeds `deposited` arrived since the last
+/// credit. Refused from `paid_until` on (`SessionExpired`: a session that has run out cannot be extended, so a buyer
+/// never pays for a gap), when nothing has arrived (`NothingToTopUp`), and when the total would buy more than
+/// `max_seconds` (`DepositTooLarge`).
+pub fn top_up_amounts(session: &Session, vault: u64, now: i64) -> Result<TopUpAmounts> {
+    let end = paid_until(session.started_at, session.deposited, session.rate)?;
+    require!(now < end, StintError::SessionExpired);
+    let total = vault.checked_add(session.claimed).ok_or_else(|| error!(StintError::MathOverflow))?;
+    require!(total > session.deposited, StintError::NothingToTopUp);
+    require!(u128::from(total) <= cost(session.rate, session.max_seconds), StintError::DepositTooLarge);
+    Ok(TopUpAmounts {
+        added: total - session.deposited,
+        deposited: total,
+        paid_until: paid_until(session.started_at, total, session.rate)?,
+    })
+}
+
+/// `rate × seconds`, for the deposit bounds of `open` and `top_up`.
 pub fn cost(rate: u64, seconds: u32) -> u128 {
     u128::from(rate) * u128::from(seconds)
 }
@@ -265,13 +292,78 @@ mod tests {
         // A vault holding less than is owed is an error, not a partial payment.
         assert!(close_amounts(&session, 3_999, 1_012, false, false).is_err());
     }
+
+    /// The code of a program error: Anchor numbers the errors of spec section 4.5 from 6000.
+    fn code(error: StintError) -> u32 {
+        6000 + error as u32
+    }
+
+    /// Whether `result` failed with the program error numbered `code`.
+    fn fails_with<T>(result: Result<T>, code: u32) -> bool {
+        matches!(result, Err(anchor_lang::error::Error::AnchorError(error)) if error.error_code_number == code)
+    }
+
+    #[test]
+    fn a_top_up_credits_what_reached_the_vault_since_the_last_credit() {
+        let session = opened(1_000, 5, 1_000, 30_000);
+        // 10,000 more in the vault: 10 s more, counted from the same start.
+        let topped_up = TopUpAmounts { added: 10_000, deposited: 40_000, paid_until: 1_040 };
+        assert_eq!(top_up_amounts(&session, 40_000, 1_010).unwrap(), topped_up);
+        // After claims of 8,000 the vault holds 22,000 of the deposit: the same 10,000 is what is new.
+        let mut claimed = opened(1_000, 5, 1_000, 30_000);
+        claimed.claimed = 8_000;
+        assert_eq!(top_up_amounts(&claimed, 32_000, 1_010).unwrap(), topped_up);
+        // Tokens that reached the vault uncredited earlier are credited with the top-up; the remainder buys no time.
+        let with_stray = top_up_amounts(&session, 40_500, 1_010).unwrap();
+        assert_eq!(with_stray, TopUpAmounts { added: 10_500, deposited: 40_500, paid_until: 1_040 });
+    }
+
+    #[test]
+    fn a_top_up_is_refused_from_paid_until_on() {
+        let session = opened(1_000, 5, 1_000, 30_000);
+        assert!(top_up_amounts(&session, 40_000, 1_029).is_ok());
+        for now in [1_030, 1_031, 9_000] {
+            assert!(fails_with(top_up_amounts(&session, 40_000, now), code(StintError::SessionExpired)));
+        }
+    }
+
+    #[test]
+    fn a_top_up_needs_tokens_that_have_not_been_credited() {
+        let mut session = opened(1_000, 5, 1_000, 30_000);
+        assert!(fails_with(top_up_amounts(&session, 30_000, 1_010), code(StintError::NothingToTopUp)));
+        // After a claim of 8,000, a vault of 22,000 holds nothing new, and one base unit more is new.
+        session.claimed = 8_000;
+        assert!(fails_with(top_up_amounts(&session, 22_000, 1_010), code(StintError::NothingToTopUp)));
+        assert_eq!(top_up_amounts(&session, 22_001, 1_010).unwrap().added, 1);
+    }
+
+    #[test]
+    fn a_top_up_may_not_buy_more_than_max_seconds() {
+        let mut session = opened(1_000, 5, 1_000, 30_000);
+        session.max_seconds = 120;
+        assert_eq!(top_up_amounts(&session, 120_000, 1_010).unwrap().paid_until, 1_120);
+        assert!(fails_with(top_up_amounts(&session, 120_001, 1_010), code(StintError::DepositTooLarge)));
+        // What claims took out of the vault counts towards the total.
+        session.claimed = 10_000;
+        assert!(fails_with(top_up_amounts(&session, 110_001, 1_010), code(StintError::DepositTooLarge)));
+    }
+
+    #[test]
+    fn a_top_up_reports_an_overflow_as_an_error() {
+        let mut session = opened(1, 5, 1_000, 30_000);
+        session.claimed = 1;
+        assert!(fails_with(top_up_amounts(&session, u64::MAX, 1_010), code(StintError::MathOverflow)));
+    }
 }
 
-/// Property tests of spec section 12.1, run on the functions `claim` and `close` call: a claim at
-/// each of a sequence of moments, then a close.
+/// Property tests of spec section 12.1, run on the functions `claim`, `top_up` and `close` call: claims and top-ups at
+/// a sequence of moments, then a close.
 #[cfg(test)]
 mod properties {
-    use super::{charged, claim_amounts, close_amounts, due, earned, elapsed, opened, paid_until, CloseAmounts};
+    use super::{
+        charged, claim_amounts, close_amounts, cost, due, earned, elapsed, opened, paid_until, top_up_amounts, CloseAmounts,
+    };
+    use crate::state::Session;
     use proptest::prelude::*;
 
     /// A session's terms as `open` stores them, and the tokens that reached the vault uncredited.
@@ -279,16 +371,33 @@ mod properties {
     struct Terms {
         rate: u64,
         min_seconds: u32,
+        max_seconds: u32,
         started_at: i64,
         deposited: u64,
         uncredited: u64,
     }
 
-    /// Claims at `claim_times`, in that order, then one close at `close_time`.
+    /// One thing that happens to the session: a claim, or a top-up whose funding sends `amount` to the vault in the same
+    /// transaction as `top_up`.
+    #[derive(Clone, Copy, Debug)]
+    enum Step {
+        Claim(i64),
+        TopUp(i64, u64),
+    }
+
+    impl Step {
+        fn at(self) -> i64 {
+            match self {
+                Step::Claim(now) | Step::TopUp(now, _) => now,
+            }
+        }
+    }
+
+    /// `steps`, in that order, then one close at `close_time`.
     #[derive(Clone, Debug)]
     struct Scenario {
         terms: Terms,
-        claim_times: Vec<i64>,
+        steps: Vec<Step>,
         close_time: i64,
         waive_minimum: bool,
         refund_account_gone: bool,
@@ -297,15 +406,15 @@ mod properties {
     impl Scenario {
         /// The same scenario on a clock that never steps back: moments in order, the close last.
         fn monotone(mut self) -> Self {
-            self.claim_times.sort_unstable();
-            if let Some(&last) = self.claim_times.last() {
-                self.close_time = self.close_time.max(last);
+            self.steps.sort_by_key(|step| step.at());
+            if let Some(last) = self.steps.last() {
+                self.close_time = self.close_time.max(last.at());
             }
             self
         }
     }
 
-    /// A moment between a little before the start and about twice the paid time after it.
+    /// A moment between a little before the start and about twice the opening deposit's paid time after it.
     fn moment(terms: &Terms, raw: u64) -> i64 {
         let covered = terms.deposited / terms.rate;
         let offset = i64::try_from(raw % (2 * covered + 11)).unwrap();
@@ -318,94 +427,130 @@ mod properties {
             covered in prop_oneof![1u64..=120, 1u64..=u64::from(u32::MAX)],
             remainder in any::<u64>(),
             min in any::<u64>(),
+            room in prop_oneof![Just(0u32), 1u32..=600],
             started_at in 0i64..=4_000_000_000,
             uncredited in prop_oneof![Just(0u64), 1u64..=1_000_000],
         ) -> Terms {
+            let max_seconds = u32::try_from(covered).unwrap().saturating_add(room);
             Terms {
                 rate,
-                // `open` requires `min_seconds <= covered`.
+                // `open` requires `min_seconds <= covered`, and a deposit of at most `rate x max_seconds`: a session
+                // opened for `max_seconds` takes no remainder.
                 min_seconds: u32::try_from(min % covered).unwrap() + 1,
+                max_seconds,
                 started_at,
-                deposited: rate * covered + remainder % rate,
+                deposited: rate * covered + if u64::from(max_seconds) > covered { remainder % rate } else { 0 },
                 uncredited,
             }
         }
     }
 
+    // A claim, or a top-up of up to 700 s, now and then with a few base units more than whole seconds.
     prop_compose! {
-        fn any_scenario()(
-            terms in any_terms(),
-            raw_claims in proptest::collection::vec(any::<u64>(), 0..24),
+        fn any_step(terms: Terms)(
+            raw in any::<u64>(),
+            top_up in any::<bool>(),
+            seconds in prop_oneof![Just(0u64), 1u64..=700],
+            stray in prop_oneof![Just(0u64), 1u64..=1_000],
+        ) -> Step {
+            let now = moment(&terms, raw);
+            if top_up { Step::TopUp(now, terms.rate * seconds + stray) } else { Step::Claim(now) }
+        }
+    }
+
+    prop_compose! {
+        fn any_scenario()(terms in any_terms())(
+            steps in proptest::collection::vec(any_step(terms), 0..24),
             raw_close in any::<u64>(),
             waive_minimum in any::<bool>(),
             refund_account_gone in any::<bool>(),
+            terms in Just(terms),
         ) -> Scenario {
-            Scenario {
-                terms,
-                claim_times: raw_claims.iter().map(|&raw| moment(&terms, raw)).collect(),
-                close_time: moment(&terms, raw_close),
-                waive_minimum,
-                refund_account_gone,
-            }
+            Scenario { terms, steps, close_time: moment(&terms, raw_close), waive_minimum, refund_account_gone }
         }
     }
 
     struct Outcome {
         /// The session's `claimed` after each claim, with what was earned at that claim's moment.
         claims: Vec<(u64, u64)>,
+        /// Each top-up the program accepted: its moment, and `paid_until` before and after it.
+        top_ups: Vec<(i64, i64, i64)>,
         /// What the claims moved out of the vault, in total.
         paid_by_claims: u64,
-        claimed: u64,
+        /// What the funding of the accepted top-ups sent to the vault, in total.
+        topped_up: u64,
+        /// The session as the close finds it.
+        session: Session,
         close: CloseAmounts,
-        /// `earned` and `due` at the close, by the formulas of spec section 4.2: the reference the
-        /// amounts are checked against.
+        /// `earned` and `due` at the close, by the formulas of spec section 4.2: the reference the amounts are checked
+        /// against.
         earned_at_close: u64,
         due: u64,
     }
 
-    /// The program's sequence: each claim applied as `claim` applies it (the vault pays `amount`, the
-    /// session stores `claimed`), then the close on what the vault still holds, as `close` computes it.
+    /// `paid_until` of the session as it stands.
+    fn end_of(session: &Session) -> i64 {
+        paid_until(session.started_at, session.deposited, session.rate).unwrap()
+    }
+
+    /// `earned` of the session as it stands, at `now`.
+    fn earned_at(session: &Session, now: i64) -> u64 {
+        earned(session.deposited, session.rate, elapsed(session.started_at, end_of(session), now))
+    }
+
+    /// The program's sequence: each claim applied as `claim` applies it (the vault pays `amount`, the session stores
+    /// `claimed`), each top-up as its transaction lands (the funding and `top_up` together, or neither), then the close
+    /// on what the vault still holds, as `close` computes it.
     fn run(scenario: &Scenario) -> Outcome {
         let terms = scenario.terms;
         let mut session = opened(terms.rate, terms.min_seconds, terms.started_at, terms.deposited);
-        let paid_until = paid_until(terms.started_at, terms.deposited, terms.rate).unwrap();
-        let elapsed_at = |now: i64| elapsed(terms.started_at, paid_until, now);
+        session.max_seconds = terms.max_seconds;
 
         // The vault holds the credited deposit and whatever reached it without being credited.
         let mut vault = terms.deposited + terms.uncredited;
-        let mut paid_by_claims = 0;
-        let mut claims = Vec::new();
-        for &now in &scenario.claim_times {
-            let claim = claim_amounts(&session, now).unwrap();
-            vault = vault.checked_sub(claim.amount).expect("a claim pays no more than the vault holds");
-            paid_by_claims += claim.amount;
-            session.claimed = claim.claimed;
-            claims.push((session.claimed, earned(terms.deposited, terms.rate, elapsed_at(now))));
+        let (mut paid_by_claims, mut topped_up) = (0, 0);
+        let (mut claims, mut top_ups) = (Vec::new(), Vec::new());
+        for &step in &scenario.steps {
+            match step {
+                Step::Claim(now) => {
+                    let claim = claim_amounts(&session, now).unwrap();
+                    vault = vault.checked_sub(claim.amount).expect("a claim pays no more than the vault holds");
+                    paid_by_claims += claim.amount;
+                    session.claimed = claim.claimed;
+                    claims.push((session.claimed, earned_at(&session, now)));
+                }
+                Step::TopUp(now, amount) => {
+                    // A refused `top_up` fails its transaction, so its funding never reaches the vault (S13).
+                    if let Ok(top_up) = top_up_amounts(&session, vault + amount, now) {
+                        let before = end_of(&session);
+                        vault += amount;
+                        topped_up += amount;
+                        session.deposited = top_up.deposited;
+                        assert_eq!(top_up.paid_until, end_of(&session), "the paid_until a top-up reports is the session's");
+                        top_ups.push((now, before, top_up.paid_until));
+                    }
+                }
+            }
         }
 
         let now = scenario.close_time;
         let close = close_amounts(&session, vault, now, scenario.waive_minimum, scenario.refund_account_gone)
             .expect("a close owes no more than the vault holds");
-        let charged_now = charged(terms.min_seconds, elapsed_at(now), scenario.waive_minimum);
-        Outcome {
-            claims,
-            paid_by_claims,
-            claimed: session.claimed,
-            close,
-            earned_at_close: earned(terms.deposited, terms.rate, elapsed_at(now)),
-            due: due(terms.deposited, terms.rate, charged_now),
-        }
+        let elapsed_now = elapsed(session.started_at, end_of(&session), now);
+        let earned_at_close = earned_at(&session, now);
+        let due_at_close = due(session.deposited, session.rate, charged(session.min_seconds, elapsed_now, scenario.waive_minimum));
+        Outcome { claims, top_ups, paid_by_claims, topped_up, session, close, earned_at_close, due: due_at_close }
     }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
-        // `claimed + owed <= deposited`, on any clock and in any order of moments.
+        // `claimed + owed <= deposited`, on any clock and in any order of moments, with the deposit as the top-ups left it.
         #[test]
         fn claimed_plus_owed_never_exceeds_the_deposit(scenario in any_scenario()) {
             let outcome = run(&scenario);
             prop_assert!(
-                u128::from(outcome.claimed) + u128::from(outcome.close.owed) <= u128::from(scenario.terms.deposited)
+                u128::from(outcome.session.claimed) + u128::from(outcome.close.owed) <= u128::from(outcome.session.deposited)
             );
         }
 
@@ -416,8 +561,8 @@ mod properties {
             prop_assert!(outcome.earned_at_close <= outcome.due);
         }
 
-        // While the clock never steps back no claim pays beyond what is earned, so `claimed <= earned <= due`
-        // at the close, and the close pays exactly the rest of `due`.
+        // While the clock never steps back no claim pays beyond what is earned, so `claimed <= earned <= due` at the
+        // close, and the close pays exactly the rest of `due`.
         #[test]
         fn claimed_never_exceeds_earned_while_the_clock_never_steps_back(
             scenario in any_scenario().prop_map(Scenario::monotone)
@@ -426,24 +571,41 @@ mod properties {
             for &(claimed, earned_then) in &outcome.claims {
                 prop_assert!(claimed <= earned_then);
             }
-            prop_assert!(outcome.claimed <= outcome.earned_at_close);
-            prop_assert_eq!(outcome.claimed + outcome.close.owed, outcome.due);
+            prop_assert!(outcome.session.claimed <= outcome.earned_at_close);
+            prop_assert_eq!(outcome.session.claimed + outcome.close.owed, outcome.due);
         }
 
-        // Every token that entered the vault leaves it exactly once, on any clock: what the claims moved is
-        // what the session records as claimed, and the close moves the rest.
+        // Every token that entered the vault leaves it exactly once, on any clock: what the claims moved is what the
+        // session records as claimed, and the close moves the rest, the funding of every top-up included.
         #[test]
         fn every_token_that_entered_the_vault_leaves_it_once(scenario in any_scenario()) {
             let outcome = run(&scenario);
             let terms = scenario.terms;
-            prop_assert_eq!(outcome.paid_by_claims, outcome.claimed);
+            prop_assert_eq!(outcome.paid_by_claims, outcome.session.claimed);
             prop_assert_eq!(
-                u128::from(outcome.claimed)
+                u128::from(outcome.session.claimed)
                     + u128::from(outcome.close.owed)
                     + u128::from(outcome.close.refunded)
                     + u128::from(outcome.close.redirected),
-                u128::from(terms.deposited) + u128::from(terms.uncredited)
+                u128::from(terms.deposited) + u128::from(terms.uncredited) + u128::from(outcome.topped_up)
             );
+        }
+
+        // A top-up lands only before `paid_until`, so a buyer never pays for a gap, and it never brings the end closer.
+        #[test]
+        fn a_top_up_lands_only_before_the_end_and_never_brings_it_closer(scenario in any_scenario()) {
+            let outcome = run(&scenario);
+            for &(now, before, after) in &outcome.top_ups {
+                prop_assert!(now < before);
+                prop_assert!(after >= before);
+            }
+        }
+
+        // However many top-ups land, the deposit never buys more than `max_seconds`.
+        #[test]
+        fn the_deposit_never_buys_more_than_max_seconds(scenario in any_scenario()) {
+            let outcome = run(&scenario);
+            prop_assert!(u128::from(outcome.session.deposited) <= cost(outcome.session.rate, outcome.session.max_seconds));
         }
     }
 }

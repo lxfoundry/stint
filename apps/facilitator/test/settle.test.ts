@@ -53,13 +53,13 @@ describe("submitSettlement (spec §5.5)", () => {
   let payer: Address;
   let session: Address;
   const ctx = (rpc: Rpc<SolanaRpcApi>) => ({ rpc, network: NETWORK, confirmTimeoutMs: 2_000, readRetry: { attempts: 3, delayMs: 5 } });
-  const signed = (type: "open" | "close"): SignedSettlement => ({
+  const signed = (type: SignedSettlement["type"], amount = type === "close" ? "0" : "30000"): SignedSettlement => ({
     type,
     wire: "AQ==",
     signature: SIGNATURE,
     blockhash: BLOCKHASH,
     payer,
-    amount: type === "open" ? "30000" : "0",
+    amount,
   });
 
   beforeAll(async () => {
@@ -125,6 +125,18 @@ describe("submitSettlement (spec §5.5)", () => {
       network: NETWORK,
       payer,
       amount: "30000",
+    });
+    expect(reads.transactions).toBe(0);
+  });
+
+  it("answers a top-up's deposit once it is confirmed, without reading the transaction", async () => {
+    const { rpc, reads } = fakeRpc({ statuses: [confirmed], transactions: [() => null] });
+    expect(await submitSettlement(ctx(rpc), signed("topUp", "12000"))).toEqual({
+      success: true,
+      transaction: SIGNATURE,
+      network: NETWORK,
+      payer,
+      amount: "12000",
     });
     expect(reads.transactions).toBe(0);
   });

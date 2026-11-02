@@ -43,15 +43,19 @@ import {
   getClaimInstruction,
   getCloseInstruction,
   getOpenInstructionAsync,
+  getTopUpInstruction,
   parseClaimInstruction,
   parseCloseInstruction,
   parseOpenInstruction,
+  parseTopUpInstruction,
   type ClaimInput,
   type CloseInput,
   type OpenAsyncInput,
   type ParsedClaimInstruction,
   type ParsedCloseInstruction,
   type ParsedOpenInstruction,
+  type ParsedTopUpInstruction,
+  type TopUpInput,
 } from "../instructions/index.js";
 import { findSessionPda } from "../pdas/index.js";
 
@@ -147,6 +151,7 @@ export enum StintInstruction {
   Claim,
   Close,
   Open,
+  TopUp,
 }
 
 export function identifyStintInstruction(
@@ -186,6 +191,17 @@ export function identifyStintInstruction(
   ) {
     return StintInstruction.Open;
   }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([236, 225, 96, 9, 60, 106, 77, 208]),
+      ),
+      0,
+    )
+  ) {
+    return StintInstruction.TopUp;
+  }
   throw new SolanaError(
     SOLANA_ERROR__PROGRAM_CLIENTS__FAILED_TO_IDENTIFY_INSTRUCTION,
     { instructionData: data, programName: "stint" },
@@ -203,7 +219,10 @@ export type ParsedStintInstruction<
     } & ParsedCloseInstruction<TProgram>)
   | ({
       instructionType: StintInstruction.Open;
-    } & ParsedOpenInstruction<TProgram>);
+    } & ParsedOpenInstruction<TProgram>)
+  | ({
+      instructionType: StintInstruction.TopUp;
+    } & ParsedTopUpInstruction<TProgram>);
 
 export function parseStintInstruction<TProgram extends string>(
   instruction: Instruction<TProgram> & InstructionWithData<ReadonlyUint8Array>,
@@ -229,6 +248,13 @@ export function parseStintInstruction<TProgram extends string>(
       return {
         instructionType: StintInstruction.Open,
         ...parseOpenInstruction(instruction),
+      };
+    }
+    case StintInstruction.TopUp: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: StintInstruction.TopUp,
+        ...parseTopUpInstruction(instruction),
       };
     }
     default:
@@ -266,6 +292,10 @@ export type StintPluginInstructions = {
     input: OpenAsyncInput,
     config?: { programAddress?: Address | HasAddress },
   ) => ReturnType<typeof getOpenInstructionAsync> & SelfPlanAndSendFunctions;
+  topUp: (
+    input: TopUpInput,
+    config?: { programAddress?: Address | HasAddress },
+  ) => ReturnType<typeof getTopUpInstruction> & SelfPlanAndSendFunctions;
 };
 
 export type StintPluginPdas = { session: typeof findSessionPda };
@@ -306,6 +336,14 @@ export function stintProgram(
             addSelfPlanAndSendFunctions(
               client,
               getOpenInstructionAsync(input, {
+                programAddress:
+                  instructionConfig?.programAddress ?? config.programAddress,
+              }),
+            ),
+          topUp: (input, instructionConfig) =>
+            addSelfPlanAndSendFunctions(
+              client,
+              getTopUpInstruction(input, {
                 programAddress:
                   instructionConfig?.programAddress ?? config.programAddress,
               }),

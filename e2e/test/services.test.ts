@@ -53,6 +53,36 @@ describe("the services of a stack, run against the local chain", () => {
     return BigInt(paid ?? 0) + BigInt(refunded ?? 0);
   }
 
+  /** Opens a 30 s session through the gate at `url`, reads the time left that the gate reports, and closes the session. */
+  async function reportedTimeLeft(url: string): Promise<number> {
+    const buyer = await newBuyer(chain.network.rpc, chain.keys.mintAuthority.signer, 1_000_000n);
+    const { tools } = createSessionTools(
+      createStintClient({
+        signer: buyer.signer,
+        policy: { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } },
+      }),
+    );
+    const opened = await tools.stint_open_session.run({ url, seconds: 30, reason: "clock test" });
+    const { timeLeftSeconds } = await tools.stint_session_status.run({ sessionId: opened.sessionId });
+    await tools.stint_close_session.run({ sessionId: opened.sessionId });
+    return timeLeftSeconds;
+  }
+
+  it("starts a gate whose session clock runs ahead when asked to, and an ordinary one at the next start", async () => {
+    const own = await start();
+    const url = own.stream.url;
+    await own.stopGate();
+    await own.startGate({ sessionClockAheadMs: 20_000 });
+
+    // 30 s bought, on a gate whose session clock runs 20 s ahead: it counts at most 10 s left.
+    expect(await reportedTimeLeft(url)).toBeLessThanOrEqual(10);
+
+    await own.stopGate();
+    await own.startGate();
+    expect(own.stream.url).toBe(url);
+    expect(await reportedTimeLeft(url)).toBeGreaterThanOrEqual(25);
+  }, 90_000);
+
   it("stops the gate and starts it again on the same URL, with the facilitator and Kora as they were", async () => {
     const { kora, facilitator } = services;
     const url = services.stream.url;

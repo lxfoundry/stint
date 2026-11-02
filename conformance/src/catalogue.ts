@@ -1,10 +1,12 @@
 import { openConnectCloseEarly } from "./scenarios/01-open-connect-close.js";
 import { closeBeforeMinSeconds } from "./scenarios/02-close-before-min-seconds.js";
 import { expiry } from "./scenarios/03-expiry.js";
+import { topUpBeforeAndAfterExpiry } from "./scenarios/04-top-up.js";
 import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
 import { expiredSessionNobodyCloses } from "./scenarios/26-expired-session-nobody-closes.js";
+import { topUpWhileClosingAtExpiry } from "./scenarios/34-top-up-while-closing.js";
 import type { Capability, IsolationGroup, Scenario } from "./types.js";
 
 /** The scenarios of spec section 12.7. Each is pending until a stage builds it. */
@@ -32,7 +34,7 @@ export const catalogue: readonly Scenario[] = [
   required(1, "Open, connect, close early", openConnectCloseEarly),
   required(2, "Close before minSeconds", closeBeforeMinSeconds),
   required(3, "Expiry", expiry),
-  pending(4, "Top-up before and after expiry"),
+  required(4, "Top-up before and after expiry", topUpBeforeAndAfterExpiry),
   pending(5, "Payment with wrong terms, a wrong amount, or a Memo instruction"),
   pending(6, "Failed payment"),
   pending(7, "Unilateral on-chain close"),
@@ -62,6 +64,6 @@ export const catalogue: readonly Scenario[] = [
   pending(31, "Network time moved forward to the end of maxSeconds", ["chain", "stack"], "ownNetwork"),
   pending(32, "Durations out of bounds"),
   pending(33, "A settlement reply lost after the transaction lands", ["stack"], "ownStack"),
-  pending(34, "A top-up lands while the gate is closing at expiry", ["stack"], "ownStack"),
+  required(34, "A top-up lands while the gate is closing at expiry", topUpWhileClosingAtExpiry, ["stack"], "ownStack"),
   pending(35, "A session opened on-chain with the gate's terms is adopted"),
 ];

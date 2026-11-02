@@ -618,7 +618,8 @@ Network identifiers: devnet `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`, mainnet
 - With it, the 402 lists exactly that duration.
 - Valid durations:
   - for an open, `minSeconds`…`maxSeconds`;
-  - for a top-up, 1…(`maxSeconds` − the seconds already covered); `minSeconds` does not apply.
+  - for a top-up, 1…(`maxSeconds` − ⌈`deposited` ÷ `rate`⌉), the most that keeps
+    `deposited + rate × seconds` within `rate × maxSeconds` (§5.4); `minSeconds` does not apply.
 - A duration outside these bounds is refused with `400 invalid_duration`, with the bounds stated
   in the body.
 - **A client cannot deposit more than the `amount` of the entry it accepts.** To pay more it asks
@@ -648,6 +649,8 @@ Network identifiers: devnet `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`, mainnet
 - `accepted` MUST be the chosen entry exactly as received, byte for byte.
 - `x402Version` MUST be 2.
 - `payload.session` is informative: the facilitator derives the address itself.
+- A top-up's payload is `{ "type": "topUp", "transaction": "<base64, partially signed>" }`. The session it extends is
+  `accepted.extra.session`.
 
 **Transaction layouts.** Transactions are version 0. The fee payer is the first account and is
 left unsigned by the client: the facilitator pays the fees, and the client holds no SOL (S14).
@@ -710,7 +713,7 @@ section 5.5) is not verified again. `/verify` answers from its record.
 | Type | Checks |
 |---|---|
 | `open` | The `stint.open` terms equal `extra` (`rate`, `minSeconds`, `maxSeconds`), and `receiver_authorizer` equals `extra.receiverAuthorizer`. `receiver` is `payTo`, and its associated token account for `asset` exists. `refund_owner` owns the associated token account the funding comes from. `rent_payer` is `rentPayer`. The funding moves **exactly `amount`** of `asset` into the vault. The authority signed |
-| `topUp` | The session exists and its terms match the gate's offer. The signer is its `authority`. `paid_until` is at least 10 s away, so the transaction lands before the end. The funding moves exactly `amount`. The total stays within `maxSeconds` |
+| `topUp` | The session exists and its terms match the gate's offer. The signer is its `authority`. `paid_until` is at least 10 s away on the facilitator's clock, so the transaction lands before the end (`session_expired` otherwise). The funding moves exactly `amount` of the session's mint into its vault, from the associated token account of its stored `refund_owner`, so that a refund goes back to the account the money came from. The total stays within `maxSeconds` (`invalid_amount` otherwise). The rent payer appears nowhere: a top-up creates no account |
 | `close` (from the gate, through `/settle`) | The session exists and its terms match the requirements. The `closer` is its `receiver_authorizer` |
 | `close` (sponsored, through `closeUrl`) | The session exists and its `rent_payer` is one of this facilitator's keys. The `closer` is its `authority`, and `kind` is `Standard` or `AtExpiry`. The payload, `accepted` and requirements checks do not apply: the request carries only the transaction. The fee-payer, facilitator-key, program, layout, simulation and blockhash checks do |
 
@@ -723,11 +726,11 @@ it is used.
 | `invalid_payload` | The payload or its transaction cannot be decoded |
 | `invalid_payment_requirements` | `accepted` differs from the issued entry, or the scheme, network or asset differ |
 | `invalid_terms` | The terms differ from the offer |
-| `invalid_amount` | The funding is not exactly `amount` |
+| `invalid_amount` | The funding is not exactly `amount`, or a top-up would take the session past `maxSeconds` |
 | `unexpected_instruction` | An instruction outside the allowed layout |
 | `payer_misuse` | The fee payer or the rent payer appears where section 5.3 forbids it |
 | `blockhash_expired` | The transaction's blockhash is no longer valid |
-| `session_expired` | A top-up after `paid_until` |
+| `session_expired` | A top-up after `paid_until`, or within 10 s of it |
 | `simulation_failed` | Including an exhausted allowance |
 | `unknown_session` | No such session |
 | `already_processed` | The chain has already processed this message, and the facilitator holds no record of it (section 5.5). **Not final:** the payment may have landed |
@@ -920,7 +923,7 @@ sessions it opens with itself. The API key and the limits per key bound that.
 | Endpoint | Purpose | Responses |
 |---|---|---|
 | `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `202 {session, transaction}` while the settlement is pending; `400 invalid_duration` |
-| `POST /sessions/:id/top-up?seconds=N` | Top up | `402`; `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration` |
+| `POST /sessions/:id/top-up?seconds=N` | Top up | `402` (offers for this session; once the end timer has fired, or when the facilitator answers `session_expired`, the reason `session_expired` with offers for a new session); `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration`; `404` for a session this gate does not track |
 | `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`, or `200 {transaction}` when the close is confirmed but its `Closed` event cannot be read; `202 {transaction}` while the settlement is pending (the client polls the status until `404`, for at most `closeWaitSeconds`: section 9.3); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
 | `GET /sessions/:id` | Status from the chain, public like the chain. Body: `session`, `paidUntil`, `startedAt`, `deposited`, `claimed`, `rate`, `minSeconds`, `maxSeconds`, a fresh `blockhash` with its `lastValidBlockHeight`, and, as estimates at the gate's session clock (section 7.3), `timeLeft`, `earned` (section 4.2), `due` (what a close then charges in total) and `refundable` (`deposited - max(claimed, due)`). `u64` values are decimal strings. The chain's clock decides the amounts (section 4.2). It works for a session the gate does not track yet. It reads the chain on every call and is not authenticated: a deployment rate-limits it like any public route | `200`; `404` for an address that holds no session, or a session with other terms (section 4.6) |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
@@ -1408,7 +1411,8 @@ run is repeatable.
 - **Stack control:** the harness runs the services, so it holds their keys (the seller's wallet,
   the receiver authorizer, the facilitator's API key, the resource's admin key) and can stop,
   restart or add instances of them. In particular, it can stop the gate and start it again on the same
-  address while the facilitator, its sweeper and Kora keep running (scenario 26).
+  address while the facilitator, its sweeper and Kora keep running (scenario 26), and start it with its session
+  clock running ahead of the wall clock (scenario 34).
 - **Facilitator API:** the harness can call the facilitator's `/verify` with an API key (section 6.5). Always
   on `local` and `devnet`; on `external` only with `--facilitator` and `--facilitator-key`.
 - **Allowance:** the facilitator accepts an allowance pull as the funding instruction (section

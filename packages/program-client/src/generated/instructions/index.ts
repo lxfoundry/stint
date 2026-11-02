@@ -9,3 +9,4 @@
 export * from "./claim.js";
 export * from "./close.js";
 export * from "./open.js";
+export * from "./topUp.js";

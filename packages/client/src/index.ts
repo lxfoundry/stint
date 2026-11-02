@@ -1,5 +1,13 @@
-export { checkOffer, type Asset, type Policy, type PolicyCheck } from "./policy.js";
-export { StintError, createStintClient, type ClientOptions, type CloseReceipt, type StintClient, type StintSession } from "./client.js";
+export { checkOffer, checkTopUp, type Asset, type Policy, type PolicyCheck, type TopUpContext } from "./policy.js";
+export {
+  StintError,
+  createStintClient,
+  type ClientOptions,
+  type CloseReceipt,
+  type StintClient,
+  type StintSession,
+  type TopUpReceipt,
+} from "./client.js";
 export {
   ToolError,
   createSessionTools,
@@ -15,4 +23,6 @@ export {
   type StatusInput,
   type StatusOutput,
   type Tool,
+  type TopUpInput,
+  type TopUpOutput,
 } from "./tools.js";

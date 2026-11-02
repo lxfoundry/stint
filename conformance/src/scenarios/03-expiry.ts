@@ -1,11 +1,12 @@
 import { CloseKind, fetchMaybeSession } from "@lxfoundry/stint-program-client";
 import { associatedTokenAddress, lamportBalances, tokenBalanceChanges } from "@lxfoundry/stint-x402";
-import { expectEqual, expectTrue, sleep, waitFor } from "../assert.js";
+import { expectEqual, expectTrue, waitFor } from "../assert.js";
 import { awaitClose } from "../closes.js";
 import { buyerClient, closePollMs, sessionSeconds } from "../helpers.js";
 import { readUntil } from "../reads.js";
 import type { ScenarioContext } from "../types.js";
-import { assertRentReturned, receivedAmount } from "./22-example-agent-task.js";
+import { watchWhilePaying } from "../watch.js";
+import { assertRentReturned } from "./22-example-agent-task.js";
 
 /**
  * Scenario 3 (spec §12.7): expiry. The paid time runs out while the buyer is connected: forwarding stops within 5 s of `paidUntil`,
@@ -25,52 +26,24 @@ export async function expiry(context: ScenarioContext): Promise<void> {
   const vault = await associatedTokenAddress(session.id, stored.mint);
   const paidUntilMs = session.paidUntil * 1_000;
 
-  const seen = { frames: [] as number[], closeCode: undefined as number | undefined, paymentFailure: undefined as unknown };
-  const socket = await session.connect();
-  socket.on("message", (data) => {
-    try {
-      if (receivedAmount(JSON.parse(String(data)), watched.usdcAccount) !== undefined) seen.frames.push(Date.now());
-    } catch {
-      // not JSON, so not a frame about the account
-    }
-  });
-  socket.on("close", (code) => {
-    seen.closeCode = code;
-  });
-  socket.on("error", () => {});
-  socket.send(JSON.stringify({ op: "subscribe", accounts: [watched.usdcAccount] }));
-  await sleep(context.subscriptionSettleMs); // the subscription is in place before the first payment
-
-  // Keep the watched account changing until the connection ends: whatever the gate forwards after paid_until shows up as a frame.
-  let paying = true;
-  const payments = (async () => {
-    try {
-      while (paying) {
-        await context.sendUsdc(payer, watched.usdcAccount, 1n);
-        await sleep(500);
-      }
-    } catch (error) {
-      seen.paymentFailure = error;
-    }
-  })();
+  // The watched account keeps changing until the connection ends: whatever the gate forwards after paid_until shows up as a frame.
+  const watch = await watchWhilePaying(context, session, payer, watched);
   try {
     await waitFor(
-      () => seen.closeCode !== undefined,
+      () => watch.closeCode !== undefined,
       Math.max(1_000, paidUntilMs + 30_000 - Date.now()),
       "the connection is closed within 30 s of paid_until",
     );
   } finally {
-    paying = false;
-    await payments;
-    socket.terminate();
+    await watch.stop();
   }
-  expectEqual(seen.closeCode, 4402, "the connection is dropped with 4402");
-  expectTrue(seen.paymentFailure === undefined, "every payment that changed the watched account went through");
+  expectEqual(watch.closeCode, 4402, "the connection is dropped with 4402");
+  expectTrue(watch.paymentFailure === undefined, "every payment that changed the watched account went through");
   expectTrue(
-    seen.frames.some((at) => at <= paidUntilMs),
+    watch.frames.some((at) => at <= paidUntilMs),
     "frames about the watched account arrived before paid_until",
   );
-  expectEqual(seen.frames.filter((at) => at > paidUntilMs + 5_000).length, 0, "no frame arrived more than 5 s after paid_until");
+  expectEqual(watch.frames.filter((at) => at > paidUntilMs + 5_000).length, 0, "no frame arrived more than 5 s after paid_until");
 
   const found = await awaitClose(context.rpc, session.id, context.readRetry, 15_000, "the expiry close is on-chain", closePollMs(context.target));
   const { event } = found;

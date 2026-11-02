@@ -60,6 +60,7 @@ describe("the stdio entry point", () => {
       "stint_receive",
       "stint_send",
       "stint_session_status",
+      "stint_top_up",
     ]);
     const unknown = await client.callTool({ name: "stint_close_session", arguments: { sessionId: "nope" } });
     expect(unknown.isError).toBe(true);
@@ -78,6 +79,6 @@ describe("the stdio entry point", () => {
       }
     }
     expect(alive).toBe(false);
-    expect(stderr).toMatch(/serving 5 tools on stdio/);
+    expect(stderr).toMatch(/serving 6 tools on stdio/);
   }, 30_000);
 });

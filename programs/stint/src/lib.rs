@@ -26,4 +26,8 @@ pub mod stint {
     pub fn close(ctx: Context<Close>, kind: CloseKind) -> Result<()> {
         instructions::close::close_handler(ctx, kind)
     }
+
+    pub fn top_up(ctx: Context<TopUp>) -> Result<()> {
+        instructions::top_up::top_up_handler(ctx)
+    }
 }

@@ -57,6 +57,16 @@ export interface StatusOutput {
   readonly spent: string;
   readonly refundable: string;
 }
+export interface TopUpInput {
+  readonly sessionId: string;
+  readonly seconds: number;
+}
+/** `paidUntil` is the session's new end, in Unix seconds; `cost` is what this top-up cost, in base units. */
+export interface TopUpOutput {
+  readonly paidUntil: number;
+  readonly cost: string;
+}
+
 export interface CloseAllOutput {
   readonly closed: string[];
   readonly failed: { readonly sessionId: string; readonly error: string }[];
@@ -66,6 +76,7 @@ export interface SessionTools {
   readonly tools: {
     readonly stint_open_session: Tool<OpenInput, OpenOutput>;
     readonly stint_session_status: Tool<StatusInput, StatusOutput>;
+    readonly stint_top_up: Tool<TopUpInput, TopUpOutput>;
     readonly stint_send: Tool<SendInput, { ok: true }>;
     readonly stint_receive: Tool<ReceiveInput, ReceiveOutput>;
     readonly stint_close_session: Tool<CloseInput, CloseOutput>;
@@ -252,6 +263,23 @@ export function createSessionTools(client: StintClient): SessionTools {
             spent: status.due,
             refundable: status.refundable,
           };
+        },
+      },
+      stint_top_up: {
+        name: "stint_top_up",
+        description:
+          "Buys more time on an open session before its paid time runs out. The extra deposit is held in escrow like the first, and what is not used is still refunded at close. A session whose paid time has run out cannot be extended: open a new one.",
+        inputSchema: strict(
+          { sessionId: sessionIdSchema, seconds: { type: "integer", minimum: 1, description: "How many seconds to add" } },
+          ["sessionId", "seconds"],
+        ),
+        async run(input) {
+          const state = get(input.sessionId);
+          const ended = endedByGate(state);
+          if (ended) throw new ToolError(ended);
+          if (state.closed || state.closing) throw new ToolError("The session is closed");
+          const receipt = await state.session.topUp({ seconds: input.seconds });
+          return { paidUntil: receipt.paidUntil, cost: receipt.cost.toString() };
         },
       },
       stint_send: {

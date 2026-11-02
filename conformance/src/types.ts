@@ -26,14 +26,26 @@ export interface Buyer {
   readonly usdcAccount: Address;
 }
 
+/** How `StackControl.startGate` starts the gate. */
+export interface GateStartOptions {
+  /**
+   * Milliseconds by which the gate's session clock runs ahead of the wall clock (spec §7.3): its idle and end timers fire
+   * that much early, while the chain's clock still decides every amount (scenario 34). Default 0.
+   */
+  readonly sessionClockAheadMs?: number;
+}
+
 /** What a scenario may do to the services that the target runs (spec §12.2). */
 export interface StackControl {
   /** The facilitator's rent payer: its sweeper signs closes as this key, and a session that names it as rent payer is the sweeper's. */
   readonly rentPayer: Address;
   /** Stops the gate and its connections. The facilitator, its sweeper and Kora keep running. */
   stopGate(): Promise<void>;
-  /** Starts the gate again on the port it had, so that `gateUrl` stays valid. The new gate has no memory of earlier sessions. */
-  startGate(): Promise<void>;
+  /**
+   * Starts the gate again on the port it had, so that `gateUrl` stays valid. The new gate has no memory of earlier sessions.
+   * `options` hold for that gate only: the next start without them brings up an ordinary one.
+   */
+  startGate(options?: GateStartOptions): Promise<void>;
 }
 
 /** A session opened straight on the program, with no gate and no facilitator: nothing of the stack holds it. */
@@ -68,6 +80,13 @@ export interface DirectChain {
    * transaction's signature, and rejects if the program refuses the close.
    */
   close(session: DirectSession, closer: KeyPairSigner): Promise<string>;
+  /**
+   * Tops up `session` on the program: `rate x seconds` from the buyer's USDC account into the session's vault, then
+   * `top_up` signed by the buyer as the session's authority, in one transaction whose fee a harness key pays. It works on
+   * any session the buyer opened, through the gate or not, and goes through neither the gate nor the facilitator. Returns
+   * the transaction's signature, and rejects if the program refuses the top-up.
+   */
+  topUp(options: { readonly buyer: Buyer; readonly session: Address; readonly seconds: number }): Promise<string>;
   /** A new key that holds nothing. */
   newKey(): Promise<KeyPairSigner>;
 }

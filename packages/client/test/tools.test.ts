@@ -23,6 +23,7 @@ async function controlledClient(count: number) {
         wsUrl: "ws://seller.test",
         cost: 0n,
         connect: () => Promise.reject(new Error("not used")),
+        topUp: () => Promise.reject(new Error("not used")),
         status: () => Promise.reject(new Error("not used")),
         close: () =>
           new Promise<CloseReceipt>((resolve, reject) => {
@@ -338,6 +339,7 @@ describe("session tools (spec §9.5)", () => {
           wsUrl: "ws://seller.test",
           cost: 0n,
           connect: async () => socket as unknown as WebSocket,
+          topUp: () => Promise.reject(new Error("not used")),
           status: () => Promise.reject(new Error("not used")),
           close: () =>
             new Promise<CloseReceipt>((resolve) => {
@@ -438,6 +440,33 @@ describe("session tools (spec §9.5)", () => {
     const status = await session.tools.stint_session_status.run({ sessionId: session.sessionId });
 
     expect(status.timeLeftSeconds).toBeGreaterThan(0);
+  });
+
+  it("tops up an open session, and reports its new end and what the top-up cost", async () => {
+    const session = await connected();
+    const { paidUntil } = await session.tools.stint_session_status.run({ sessionId: session.sessionId });
+
+    expect(await session.tools.stint_top_up.run({ sessionId: session.sessionId, seconds: 10 })).toEqual({
+      paidUntil: paidUntil + 10,
+      cost: "10000",
+    });
+    expect(session.settlements()).toBe(2); // the open and the top-up
+  });
+
+  it("refuses to top up a session the buyer has closed, without asking the gate", async () => {
+    const session = await connected();
+    await session.tools.stint_close_session.run({ sessionId: session.sessionId });
+
+    await expect(session.tools.stint_top_up.run({ sessionId: session.sessionId, seconds: 10 })).rejects.toThrow(/closed/);
+    expect(session.settlements()).toBe(2); // the open and the close
+  });
+
+  it.each(ENDED)("refuses to top up a session the gate ended with %s, without asking the gate", async (code, message) => {
+    const session = await connected();
+    await session.dropWith(code);
+
+    await expect(session.tools.stint_top_up.run({ sessionId: session.sessionId, seconds: 10 })).rejects.toThrow(message);
+    expect(session.settlements()).toBe(1);
   });
 
   it("answers an unknown session with a readable error", async () => {

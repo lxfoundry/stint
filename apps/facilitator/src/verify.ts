@@ -7,13 +7,23 @@ import {
   type KeyPairSigner,
   type Rpc,
   type SolanaRpcApi,
+  type TransactionError,
 } from "@solana/kit";
-import { STINT_PROGRAM_ADDRESS, fetchMaybeSession, getSessionSize } from "@lxfoundry/stint-program-client";
 import {
+  STINT_ERROR__SESSION_EXPIRED,
+  STINT_PROGRAM_ADDRESS,
+  fetchMaybeSession,
+  getSessionSize,
+  paidUntil,
+  type Session,
+} from "@lxfoundry/stint-program-client";
+import {
+  TOP_UP_MARGIN_SECONDS,
   X402_VERSION,
   associatedTokenAddress,
   checkCloseTransaction,
   checkOpenTransaction,
+  checkTopUpTransaction,
   inspectTransaction,
   readElapsedPayload,
   readElapsedRequirements,
@@ -22,6 +32,7 @@ import {
   sellerTermsOf,
   sessionMatches,
   type Check,
+  type ElapsedRequirements,
   type FacilitatorKeys,
   type InspectedTransaction,
   type InvalidReason,
@@ -40,12 +51,14 @@ export interface FacilitatorContext {
   readonly confirmTimeoutMs: number;
   /** How a confirmed close's transaction is re-read while the node returns nothing. Default 5 reads, 400 ms apart. */
   readonly readRetry?: RetryOptions;
+  /** The facilitator's clock, in milliseconds: it decides the top-up margin of spec §5.4. Default `Date.now`. */
+  readonly clock?: () => number;
 }
 
 export type Verified =
   | {
       readonly ok: true;
-      readonly type: "open" | "close";
+      readonly type: "open" | "topUp" | "close";
       readonly tx: InspectedTransaction;
       /** The session's authority (spec §5.5: `payer`). */
       readonly payer: Address;
@@ -83,7 +96,7 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
   if (!tx) return refuse("invalid_payload", "the transaction cannot be decoded as version 0");
 
   let facts: { payer: Address; session: Address };
-  // A close funds nothing: the rent payer only receives the session's rent back.
+  // A close and a top-up fund nothing: the rent payer only receives a closed session's rent back.
   let funding: Funding = { destinations: [], budget: 0n };
   if (elapsed.type === "open") {
     const check = await checkOpenTransaction(tx, requirements, ctx.keys);
@@ -98,17 +111,29 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
       ctx.rpc.getMinimumBalanceForRentExemption(BigInt(getTokenSize())).send(),
     ]);
     funding = { destinations: [check.value.session, check.value.vault], budget: sessionRent + vaultRent };
-  } else {
-    if (!extra.session) return refuse("invalid_payment_requirements", "a close names its session");
-    const session = address(extra.session);
-    const stored = await fetchMaybeSession(ctx.rpc, session, { commitment: "confirmed" });
-    if (!stored.exists) return refuse("unknown_session", "no such session");
-    if (!sessionMatches(stored.data, sellerTermsOf(requirements))) {
-      return refuse("invalid_terms", "the session's terms differ from the requirements");
+  } else if (elapsed.type === "topUp") {
+    const found = await loadMatchingSession(ctx, requirements, "top-up");
+    if (!found.ok) return found;
+    const { session, stored } = found.value;
+    // The transaction must land before the end: from `paid_until` on, the program refuses it (spec §4.3). Compared in
+    // milliseconds, so that 9.5 s left is less than the margin.
+    const left = Number(paidUntil(stored)) * 1000 - (ctx.clock ?? Date.now)();
+    if (left < TOP_UP_MARGIN_SECONDS * 1000) {
+      return refuse("session_expired", `the session's paid time ends in less than ${TOP_UP_MARGIN_SECONDS} s`);
     }
-    const check = await checkCloseTransaction(tx, { session, closer: stored.data.receiverAuthorizer }, ctx.keys);
+    const check = await checkTopUpTransaction(tx, requirements, stored, ctx.keys);
     if (!check.ok) return check;
-    facts = { payer: stored.data.authority, session };
+    if (stored.deposited + BigInt(requirements.amount) > stored.rate * BigInt(stored.maxSeconds)) {
+      return refuse("invalid_amount", "the top-up would take the session past maxSeconds");
+    }
+    facts = { payer: stored.authority, session };
+  } else {
+    const found = await loadMatchingSession(ctx, requirements, "close");
+    if (!found.ok) return found;
+    const { session, stored } = found.value;
+    const check = await checkCloseTransaction(tx, { session, closer: stored.receiverAuthorizer }, ctx.keys);
+    if (!check.ok) return check;
+    facts = { payer: stored.authority, session };
   }
 
   const { value: valid } = await ctx.rpc.isBlockhashValid(blockhash(tx.blockhash), { commitment: "confirmed" }).send();
@@ -117,6 +142,26 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
   const simulated = await simulate(ctx, tx, funding);
   if (!simulated.ok) return simulated;
   return { ok: true, type: elapsed.type, tx, ...facts };
+}
+
+/**
+ * The session an entry names, as the chain stores it, once its terms are known to match the requirements: what a
+ * top-up and a close sent through `/settle` read before any other check. `action` words the refusal when the entry
+ * names no session.
+ */
+async function loadMatchingSession(
+  ctx: FacilitatorContext,
+  requirements: ElapsedRequirements,
+  action: "top-up" | "close",
+): Promise<Check<{ readonly session: Address; readonly stored: Session }>> {
+  if (!requirements.extra.session) return refuse("invalid_payment_requirements", `a ${action} names its session`);
+  const session = address(requirements.extra.session);
+  const stored = await fetchMaybeSession(ctx.rpc, session, { commitment: "confirmed" });
+  if (!stored.exists) return refuse("unknown_session", "no such session");
+  if (!sessionMatches(stored.data, sellerTermsOf(requirements))) {
+    return refuse("invalid_terms", "the session's terms differ from the requirements");
+  }
+  return { ok: true, value: { session, stored: stored.data } };
 }
 
 /**
@@ -138,7 +183,23 @@ async function simulate(ctx: FacilitatorContext, tx: InspectedTransaction, fundi
     .send();
   if (value.err) {
     const last = value.logs?.at(-1) ?? "";
-    return refuse("simulation_failed", `${json(value.err)} ${last}`.trim());
+    const message = `${json(value.err)} ${last}`.trim();
+    // Only `top_up` raises it, from `paid_until` on (spec §4.3): the chain's clock had reached the end, though the
+    // facilitator's had not.
+    if (programError(tx, value.err) === STINT_ERROR__SESSION_EXPIRED) return refuse("session_expired", message);
+    return refuse("simulation_failed", message);
   }
   return checkPayerFunding(executedInstructions(tx, value.innerInstructions), ctx.keys, funding);
+}
+
+/**
+ * The custom error code reported against one of the program's own instructions: its own error, or that of a program it
+ * invoked.
+ */
+function programError(tx: InspectedTransaction, err: TransactionError): number | undefined {
+  if (typeof err !== "object" || !("InstructionError" in err)) return undefined;
+  // Kit's RPC returns the index and the code as bigints, though `TransactionError` types them as numbers.
+  const [index, error] = err.InstructionError;
+  if (tx.instructions[Number(index)]?.programAddress !== STINT_PROGRAM_ADDRESS) return undefined;
+  return typeof error === "object" && "Custom" in error ? Number(error.Custom) : undefined;
 }

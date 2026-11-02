@@ -10,6 +10,7 @@ import {
 import { CLAIMED_EVENT_DISCRIMINATOR, parseClaimedEvent, type ClaimedEvent } from "./generated/events/claimed.js";
 import { CLOSED_EVENT_DISCRIMINATOR, parseClosedEvent, type ClosedEvent } from "./generated/events/closed.js";
 import { OPENED_EVENT_DISCRIMINATOR, parseOpenedEvent, type OpenedEvent } from "./generated/events/opened.js";
+import { TOPPED_UP_EVENT_DISCRIMINATOR, parseToppedUpEvent, type ToppedUpEvent } from "./generated/events/toppedUp.js";
 import { STINT_PROGRAM_ADDRESS } from "./generated/programs/stint.js";
 
 /** The session PDA: `["session", authority, seed]`, the seed as little-endian bytes (spec §4.1). */
@@ -67,6 +68,11 @@ export function findClosedEvent(instructions: Iterable<ProgramInstruction>): Clo
 export function findClaimedEvent(instructions: Iterable<ProgramInstruction>): ClaimedEvent | undefined {
   const payload = eventPayloads(instructions).find((data) => containsBytes(data, CLAIMED_EVENT_DISCRIMINATOR, 0));
   return payload && parseClaimedEvent(payload);
+}
+
+export function findToppedUpEvent(instructions: Iterable<ProgramInstruction>): ToppedUpEvent | undefined {
+  const payload = eventPayloads(instructions).find((data) => containsBytes(data, TOPPED_UP_EVENT_DISCRIMINATOR, 0));
+  return payload && parseToppedUpEvent(payload);
 }
 
 interface Terms {

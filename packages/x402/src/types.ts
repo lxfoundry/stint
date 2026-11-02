@@ -94,12 +94,18 @@ export interface OpenPayload {
   readonly session: string;
 }
 
+/** A top-up's payload: the session it extends is `accepted.extra.session` (spec §5.3). */
+export interface TopUpPayload {
+  readonly type: "topUp";
+  readonly transaction: string;
+}
+
 export interface ClosePayload {
   readonly type: "close";
   readonly transaction: string;
 }
 
-export type ElapsedPayload = OpenPayload | ClosePayload;
+export type ElapsedPayload = OpenPayload | TopUpPayload | ClosePayload;
 
 /** Refusal reasons (spec §5.4). */
 export type InvalidReason =

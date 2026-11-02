@@ -15,15 +15,16 @@ Brand assets and usage rules: [`brand/`](brand/README.md).
 
 ## Status
 
-Work in progress. Working today: the Solana program, deployed on devnet (`open`, `claim`, and `close`, which pays
-the seller for the time used, or for the whole paid time once it has run out, and refunds the rest); the x402
-`elapsed` scheme; the facilitator with its sweeper, the gate with its timers, the client library, an MCP server
+Work in progress. Working today: the Solana program, deployed on devnet (`open`, `top_up`, `claim`, and `close`,
+which pays the seller for the time used, or for the whole paid time once it has run out, and refunds the rest); the
+x402 `elapsed` scheme; the facilitator with its sweeper, the gate with its timers, the client library, an MCP server
 and an example agent.
 A session ends by itself: the gate drops its connection with `4402` when the paid time runs out, closes a session
 that nobody connects to, and the sweeper closes an expired session that nobody closed, if it names the
-facilitator's own rent payer. Seven of the 35 end-to-end scenarios of the
+facilitator's own rent payer. A buyer can top up a session before its paid time runs out, which moves its end; a
+session whose paid time has run out cannot be extended. Nine of the 35 end-to-end scenarios of the
 [specification](docs/specs/stint-system.md) (section 12.7) pass on a local network and on devnet, and the run
-report lists the other 28 as pending. Not built yet: top-ups, fallback closes, refusals of bad payments and
+report lists the other 26 as pending. Not built yet: fallback closes, refusals of bad payments and
 settlement records, and resilience across restarts.
 The [plans](docs/plans/README.md) list the stages that remain.
 
@@ -113,8 +114,8 @@ committed. Back it up.
 
 On devnet the program is `5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr`, its upgrade authority is
 `3DjL1cy8rLGXbNrHRDHUrUk1RuEsxSLGybL6kMY1oWgZ`, and `scripts/verify-deployment.sh` confirmed that its bytes are
-`target/verifiable/stint.so` as `anchor build --verifiable` built it: 188,200 bytes, sha256
-`2ee79906c464eaed503894cb59244984c137239d703773fdd87a03643fcbc8a9`. An upgrade changes the hash.
+`target/verifiable/stint.so` as `anchor build --verifiable` built it: 197,624 bytes, sha256
+`0412176d9fae34018d7284995aced3c1e502780a22f026ebd1dcbae7b6d38c0a`. An upgrade changes the hash.
 ## Running the scenarios on devnet
 
 `pnpm e2e:devnet` runs the end-to-end scenarios against devnet, with the program deployed by
@@ -140,7 +141,7 @@ least 0.5 SOL from a devnet faucet and 5 USDC from Circle's (Solana Devnet). It 
 watch: it plays no part in any scenario, and the fees that runs spend are the only thing that does not
 come back to it.
 
-Scenarios 1, 2, 3, 9, 16, 22 and 26 pass on devnet.
+Scenarios 1, 2, 3, 4, 9, 16, 22, 26 and 34 pass on devnet.
 
 A run checks that the endpoint is devnet and that the program is deployed, then cleans up: it closes
 every session that the seed's keys have open and returns what they hold to the funding key. On a first

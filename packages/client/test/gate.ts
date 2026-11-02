@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { generateKeyPairSigner, type Address } from "@solana/kit";
 import { CloseKind, type ClosedEvent, type Session } from "@lxfoundry/stint-program-client";
 import { createGate, type Gate } from "@lxfoundry/stint-gate";
-import { USDC_DEVNET, type PaymentPayload } from "@lxfoundry/stint-x402";
+import { USDC_DEVNET, type PaymentPayload, type VerifyResponse } from "@lxfoundry/stint-x402";
 import type { WebSocket } from "ws";
 
 export interface TestGate {
@@ -13,6 +13,8 @@ export interface TestGate {
   readonly escaped: unknown[];
   /** While set, the chain cannot return the `Closed` event of a confirmed close. */
   hideClosedEvent: boolean;
+  /** What the facilitator answers `/verify` with. Default `{ isValid: true }`. */
+  verifyAnswer: VerifyResponse;
   stop(): Promise<void>;
 }
 
@@ -50,7 +52,7 @@ export async function startTestGate(buyer: Address, onAttach: (socket: WebSocket
         extensions: [],
         signers: {},
       }),
-      verify: async () => ({ isValid: true }),
+      verify: async () => testGate.verifyAnswer,
       settle: async (payload) => {
         payments.push(payload);
         return { success: true, transaction: "sig", network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" };
@@ -103,6 +105,7 @@ export async function startTestGate(buyer: Address, onAttach: (socket: WebSocket
     payments,
     escaped,
     hideClosedEvent: false,
+    verifyAnswer: { isValid: true },
     stop: async () => {
       await gate.close();
       server.closeAllConnections();

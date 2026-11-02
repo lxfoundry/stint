@@ -3,17 +3,19 @@ import {
   HEADERS,
   X402_VERSION,
   buildOpenTransaction,
+  buildTopUpTransaction,
   createSessionToken,
   decodePaymentRequiredHeader,
   encodePaymentSignatureHeader,
   readElapsedRequirements,
+  type ElapsedRequirements,
   type PaymentPayload,
   type PaymentRequired,
   type SessionStatus,
   type TokenPurpose,
 } from "@lxfoundry/stint-x402";
 import { WebSocket } from "ws";
-import { checkOffer, type Policy } from "./policy.js";
+import { checkOffer, checkTopUp, type Policy } from "./policy.js";
 
 export class StintError extends Error {
   constructor(
@@ -33,15 +35,28 @@ export interface CloseReceipt {
   readonly transaction: string;
 }
 
+/** What a top-up bought. */
+export interface TopUpReceipt {
+  /** The session's new end, in Unix seconds. */
+  readonly paidUntil: number;
+  /** What the top-up cost, in base units. */
+  readonly cost: bigint;
+}
+
 export interface StintSession {
   readonly id: Address;
   readonly gateUrl: string;
-  /** Unix seconds. */
+  /** Unix seconds: the end of the paid time, moved by each top-up made through this session. */
   readonly paidUntil: number;
   readonly wsUrl: string;
-  /** The deposit, in base units. */
+  /** Everything the session holds through this client, in base units: the opening deposit and each top-up. */
   readonly cost: bigint;
   connect(): Promise<WebSocket>;
+  /**
+   * Buys `seconds` more paid time (spec §9.4). The gate's offer is checked against the policy and against the terms the
+   * session opened with before anything is signed. A session whose paid time has run out cannot be extended.
+   */
+  topUp(options: { readonly seconds: number }): Promise<TopUpReceipt>;
   /** The status the gate reports from the chain (spec §7.1): estimates use the gate's clock. */
   status(): Promise<SessionStatus>;
   close(): Promise<CloseReceipt>;
@@ -81,16 +96,60 @@ export function createStintClient(options: ClientOptions): StintClient {
     return ledger.filter((entry) => entry.at > since).reduce((sum, entry) => sum + entry.amount, 0n);
   };
 
-  function sessionFrom(gateUrl: string, opened: { session: string; paidUntil: number; wsUrl: string }, cost: bigint): StintSession {
+  /**
+   * Locks `amount` in the period budget, and returns what unlocks it. It is called in the same synchronous step as the
+   * policy check, so that concurrent payments cannot both pass against the same locked amount. Once signed, a payment may
+   * land whatever the answer, so the amount stays locked unless the gate refused the payment before settlement.
+   */
+  function reserve(amount: bigint): () => void {
+    const entry = { at: now(), amount };
+    ledger.push(entry);
+    return () => {
+      const index = ledger.indexOf(entry);
+      if (index >= 0) ledger.splice(index, 1);
+    };
+  }
+
+  /** The offers the gate answers a first request with: a 402 (spec §5.1). */
+  async function offersFrom(endpoint: string): Promise<PaymentRequired> {
+    const first = await fetch(endpoint, { method: "POST" });
+    if (first.status !== 402) {
+      const body = await readBody(first);
+      throw new StintError(`Expected 402 from ${endpoint}, got ${first.status}: ${describeBody(body)}`, first.status, body);
+    }
+    const header = first.headers.get(HEADERS.paymentRequired);
+    const required = (header ? decodePaymentRequiredHeader(header) : await first.json()) as PaymentRequired;
+    if (required.x402Version !== X402_VERSION) throw new StintError(`x402Version ${required.x402Version} is not supported`);
+    return required;
+  }
+
+  /** Sends a payment, its `PAYMENT-SIGNATURE` header already encoded, and returns the gate's answer. */
+  async function send(endpoint: string, signature: string): Promise<{ status: number; body: unknown }> {
+    const response = await fetch(endpoint, { method: "POST", headers: { [HEADERS.paymentSignature]: signature } });
+    return { status: response.status, body: await readBody(response) };
+  }
+
+  function sessionFrom(
+    gateUrl: string,
+    opened: { session: string; paidUntil: number; wsUrl: string },
+    offer: ElapsedRequirements,
+    deposit: bigint,
+  ): StintSession {
     const audience = new URL(gateUrl).origin;
     const token = (purpose: TokenPurpose) => createSessionToken(options.signer, { session: opened.session, audience, purpose });
     let closed = false;
+    let paidUntil = opened.paidUntil;
+    let cost = deposit;
     const session: StintSession = {
       id: address(opened.session),
       gateUrl,
-      paidUntil: opened.paidUntil,
+      get paidUntil() {
+        return paidUntil;
+      },
       wsUrl: opened.wsUrl,
-      cost,
+      get cost() {
+        return cost;
+      },
       async connect() {
         const socket = new WebSocket(opened.wsUrl, { headers: { authorization: `Bearer ${await token("connect")}` } });
         await new Promise<void>((resolve, reject) => {
@@ -101,6 +160,61 @@ export function createStintClient(options: ClientOptions): StintClient {
           socket.once("error", reject);
         });
         return socket;
+      },
+      async topUp({ seconds }) {
+        if (closed) throw new StintError("The session is closed");
+        const endpoint = `${gateUrl}/sessions/${opened.session}/top-up?seconds=${seconds}`;
+        const required = await offersFrom(endpoint);
+        // The entry is echoed exactly as received: the object decoded from the gate's response.
+        const entry = required.accepts
+          .map(readElapsedRequirements)
+          .find((candidate) => candidate?.extra.action === "topUp" && candidate.extra.seconds === seconds);
+        // Once its end timer has fired, the gate answers with offers for a new session only, and says why.
+        if (!entry) {
+          const expired = required.error === "session_expired";
+          throw new StintError(expired ? "The session's paid time has run out: it cannot be extended" : `No top-up offer for ${seconds} s`, 402, required);
+        }
+        const check = checkTopUp(options.policy, entry, seconds, {
+          opened: offer,
+          session: session.id,
+          sessionTotal: cost,
+          locked: locked(),
+          signer: options.signer.address,
+        });
+        if (!check.ok) throw new StintError(`Policy refuses the top-up: ${check.reason}`);
+        // Reserved in the same synchronous step as the check, against the period budget and maxPerSession alike.
+        const release = reserve(check.amount);
+        cost += check.amount;
+        const undo = () => {
+          release();
+          cost -= check.amount;
+        };
+        let signature: string;
+        try {
+          const transaction = await buildTopUpTransaction({ requirements: entry, authority: options.signer, decimals: check.decimals });
+          const payload: PaymentPayload = {
+            x402Version: X402_VERSION,
+            resource: required.resource,
+            accepted: entry,
+            payload: { type: "topUp", transaction },
+          };
+          signature = encodePaymentSignatureHeader(payload);
+        } catch (error) {
+          undo(); // nothing was sent
+          throw error;
+        }
+        const answer = await send(endpoint, signature);
+        // Refused before settlement, so nothing was charged: the route answers 404 before it looks at a payment.
+        if (answer.status === 400 || answer.status === 402 || answer.status === 404) {
+          undo();
+          throw new StintError(`The gate refused the top-up: ${describeBody(answer.body)}`, answer.status, answer.body);
+        }
+        if (answer.status !== 200) {
+          throw new StintError(`The top-up is not confirmed (HTTP ${answer.status}); the payment may still land`, answer.status, answer.body);
+        }
+        const toppedUp = answer.body as { paidUntil: number };
+        paidUntil = Math.max(paidUntil, toppedUp.paidUntil);
+        return { paidUntil: toppedUp.paidUntil, cost: check.amount };
       },
       async status() {
         const response = await fetch(`${gateUrl}/sessions/${opened.session}`);
@@ -137,14 +251,7 @@ export function createStintClient(options: ClientOptions): StintClient {
     async open(url, { seconds } = {}) {
       const gateUrl = url.replace(/\/+$/, "");
       const endpoint = `${gateUrl}/sessions${seconds === undefined ? "" : `?seconds=${seconds}`}`;
-      const first = await fetch(endpoint, { method: "POST" });
-      if (first.status !== 402) {
-        const body = await readBody(first);
-        throw new StintError(`Expected 402 from ${endpoint}, got ${first.status}: ${describeBody(body)}`, first.status, body);
-      }
-      const header = first.headers.get(HEADERS.paymentRequired);
-      const required = (header ? decodePaymentRequiredHeader(header) : await first.json()) as PaymentRequired;
-      if (required.x402Version !== X402_VERSION) throw new StintError(`x402Version ${required.x402Version} is not supported`);
+      const required = await offersFrom(endpoint);
 
       // The entry is echoed exactly as received: the object decoded from the gate's response.
       const offer = required.accepts
@@ -154,15 +261,9 @@ export function createStintClient(options: ClientOptions): StintClient {
       const check = checkOffer(options.policy, offer, seconds ?? offer.extra.seconds, locked(), options.signer.address);
       if (!check.ok) throw new StintError(`Policy refuses the offer: ${check.reason}`);
 
-      // Reserved in the same synchronous step as the check, so that concurrent opens cannot
-      // both pass against the same locked amount. Once signed, the payment may land whatever
-      // the answer, so the entry stays unless the gate refused it before settlement.
-      const entry = { at: now(), amount: check.amount };
-      ledger.push(entry);
-      const release = () => {
-        const index = ledger.indexOf(entry);
-        if (index >= 0) ledger.splice(index, 1);
-      };
+      // Reserved in the same synchronous step as the check, so that concurrent opens cannot both pass against the same
+      // locked amount.
+      const release = reserve(check.amount);
       let built: Awaited<ReturnType<typeof buildOpenTransaction>>;
       let signature: string;
       try {
@@ -178,21 +279,17 @@ export function createStintClient(options: ClientOptions): StintClient {
         release(); // nothing was sent
         throw error;
       }
-      const second = await fetch(endpoint, {
-        method: "POST",
-        headers: { [HEADERS.paymentSignature]: signature },
-      });
-      const body = await readBody(second);
-      if (second.status === 402 || second.status === 400) {
+      const answer = await send(endpoint, signature);
+      if (answer.status === 402 || answer.status === 400) {
         release(); // refused before settlement: nothing was charged
-        throw new StintError(`The gate refused the payment: ${describeBody(body)}`, second.status, body);
+        throw new StintError(`The gate refused the payment: ${describeBody(answer.body)}`, answer.status, answer.body);
       }
-      if (second.status !== 201) {
-        throw new StintError(`The open is not confirmed (HTTP ${second.status}); the payment may still land`, second.status, body);
+      if (answer.status !== 201) {
+        throw new StintError(`The open is not confirmed (HTTP ${answer.status}); the payment may still land`, answer.status, answer.body);
       }
-      const opened = body as { session: string; paidUntil: number; wsUrl: string };
-      if (opened.session !== built.session) throw new StintError("The gate reported another session", 201, body);
-      return sessionFrom(gateUrl, opened, check.amount);
+      const opened = answer.body as { session: string; paidUntil: number; wsUrl: string };
+      if (opened.session !== built.session) throw new StintError("The gate reported another session", 201, answer.body);
+      return sessionFrom(gateUrl, opened, offer, check.amount);
     },
   };
 }

@@ -19,6 +19,8 @@ export interface OfferInput {
 
 export type CloseRequirementsInput = Omit<OfferInput, "seconds"> & { readonly session: Address };
 
+export type TopUpOfferInput = OfferInput & { readonly session: Address };
+
 /** The exact deposit for a duration: `rate × seconds` (spec §5.1). */
 export function amountFor(rate: bigint, seconds: number): bigint {
   return rate * BigInt(seconds);
@@ -58,6 +60,11 @@ export function buildOpenOffer(input: OfferInput): ElapsedRequirements {
   return build(input, input.seconds, amountFor(input.terms.rate, input.seconds), "open");
 }
 
+/** One `accepts` entry for a top-up of `seconds` on `session` (spec §5.1): the deposit is `rate × seconds`, as an open's is. */
+export function buildTopUpOffer(input: TopUpOfferInput): ElapsedRequirements {
+  return build(input, input.seconds, amountFor(input.terms.rate, input.seconds), "topUp", input.session);
+}
+
 /** The requirements a gate sends with a close: nothing deposited (spec §5.5). */
 export function buildCloseRequirements(input: CloseRequirementsInput): ElapsedRequirements {
   return build(input, 0, 0n, "close", input.session);
@@ -70,6 +77,18 @@ export function checkOpenDuration(terms: Terms, seconds: number): DurationCheck 
   return Number.isInteger(seconds) && seconds >= terms.minSeconds && seconds <= terms.maxSeconds
     ? { ok: true }
     : { ok: false, minSeconds: terms.minSeconds, maxSeconds: terms.maxSeconds };
+}
+
+/**
+ * Valid top-up durations: whole seconds from 1 to the most that keeps `deposited + rate × seconds` within
+ * `rate × maxSeconds`, that is `maxSeconds` − ⌈`deposited` ÷ `rate`⌉; `minSeconds` does not apply (spec §5.2). A refusal
+ * states the bounds, and its `maxSeconds` is 0 when less than a whole second is left.
+ */
+export function checkTopUpDuration(terms: Terms, deposited: bigint, seconds: number): DurationCheck {
+  // The seconds the deposit reaches into, a part second counting as a whole one.
+  const reached = (deposited + terms.rate - 1n) / terms.rate;
+  const room = BigInt(terms.maxSeconds) > reached ? Number(BigInt(terms.maxSeconds) - reached) : 0;
+  return Number.isInteger(seconds) && seconds >= 1 && seconds <= room ? { ok: true } : { ok: false, minSeconds: 1, maxSeconds: room };
 }
 
 const isU64String = (value: unknown) => typeof value === "string" && /^(0|[1-9][0-9]{0,19})$/.test(value);

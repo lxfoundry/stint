@@ -16,7 +16,7 @@ describe("wire format", () => {
     expect(decodePaymentRequiredHeader(encodePaymentRequiredHeader(required))).toEqual(required);
   });
 
-  it("reads open and close payloads, and nothing else", () => {
+  it("reads open, top-up and close payloads, and nothing else", () => {
     const base = { x402Version: 2, accepted: buildOpenOffer(input) } as const;
     const open: PaymentPayload = { ...base, payload: { type: "open", transaction: "AQ==", session: "x" } };
     expect(readElapsedPayload(open)).toEqual({ type: "open", transaction: "AQ==", session: "x" });
@@ -25,7 +25,9 @@ describe("wire format", () => {
       transaction: "AQ==",
     });
     expect(readElapsedPayload({ ...base, payload: { type: "open", transaction: 1 } })).toBeUndefined();
-    expect(readElapsedPayload({ ...base, payload: { type: "topUp", transaction: "AQ==" } })).toBeUndefined();
+    expect(readElapsedPayload({ ...base, payload: { type: "topUp", transaction: "AQ==" } })).toEqual({ type: "topUp", transaction: "AQ==" });
+    expect(readElapsedPayload({ ...base, payload: { type: "topUp", transaction: "" } })).toBeUndefined();
+    expect(readElapsedPayload({ ...base, payload: { type: "refund", transaction: "AQ==" } })).toBeUndefined();
   });
 
   it("returns undefined, rather than throwing, for a payment payload of the wrong shape", () => {
