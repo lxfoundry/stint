@@ -1244,7 +1244,8 @@ cannot be reached, answers `GET closeUrl` with anything but the session's fields
 unknown_session`, or does not close the session. A request with no answer is given up: a read
 after a few seconds, a request that sends a close after a longer limit, past the facilitator's
 wait for the close to confirm; that close may still land. A step whose close may still land (a
-`202` past `closeWaitSeconds`, or `settlement_pending` from the facilitator) passes its
+`202` past `closeWaitSeconds`, `settlement_pending` from the facilitator, or the client's own close
+that is still pending, or whose sending or confirmation could not be read in time) passes its
 signature on. The check finds the session closed when the gate's status or `GET closeUrl`
 answers `404 unknown_session`: the latest close passed on is then the receipt, and with none
 the client reports the session closed by another party. When no step closes the session, the
@@ -1256,9 +1257,11 @@ closed with its own read of the account: if the chain still shows the session, t
 on; if the read fails, that word stands. When it finds the session closed with closes of its own
 passed on, it looks the close up on the chain: the one it matches is the receipt, with its
 amounts; a close that matches none of them was another party's; while the chain shows no close,
-or the lookup cannot be read, the latest close passed on is the receipt. Step 3 needs the
-authority to hold the fee of one signature on top of a rent-exempt balance, since a fee payer
-may not drop below it.
+or the lookup cannot be read, the latest close passed on is the receipt. The client's own
+requests to its node have the same time limits as its other requests: a read is given up after a
+few seconds, and its own close, from its sending to its confirmation, after the longer limit.
+Step 3 needs the authority to hold the fee of one signature on top of a rent-exempt balance,
+since a fee payer may not drop below it.
 
 ### 9.4 API
 

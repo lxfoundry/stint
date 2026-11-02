@@ -1,6 +1,10 @@
 import {
   address,
   fetchEncodedAccount,
+  getBase64Encoder,
+  getSignatureFromTransaction,
+  getTransactionDecoder,
+  isSolanaError,
   type Address,
   type Base64EncodedWireTransaction,
   type KeyPairSigner,
@@ -106,21 +110,24 @@ export interface ClientOptions {
   /** Milliseconds between reads of the gate's status while its close is pending (spec §9.3). Default 1,000. */
   readonly closePollMs?: number;
   /**
-   * Milliseconds after which a read of the close fallback chain (the gate's status, `GET closeUrl`) that has no answer
-   * is given up (spec §9.3). Default 10,000. A whole number from 1 to 2,147,483,647.
+   * Milliseconds after which a read of the close fallback chain that has no answer is given up (spec §9.3): the gate's
+   * status, `GET closeUrl`, and the client's reads of its own node, `rpc`. Default 10,000. A whole number from 1 to
+   * 2,147,483,647.
    */
   readonly requestTimeoutMs?: number;
   /**
-   * Milliseconds after which a request of the close fallback chain that sends a close (the gate's close, `POST closeUrl`)
-   * and has no answer is given up (spec §9.3); that close may still land. Default 60,000: longer than the facilitator's
-   * wait for a close to confirm before it answers (30 s by default). A whole number from 1 to 2,147,483,647.
+   * Milliseconds after which a request of the close fallback chain that sends a close and has no answer is given up
+   * (spec §9.3); that close may still land. It covers the gate's close, `POST closeUrl`, and the client's own close
+   * through `rpc`, from its sending to its confirmation. Default 60,000: longer than the facilitator's wait for a close to
+   * confirm before it answers (30 s by default). A whole number from 1 to 2,147,483,647.
    */
   readonly closeRequestTimeoutMs?: number;
   /**
    * A node, for the last step of the close fallback chain: a close the client sends to the chain itself, its fee paid by
    * the signer, which must hold SOL for it (spec §9.1, §9.3). With one, the client checks with its own read of the
    * session account a gate's or a facilitator's word that the session is closed. Without one, a session that neither the
-   * gate nor the facilitator can close runs to the end of its paid time.
+   * gate nor the facilitator can close runs to the end of its paid time. The client's requests to it have the same time
+   * limits as its other requests (`requestTimeoutMs`, `closeRequestTimeoutMs`), whatever the node's transport does.
    */
   readonly rpc?: Rpc<SolanaRpcApi>;
 }
@@ -156,13 +163,40 @@ const EVENT_READ_RETRY = { attempts: 5, delayMs: 200 };
 
 /**
  * The session at `session`, read at `confirmed`, or undefined if no account of the program is there: anyone can send
- * lamports to the address of a closed session (S12), which leaves a wallet there, not a session.
+ * lamports to the address of a closed session (S12), which leaves a wallet there, not a session. The read is given up
+ * when `limit.abortSignal` fires.
  */
-async function readOwnSession(rpc: Rpc<SolanaRpcApi>, session: Address): Promise<Session | undefined> {
-  const account = await fetchEncodedAccount(rpc, session, { commitment: "confirmed" });
+async function readOwnSession(rpc: Rpc<SolanaRpcApi>, session: Address, limit: { readonly abortSignal: AbortSignal }): Promise<Session | undefined> {
+  const account = await fetchEncodedAccount(rpc, session, { commitment: "confirmed", ...limit });
   if (!account.exists || account.programAddress !== STINT_PROGRAM_ADDRESS) return undefined;
   return decodeSession(account).data;
 }
+
+/**
+ * What `promise` gives, or undefined if it has not settled within `ms`: for the scheme package's helpers, which make
+ * several requests to the node and take no abort signal. A request still running then is left to finish, unread.
+ */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), Math.max(0, ms));
+  });
+  try {
+    return await Promise.race([promise, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The signature of a base64 wire transaction: its fee payer's, which the chain knows the transaction by. */
+const signatureOf = (wire: string): string => getSignatureFromTransaction(getTransactionDecoder().decode(getBase64Encoder().encode(wire)));
+
+/**
+ * Whether the node answered with a JSON-RPC error, which `@solana/kit` reports as a `SolanaError` carrying the error's
+ * own code, negative in JSON-RPC: a transaction refused so was not taken. Any other failure of a request (no answer in
+ * time, a connection that drops, an HTTP error) leaves open whether the node took it.
+ */
+const refusedByNode = (error: unknown): boolean => isSolanaError(error) && error.context.__code < 0;
 
 /** A close's amounts as a receipt reports them, from its `Closed` event: `paid` is all the receiver was paid for the session. */
 const amountsOf = (event: ClosedEvent) => ({ paid: event.claimed + event.owed + event.redirected, refunded: event.refunded });
@@ -210,6 +244,8 @@ export function createStintClient(options: ClientOptions): StintClient {
   const closePollMs = options.closePollMs ?? DEFAULT_CLOSE_POLL_MS;
   const requestTimeoutMs = timeLimitMs("requestTimeoutMs", options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
   const closeRequestTimeoutMs = timeLimitMs("closeRequestTimeoutMs", options.closeRequestTimeoutMs, DEFAULT_CLOSE_REQUEST_TIMEOUT_MS);
+  /** A read of the client's node, given up after `requestTimeoutMs`: the default transport of `@solana/kit` never gives up. */
+  const readLimit = () => ({ abortSignal: AbortSignal.timeout(requestTimeoutMs) });
   const ledger: { readonly at: number; readonly amount: bigint }[] = [];
   const locked = () => {
     const since = now() - options.policy.budget.periodSeconds * 1000;
@@ -289,11 +325,12 @@ export function createStintClient(options: ClientOptions): StintClient {
 
     /**
      * Whether the client's own read still finds the session (spec §9.3), to check a gate's or a facilitator's word that it
-     * is closed. False without an `rpc`, and when the read fails: the seller's word then stands.
+     * is closed. False without an `rpc`, and when the read fails or has no answer within `requestTimeoutMs`: the seller's
+     * word then stands.
      */
     async function stillOpen(): Promise<boolean> {
       if (!options.rpc) return false;
-      return readOwnSession(options.rpc, address(opened.session)).then(
+      return readOwnSession(options.rpc, address(opened.session), readLimit()).then(
         (stored) => stored !== undefined,
         () => false,
       );
@@ -302,13 +339,13 @@ export function createStintClient(options: ClientOptions): StintClient {
     /**
      * The session is closed. A close passed on by an earlier step is the receipt: with the client's `rpc`, the one the
      * chain shows landed (`findClose`), with its amounts; without it, while the chain shows no close yet, or when the
-     * lookup cannot be read, the latest, without amounts. With none passed on, or when the close that landed is none of
-     * them, another party closed the session: that is reported, and the session counts as closed.
+     * lookup cannot be read within `requestTimeoutMs`, the latest, without amounts. With none passed on, or when the close
+     * that landed is none of them, another party closed the session: that is reported, and the session counts as closed.
      */
     async function alreadyClosed(pending: readonly CloseReceipt[]): Promise<CloseReceipt> {
       let mine = pending.at(-1);
       if (options.rpc && mine) {
-        const landed = await findClose(options.rpc, address(opened.session)).catch(() => undefined);
+        const landed = await within(findClose(options.rpc, address(opened.session)), requestTimeoutMs).catch(() => undefined);
         if (landed) {
           const match = pending.find((close) => close.transaction === landed.signature);
           mine = match && { ...match, ...amountsOf(landed.event) };
@@ -438,26 +475,31 @@ export function createStintClient(options: ClientOptions): StintClient {
      * Step 3: a close of the client's own, sent with its `rpc`, its fee paid by the signer (spec §9.1, §9.3). The session
      * account is read first: no session of the program at the address means it is closed, which ends the chain. The
      * signer must hold the fee on top of a rent-exempt balance. The close is a `Standard` close by the authority, built
-     * from the stored fields, and nothing else. One that does not confirm moves the chain on; one still pending is passed
-     * on, and so is one sent whose confirmation cannot be read, since it may still land. A confirmed close is the receipt
-     * even when its `Closed` event cannot be read: it then has no amounts.
+     * from the stored fields, and nothing else. Each read is given up after `requestTimeoutMs`, which moves the chain on
+     * before anything is sent; the send and the wait for its confirmation, after `closeRequestTimeoutMs` together.
+     *
+     * The close is named by its signature, the fee payer's, known before the send. One the node refuses with an error
+     * answer was not taken: the close failed. One that does not confirm moves the chain on; one still pending is passed
+     * on, and so is one the node may have taken whose sending or confirmation cannot be read in time, since it may still
+     * land. A confirmed close is the receipt even when its `Closed` event cannot be read: it then has no amounts.
      */
     async function closeOnChain(): Promise<CloseStep> {
       const rpc = options.rpc;
       if (!rpc) return { kind: "next", reason: "the client has no rpc to send a close of its own" };
+      /** A close the node may have taken. */
       let signature: string | undefined;
       try {
-        const stored = await readOwnSession(rpc, address(opened.session));
+        const stored = await readOwnSession(rpc, address(opened.session), readLimit());
         if (!stored) return { kind: "gone", reason: "the chain holds no session at its address" };
-        const { value: lamports } = await rpc.getBalance(options.signer.address, { commitment: "confirmed" }).send();
-        const needed = SIGNATURE_FEE_LAMPORTS + (await rpc.getMinimumBalanceForRentExemption(0n, { commitment: "confirmed" }).send());
+        const { value: lamports } = await rpc.getBalance(options.signer.address, { commitment: "confirmed" }).send(readLimit());
+        const needed = SIGNATURE_FEE_LAMPORTS + (await rpc.getMinimumBalanceForRentExemption(0n, { commitment: "confirmed" }).send(readLimit()));
         if (lamports < needed) {
           return {
             kind: "next",
             reason: `the signer holds ${lamports} lamports, less than the fee of a close of its own on top of a rent-exempt balance (${needed})`,
           };
         }
-        const { value: lifetime } = await rpc.getLatestBlockhash({ commitment: "confirmed" }).send();
+        const { value: lifetime } = await rpc.getLatestBlockhash({ commitment: "confirmed" }).send(readLimit());
         const transaction = await buildCloseTransaction({
           session: address(opened.session),
           stored,
@@ -467,22 +509,33 @@ export function createStintClient(options: ClientOptions): StintClient {
           lifetime,
           kind: CloseKind.Standard,
         });
-        signature = await rpc
-          .sendTransaction(transaction as Base64EncodedWireTransaction, { encoding: "base64", preflightCommitment: "confirmed" })
-          .send();
-        const confirmation = await waitForConfirmation(rpc, signature, lifetime.blockhash);
+        // The send and the wait for its confirmation share one time limit.
+        const giveUpAt = Date.now() + closeRequestTimeoutMs;
+        signature = signatureOf(transaction);
+        try {
+          await rpc
+            .sendTransaction(transaction as Base64EncodedWireTransaction, { encoding: "base64", preflightCommitment: "confirmed" })
+            .send({ abortSignal: AbortSignal.timeout(closeRequestTimeoutMs) });
+        } catch (error) {
+          // An error answer: the node refused the close without taking it, so it cannot land.
+          if (refusedByNode(error)) return { kind: "next", reason: `the client's own close failed (${describeError(error)})` };
+          throw error;
+        }
+        const confirmation =
+          (await within(waitForConfirmation(rpc, signature, lifetime.blockhash), giveUpAt - Date.now())) ?? `not confirmed within ${closeRequestTimeoutMs} ms`;
         if (confirmation !== "confirmed") {
-          const still = confirmation === "pending" ? { pending: { transaction: signature, via: "unilateral" as const } } : {};
+          const still = confirmation === "expired" ? {} : { pending: { transaction: signature, via: "unilateral" as const } };
           return { kind: "next", reason: `the client's own close ${signature} is ${confirmation}`, ...still };
         }
-        const event = await fetchClosedEvent(rpc, signature, EVENT_READ_RETRY).catch(() => undefined);
+        const event = await within(fetchClosedEvent(rpc, signature, EVENT_READ_RETRY), requestTimeoutMs).catch(() => undefined);
         return { kind: "closed", receipt: { ...(event ? amountsOf(event) : {}), transaction: signature, via: "unilateral" } };
       } catch (error) {
-        // A close that was sent and did not fail on the chain may still land: its signature is passed on.
+        // A close the node may have taken, and that did not fail on the chain, may still land: its signature is passed on.
         if (signature && !(error instanceof TransactionFailedError)) {
           const reason = `the client's own close ${signature} was sent, but its confirmation could not be read (${describeError(error)})`;
           return { kind: "next", reason, pending: { transaction: signature, via: "unilateral" } };
         }
+        if (timedOut(error)) return { kind: "next", reason: `the client sent no close of its own: its node did not answer within ${requestTimeoutMs} ms` };
         return { kind: "next", reason: `the client's own close failed (${describeError(error)})` };
       }
     }
