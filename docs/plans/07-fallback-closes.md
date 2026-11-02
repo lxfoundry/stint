@@ -13,7 +13,7 @@ session's authority, and `POST /close` verifies it, has Kora sign it as fee paye
 wire of `closeUrl`: the body of `GET /close`, a validating reader for it, and a builder that turns it into a signed
 close. The facilitator gains one module, `close.ts`, which serves `GET /close` (its blockhash cached for a few seconds)
 and verifies and settles a sponsored close by the checks of spec section 5.4 (sponsored row), reusing the close checks,
-the simulation and the submission it already has, one close at a time per session. Its server routes both, without an API key. Scenario 15 finds
+the simulation and the submission it already has, one sponsored close at a time per session. Its server routes both, without an API key. Scenario 15 finds
 `closeUrl` in the gate's offer, as any client does, and uses nothing else to build the close.
 
 **Tech Stack:** TypeScript 7.0.2, vitest 5.0.5, `@solana/kit`, Surfpool 1.6.1, Kora 2.0.5.
@@ -61,14 +61,20 @@ Not built here:
 - **Rate limits** on `GET /close` and `POST /close`, per session and per client address (spec section 6.1), come with
   the facilitator's limits.
 - **Settlement records** (spec section 5.5, Idempotency): the same sponsored close sent again after the first has
-  landed is verified again and refused by its simulation, as a close through `/settle` is today. While a sponsored close
-  of a session is being settled, another close of that session gets its answer and is not sent (Task 2).
+  landed is verified again and refused with `unknown_session`, the session being gone (or by its simulation, on a node
+  that has not seen the first yet), as a close through `/settle` is today. While a sponsored close of a session is being
+  settled, another sponsored close of that session that passes verification gets its answer and is not sent (Task 2).
 - **One read of the `Closed` event:** `submitSettlement` reads it to report `owed + redirected`, and the sponsored close
   reads it again for the claims and the refund. Returning the event from `submitSettlement` changes `/settle`'s path and
   is a change of its own; on a node that cannot return the event, the answer takes the read's patience twice.
-- **`GET /close?session=` with the address of an account that is not a session** answers `500`: `fetchMaybeSession`
-  decodes whatever account it finds without checking the owning program, which is an open item of its own across the
-  facilitator and the gate.
+- **The owning program of a session's account** is checked by `GET /close` and the sponsored close only, which take an
+  address from anyone: elsewhere in the facilitator and in the gate, `fetchMaybeSession` decodes whatever account it
+  finds at the address, which is an open item of its own.
+- **A closed `receiver_token` is not recreated before a sponsored close**, nor before any close yet:
+  `checkCloseTransaction` allows `stint.close` alone. A sponsored close carries no API key, so its recreation is counted
+  against the key its open settled through (spec section 5.3), which needs that record and the per-key limits of
+  section 6.5; both come with scenario 27. Until then, such a close fails its simulation until someone recreates the
+  account.
 - `packages/x402/src/offer.ts` keeps its private copies of the field guards that this part adds to
   `packages/x402/src/guards.ts`; moving it onto them is a change of its own.
 
@@ -79,6 +85,10 @@ repository. Task 5 runs the devnet harness, with the person's `.env.devnet` (`ST
 `STINT_DEVNET_SEED`, and `STINT_DEVNET_SCAN_RPC_URL` if the provider refuses `getProgramAccounts`) and the funding key
 funded as `pnpm e2e:devnet funds` says. No other run of the devnet harness may use the same seed at the same time: its
 start-up closes the open sessions of the seed's keys.
+
+This part does not depend on stage 5's code, and runs before or after it. Where both change the same lines (the
+`REQUIRED` lists, the devnet scenario lists, the README), this plan states its edit as a rule, with the text at the
+start of this part as an example; its other anchors are lines that stage 5 does not change.
 
 ---
 
@@ -108,9 +118,10 @@ session into the body's `session`, and a builder that turns the body into a clos
   - `readCloseInfo(value: unknown): CloseInfo | undefined`;
   - `buildSponsoredClose(info: CloseInfo, expected: { session: Address; closer: TransactionSigner; kind?: CloseKind }):
     Promise<string>`: a base64 wire transaction closing `expected.session`, signed by `expected.closer`, its fee payer's
-    signature missing. It throws if `info` names another program, carries no session, describes another session than
-    `expected.session`, or names an authority other than `expected.closer`: the body comes from a URL in a seller's
-    offer, and the buyer signs only a close of the session it asked about.
+    signature missing. It throws if `info` names another program, names `expected.closer` as its fee payer, carries no
+    session, describes another session than `expected.session`, or names an authority other than `expected.closer`: the
+    body comes from a URL in a seller's offer, and the buyer signs only a close of the session it asked about, never as
+    its fee payer (spec S14).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -222,8 +233,10 @@ describe("the closeUrl wire (spec §6.1)", () => {
     expect(checked).toEqual({ ok: true, value: { kind: CloseKind.AtExpiry } });
   });
 
-  it("refuses to build for another program, without a session, for another session, or for another authority", async () => {
+  it("refuses to build for another program, with the closer as fee payer, without a session, for another session, or for another authority", async () => {
     await expect(buildSponsoredClose({ ...info, programId: feePayer }, { session, closer: authority })).rejects.toThrow("another program");
+    // A fee payer equal to the closer would have the buyer sign as fee payer, and pay the fee itself.
+    await expect(buildSponsoredClose({ ...info, feePayer: authority.address }, { session, closer: authority })).rejects.toThrow("fee payer");
     const { session: _, ...withoutSession } = info;
     await expect(buildSponsoredClose(withoutSession, { session, closer: authority })).rejects.toThrow("?session=");
     // A body for one of the buyer's other sessions, which would have the buyer sign a close of that one.
@@ -273,8 +286,8 @@ import { isAddressText, isBlockhashText, isRecord, isU32, isU64String } from "./
 import { buildCloseTransaction } from "./transactions.js";
 
 /**
- * A session's stored fields (spec §4.1) as `GET /close?session=` answers them: `u64` values as decimal strings, `u32`
- * values as numbers, `startedAt` in Unix seconds.
+ * A session's stored fields (spec §4.1) other than `version` and `bump`, as `GET /close?session=` answers them: `u64`
+ * values as decimal strings, `u32` values as numbers, `startedAt` in Unix seconds.
  */
 export interface StoredSessionFields {
   readonly address: string;
@@ -376,6 +389,7 @@ export async function buildSponsoredClose(
   expected: { readonly session: Address; readonly closer: TransactionSigner; readonly kind?: CloseKind },
 ): Promise<string> {
   if (info.programId !== STINT_PROGRAM_ADDRESS) throw new Error(`GET /close names another program: ${info.programId}`);
+  if (info.feePayer === expected.closer.address) throw new Error("GET /close names the closer as its fee payer");
   const stored = info.session;
   if (!stored) throw new Error("GET /close was read without ?session=: it carries no session to close");
   if (stored.address !== expected.session) throw new Error(`GET /close describes another session: ${stored.address}`);
@@ -421,10 +435,12 @@ git commit -m "Add the closeUrl wire to the scheme: GET /close's body, its reade
 The facilitator gains `close.ts`. `createCloseInfoSource` answers `GET /close`: the fee payer, the program, and a
 blockhash with its last valid block height and the current block height, all read at `confirmed` and served for
 `ttlMs` (spec section 6.1: unauthenticated requests do not each reach the node); with a session, its stored fields,
-read on each request. `verifySponsoredClose` applies spec section 5.4's sponsored row. `createSponsoredCloser` gives
-the function that answers `POST /close`: it verifies, has Kora sign, and submits through the facilitator's existing
-`submitSettlement`. It settles one close at a time per session: a close of a session whose close is being settled gets
-that close's answer and is not sent, since only one can land and each one sent costs the fee payer a fee.
+read on each request. Both read a session only from an account the program owns: the address comes from anyone, and
+another program's account decodes into whatever its bytes say. `verifySponsoredClose` applies spec section 5.4's
+sponsored row. `createSponsoredCloser` gives the function that answers `POST /close`: it verifies, has Kora sign, and
+submits through the facilitator's existing `submitSettlement`. It settles one sponsored close at a time per session: a
+sponsored close that passes verification while another close of its session is being settled gets that close's answer
+and is not sent, since only one can land and each one sent costs the fee payer a fee.
 
 The checks, in order, each with its refusal. The static ones come first, so that a transaction that fails them costs no
 read of the node:
@@ -435,7 +451,7 @@ read of the node:
 | It holds exactly one well-formed `stint.close`, which names the session and the closer | `unexpected_instruction` |
 | `checkCloseTransaction` with the closer the instruction names: payer positions, layout (`stint.close` alone), the signer set and the closer's signature | as it answers (`payer_misuse`, `unexpected_instruction`, `invalid_payload`) |
 | `kind` is `Standard` or `AtExpiry` | `invalid_terms` |
-| The session exists, at `confirmed` | `unknown_session` |
+| The session exists, at `confirmed`, in an account the program owns | `unknown_session` |
 | Its `rent_payer` is this facilitator's rent payer | `invalid_terms` |
 | The closer is the session's `authority` | `invalid_payload` |
 | The blockhash is still valid | `blockhash_expired` |
@@ -457,7 +473,7 @@ read of the node:
   - `DEFAULT_CLOSE_INFO_TTL_MS = 2_000`;
   - `createCloseInfoSource(ctx: Pick<FacilitatorContext, "rpc" | "keys">, options?: { ttlMs?: number; clock?: () =>
     number }): { read(session?: Address): Promise<CloseInfo | undefined> }`: undefined when a session was asked for and
-    none exists at its address;
+    no account of the program exists at its address;
   - `verifySponsoredClose(ctx: FacilitatorContext, transaction: unknown): Promise<Check<{ tx: InspectedTransaction;
     session: Address; payer: Address }>>`;
   - `type SponsoredCloser = (transaction: unknown) => Promise<SponsoredCloseResponse>` and
@@ -469,6 +485,9 @@ Create `apps/facilitator/test/close.test.ts`:
 
 ```ts
 import {
+  appendTransactionMessageInstructions,
+  blockhash,
+  createTransactionMessage,
   generateKeyPairSigner,
   getBase58Decoder,
   getBase64Decoder,
@@ -476,13 +495,19 @@ import {
   getBase64Encoder,
   getTransactionDecoder,
   partiallySignTransaction,
+  partiallySignTransactionMessageWithSigners,
+  pipe,
+  setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash,
   type Address,
+  type Instruction,
   type KeyPairSigner,
   type Rpc,
+  type SignatureBytes,
   type SolanaRpcApi,
 } from "@solana/kit";
 import { CloseKind, EVENT_IX_TAG, STINT_PROGRAM_ADDRESS, getClosedEventEncoder, getSessionEncoder } from "@lxfoundry/stint-program-client";
-import { buildCloseTransaction } from "@lxfoundry/stint-x402";
+import { buildCloseTransaction, inspectTransaction } from "@lxfoundry/stint-x402";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCloseInfoSource, createSponsoredCloser, verifySponsoredClose } from "../src/close.js";
 import type { KoraClient } from "../src/kora.js";
@@ -495,6 +520,8 @@ const MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" as Address;
 /** What the fake node answers; the defaults are the happy path. */
 interface Node {
   accounts: Map<string, Uint8Array>;
+  /** The program that owns every account in `accounts`. */
+  owner: Address;
   blockhashValid: boolean;
   simulation: { err: unknown; logs?: string[] };
   closedEvent: boolean;
@@ -518,7 +545,7 @@ function fakeRpc(node: Node, closed: () => unknown): Rpc<SolanaRpcApi> {
             data: [getBase64Decoder().decode(data), "base64"],
             executable: false,
             lamports: 1_000_000n,
-            owner: STINT_PROGRAM_ADDRESS,
+            owner: node.owner,
             space: BigInt(data.length),
           },
         };
@@ -610,15 +637,31 @@ describe("the sponsored close (spec §6.1)", () => {
       }),
     );
 
-  const closeBy = (closer: KeyPairSigner, kind: CloseKind = CloseKind.Standard) =>
+  const closeBy = (closer: KeyPairSigner, kind: CloseKind = CloseKind.Standard, payer: Address = feePayer.address) =>
     buildCloseTransaction({
       session,
       stored: { mint: MINT, receiver: seller, refundOwner: buyer.address, rentPayer: rentPayer.address },
       closer,
-      feePayer: feePayer.address,
+      feePayer: payer,
       lifetime: { blockhash: BLOCKHASH, lastValidBlockHeight: 100n },
       kind,
     });
+
+  /** The buyer's close with `change` applied to its instructions, signed again by the buyer. */
+  const closeChanged = async (change: (instructions: readonly Instruction[]) => readonly Instruction[]): Promise<string> => {
+    const tx = inspectTransaction(await closeBy(buyer))!;
+    const instructions = change(tx.instructions).map((ix) => ({
+      ...ix,
+      accounts: ix.accounts?.map((meta) => (meta.address === buyer.address ? { ...meta, signer: buyer } : meta)),
+    }));
+    const message = pipe(
+      createTransactionMessage({ version: 0 }),
+      (m) => setTransactionMessageFeePayer(tx.feePayer, m),
+      (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: blockhash(BLOCKHASH), lastValidBlockHeight: 100n }, m),
+      (m) => appendTransactionMessageInstructions(instructions as Instruction[], m),
+    );
+    return getBase64EncodedWireTransaction(await partiallySignTransactionMessageWithSigners(message));
+  };
 
   const context = (kora: KoraClient = fakeKora(feePayer)): FacilitatorContext => ({
     rpc: fakeRpc(node, () => closeTransaction(session, buyer.address)),
@@ -644,6 +687,7 @@ describe("the sponsored close (spec §6.1)", () => {
   beforeEach(() => {
     node = {
       accounts: new Map<string, Uint8Array>([[session, sessionData(rentPayer.address)]]),
+      owner: STINT_PROGRAM_ADDRESS,
       blockhashValid: true,
       simulation: { err: null },
       closedEvent: true,
@@ -663,7 +707,7 @@ describe("the sponsored close (spec §6.1)", () => {
       });
     });
 
-    it("adds the session's stored fields when asked for a session, and answers nothing for an address with no session", async () => {
+    it("adds the session's stored fields when asked for a session, and answers nothing for an address with no session or another program's account", async () => {
       const source = createCloseInfoSource(context());
       expect((await source.read(session))?.session).toEqual({
         address: session,
@@ -682,6 +726,9 @@ describe("the sponsored close (spec §6.1)", () => {
         claimed: "0",
       });
       expect(await source.read((await generateKeyPairSigner()).address)).toBeUndefined();
+      // Another program's account is no session, whatever its bytes decode to.
+      node.owner = (await generateKeyPairSigner()).address;
+      expect(await source.read(session)).toBeUndefined();
     });
 
     it("serves one blockhash for ttlMs, then asks the node again", async () => {
@@ -724,9 +771,13 @@ describe("the sponsored close (spec §6.1)", () => {
       expect(await verifySponsoredClose(context(), "nope")).toMatchObject({ ok: false, reason: "invalid_payload" });
     });
 
-    it("refuses a session that does not exist", async () => {
+    it("refuses another program's account and a session that does not exist, before simulating", async () => {
+      // The account's bytes are a session that this facilitator would sponsor: only its owner is wrong.
+      node.owner = (await generateKeyPairSigner()).address;
+      expect(await verifySponsoredClose(context(), await closeBy(buyer))).toMatchObject({ ok: false, reason: "unknown_session" });
       node.accounts.clear();
       expect(await verifySponsoredClose(context(), await closeBy(buyer))).toMatchObject({ ok: false, reason: "unknown_session" });
+      expect(node.calls.simulate).toBe(0);
     });
 
     it("refuses a session whose rent payer is not this facilitator's, before simulating", async () => {
@@ -754,6 +805,25 @@ describe("the sponsored close (spec §6.1)", () => {
         reason: "invalid_terms",
         message: "a sponsored close is Standard or AtExpiry",
       });
+      expect(node.calls.read).toBe(0);
+    });
+
+    it("refuses, before reading the session, another instruction, a second close, another fee payer and a forged signature", async () => {
+      const foreign: Instruction = { programAddress: (await generateKeyPairSigner()).address, data: new Uint8Array([1]) };
+      const { transaction } = inspectTransaction(await closeBy(buyer))!;
+      const forged = getBase64EncodedWireTransaction({
+        ...transaction,
+        signatures: { ...transaction.signatures, [buyer.address]: new Uint8Array(64).fill(7) as SignatureBytes },
+      });
+      const refused: [wire: string, reason: string][] = [
+        [await closeChanged((ixs) => [...ixs, foreign]), "unexpected_instruction"],
+        [await closeChanged((ixs) => [...ixs, ...ixs]), "unexpected_instruction"],
+        [await closeBy(buyer, CloseKind.Standard, (await generateKeyPairSigner()).address), "payer_misuse"],
+        [forged, "invalid_payload"],
+      ];
+      for (const [wire, reason] of refused) {
+        expect(await verifySponsoredClose(context(), wire)).toMatchObject({ ok: false, reason });
+      }
       expect(node.calls.read).toBe(0);
     });
 
@@ -852,6 +922,7 @@ Create `apps/facilitator/src/close.ts`:
 ```ts
 import {
   blockhash,
+  fetchEncodedAccount,
   getBase64EncodedWireTransaction,
   getBase64Encoder,
   getSignatureFromTransaction,
@@ -864,9 +935,10 @@ import {
   CloseKind,
   STINT_PROGRAM_ADDRESS,
   StintInstruction,
-  fetchMaybeSession,
+  decodeSession,
   identifyStintInstruction,
   parseCloseInstruction,
+  type Session,
 } from "@lxfoundry/stint-program-client";
 import {
   checkCloseTransaction,
@@ -887,6 +959,16 @@ import { simulate, type FacilitatorContext } from "./verify.js";
 export const DEFAULT_CLOSE_INFO_TTL_MS = 2_000;
 
 type Lifetime = Pick<CloseInfo, "recentBlockhash" | "lastValidBlockHeight" | "blockHeight">;
+
+/**
+ * The session at `session`, read at `confirmed`, or undefined if no account of the program is there. The address comes
+ * from anyone, and another program's account decodes into whatever its bytes say.
+ */
+async function readSession(rpc: FacilitatorContext["rpc"], session: Address): Promise<Session | undefined> {
+  const account = await fetchEncodedAccount(rpc, session, { commitment: "confirmed" });
+  if (!account.exists || account.programAddress !== STINT_PROGRAM_ADDRESS) return undefined;
+  return decodeSession(account).data;
+}
 
 export interface CloseInfoSource {
   /** `GET /close`'s body. With a session, its stored fields too, or undefined if no session exists at that address. */
@@ -928,13 +1010,10 @@ export function createCloseInfoSource(
 
   return {
     async read(session) {
-      const [current, stored] = await Promise.all([
-        lifetime(),
-        session ? fetchMaybeSession(ctx.rpc, session, { commitment: "confirmed" }) : undefined,
-      ]);
+      const [current, stored] = await Promise.all([lifetime(), session ? readSession(ctx.rpc, session) : undefined]);
       const info: CloseInfo = { feePayer: ctx.keys.feePayer, ...current, programId: STINT_PROGRAM_ADDRESS };
-      if (!session || !stored) return info;
-      return stored.exists ? { ...info, session: storedSessionFields(session, stored.data) } : undefined;
+      if (!session) return info;
+      return stored ? { ...info, session: storedSessionFields(session, stored) } : undefined;
     },
   };
 }
@@ -980,17 +1059,17 @@ export async function verifySponsoredClose(ctx: FacilitatorContext, transaction:
     return refuse("invalid_terms", "a sponsored close is Standard or AtExpiry");
   }
 
-  const stored = await fetchMaybeSession(ctx.rpc, named.session, { commitment: "confirmed" });
-  if (!stored.exists) return refuse("unknown_session", "no such session");
-  if (stored.data.rentPayer !== ctx.keys.rentPayer) return refuse("invalid_terms", "the session's rent payer is not this facilitator's");
-  if (named.closer !== stored.data.authority) return refuse("invalid_payload", "the closer is not the session's authority");
+  const stored = await readSession(ctx.rpc, named.session);
+  if (!stored) return refuse("unknown_session", "no such session");
+  if (stored.rentPayer !== ctx.keys.rentPayer) return refuse("invalid_terms", "the session's rent payer is not this facilitator's");
+  if (named.closer !== stored.authority) return refuse("invalid_payload", "the closer is not the session's authority");
 
   const { value: valid } = await ctx.rpc.isBlockhashValid(blockhash(tx.blockhash), { commitment: "confirmed" }).send();
   if (!valid) return refuse("blockhash_expired", "the transaction's blockhash is no longer valid");
   // A close funds nothing: the rent payer only receives the session's rent back.
   const simulated = await simulate(ctx, tx, { destinations: [], budget: 0n });
   if (!simulated.ok) return simulated;
-  return { ok: true, value: { tx, session: named.session, payer: stored.data.authority } };
+  return { ok: true, value: { tx, session: named.session, payer: stored.authority } };
 }
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -1031,9 +1110,10 @@ async function submitSponsoredClose(ctx: FacilitatorContext, verified: VerifiedS
 export type SponsoredCloser = (transaction: unknown) => Promise<SponsoredCloseResponse>;
 
 /**
- * `POST /close` (spec §6.1). One sponsored close is settled at a time per session: a close of a session whose close is
- * being settled gets that close's answer and is not sent, since only one can land and each one sent costs the fee payer
- * a fee. The check and the registration happen in one synchronous step, so two requests cannot both pass it.
+ * `POST /close` (spec §6.1). One sponsored close is settled at a time per session: one that passes verification while
+ * another of its session is being settled gets that close's answer and is not sent, since only one can land and each one
+ * sent costs the fee payer a fee. The check and the registration happen in one synchronous step, so two requests cannot
+ * both pass it.
  */
 export function createSponsoredCloser(ctx: FacilitatorContext): SponsoredCloser {
   const inFlight = new Map<Address, Promise<SponsoredCloseResponse>>();
@@ -1053,7 +1133,7 @@ export function createSponsoredCloser(ctx: FacilitatorContext): SponsoredCloser 
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `pnpm --filter @lxfoundry/stint-facilitator test && pnpm --filter @lxfoundry/stint-facilitator typecheck`
-Expected: PASS, the eighteen new tests and every earlier one.
+Expected: PASS, the nineteen new tests and every earlier one.
 
 - [ ] **Step 6: Commit**
 
@@ -1147,9 +1227,11 @@ and, at the end of the `describe`:
     const { value: valid } = await stack.network.rpc.isBlockhashValid(blockhash(info!.recentBlockhash), { commitment: "confirmed" }).send();
     expect(valid).toBe(true);
     expect(BigInt(info!.blockHeight)).toBeLessThanOrEqual(BigInt(info!.lastValidBlockHeight));
-    // An address that holds no account: one that holds another program's account is a case of its own ("What this part builds").
-    const missing = await fetch(`${stack.facilitator.closeUrl}?session=${(await generateKeyPairSigner()).address}`);
-    expect(missing.status).toBe(404);
+    // No session: an address that holds no account, and an account that another program owns (the fee payer's wallet).
+    for (const address of [(await generateKeyPairSigner()).address, stack.facilitator.feePayer]) {
+      const missing = await fetch(`${stack.facilitator.closeUrl}?session=${address}`);
+      expect(missing.status).toBe(404);
+    }
   });
 
   it("settles a sponsored close built only from GET /close and signed by the authority, with no API key", async () => {
@@ -1299,19 +1381,19 @@ and `` | `invalid_terms` | The terms differ from the offer | `` with:
 In the same section, replace the row that starts `` | `close` (sponsored, through `closeUrl`) | `` with:
 
 ```markdown
-| `close` (sponsored, through `closeUrl`) | The session exists (else `unknown_session`) and its `rent_payer` is one of this facilitator's keys (else `invalid_terms`). The `closer` is its `authority` (else `invalid_payload`), and `kind` is `Standard` or `AtExpiry` (else `invalid_terms`). The payload, `accepted` and requirements checks do not apply: the request carries only the transaction. The fee-payer, facilitator-key, program, layout, simulation and blockhash checks do, and the rent payer funds nothing |
+| `close` (sponsored, through `closeUrl`) | The session exists, in an account the program owns (else `unknown_session`), and its `rent_payer` is one of this facilitator's keys (else `invalid_terms`). The `closer` is its `authority` (else `invalid_payload`), and `kind` is `Standard` or `AtExpiry` (else `invalid_terms`). The payload, `accepted` and requirements checks do not apply: the request carries only the transaction. The fee-payer, facilitator-key, program, layout, simulation and blockhash checks do, and the rent payer funds nothing |
 ```
 
 In section 6.1, replace the row that starts `` | `GET /close` (the `closeUrl`) | `` with:
 
 ```markdown
-| `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, blockHeight, programId}`, current at the time of the request, with `lastValidBlockHeight` and `blockHeight` as decimal strings. `blockHeight` is read at `confirmed`, and also tells a client without node access when one of its own transactions can no longer land (section 9.3). With `?session=<address>`, also `session`: the session's `address` and its stored fields (section 4.1), with `u64` values as decimal strings, `u32` values as numbers and `startedAt` in Unix seconds; or `404 {error: "unknown_session"}` if no session exists at that address (it was never opened, or has closed) |
+| `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, blockHeight, programId}`, read at most a few seconds before the request (see below), with `lastValidBlockHeight` and `blockHeight` as decimal strings. `blockHeight` is read at `confirmed`, and also tells a client without node access when one of its own transactions can no longer land (section 9.3). With `?session=<address>`, also `session`: the session's `address` and its stored fields (section 4.1) other than `version` and `bump`, with `u64` values as decimal strings, `u32` values as numbers and `startedAt` in Unix seconds; or `404 {error: "unknown_session"}` if no account of the program exists at that address (no session was opened there, or it has closed) |
 ```
 
 and the row that starts `` | `POST /close` (the `closeUrl`) | `` with:
 
 ```markdown
-| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `200 {success: true, transaction, paid, refunded}`, with `paid` = `claimed + owed + redirected` from the `Closed` event, as for the gate, or `200 {success: true, transaction}` when the close is confirmed but its `Closed` event cannot be read. A refusal or a failure is `200 {success: false, errorReason, errorMessage, transaction}`, with a reason of section 5.4 or 5.5; `transaction` is empty unless the transaction was sent (`settlement_pending` carries its signature). A body that is not JSON is `400 {error: "invalid_json"}` |
+| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `200 {success: true, transaction, paid, refunded}`, with `paid` = `claimed + owed + redirected` from the `Closed` event, as for the gate, or `200 {success: true, transaction}` when the close is confirmed but its `Closed` event cannot be read. A refusal or a failure is `200 {success: false, errorReason, errorMessage, transaction}`, with a reason of section 5.4 or 5.5, and `errorMessage` when there is one; `transaction` is empty when the close was refused before it was submitted, and otherwise carries its signature, also when the node rejected it (`simulation_failed`) or when it may still land (`settlement_pending`). While a sponsored close of a session is being settled, another sponsored close of the same session that passes verification is not submitted: it gets that close's answer. A body that is not JSON is `400 {error: "invalid_json"}` |
 ```
 
 Run: `grep -c "sponsored close" docs/specs/stint-system.md && git diff --stat docs/specs/stint-system.md`
@@ -1344,11 +1426,11 @@ connection at the end; the gate's idle timer then sends a close that the facilit
 which the gate logs, and at `paid_until` the gate finds the account gone and ends its record of the session. Both of
 the scenario's sessions are closed on-chain when it ends, so nothing it leaves affects the scenarios after it.
 
-The buyers are funded with what their sessions cost, not more: the devnet target lends its buyers USDC from the funding
-key and refuses a run that would lend more than a start-up requires. On a network whose node lags behind the
-scenario's own reads, `GET /close` can answer `404` and `POST /close` `unknown_session` for a session that has just
-opened; both are asked again with the target's patience (`context.readRetry`), which is safe because a refusal sends
-nothing.
+Each buyer gets 100,000, as in scenarios 16 and 26: more than its session costs, and little enough to fit what the
+devnet target lends its buyers in one run, from the funding key, with the other required scenarios. On a network
+whose node lags behind the scenario's own reads, `GET /close` can answer `404` and `POST /close` `unknown_session` for
+a session that has just opened; both are asked again with the target's patience (`context.readRetry`), which is safe
+because a refusal sends nothing.
 
 **Files:**
 - Create: `conformance/src/scenarios/15-sponsored-close.ts`
@@ -1532,40 +1614,22 @@ In `conformance/test/catalogue.test.ts` and in `e2e/test/local-target.test.ts`, 
 numeric order. On a tree where the list reads `[1, 2, 3, 9, 16, 22, 26]`, it becomes `[1, 2, 3, 9, 15, 16, 22, 26]`;
 if another stage has added scenarios since, keep them and insert `15` among them.
 
-In `README.md`, section `## Status`, replace the sentence that counts the scenarios passing on a local network and on
-devnet with one that counts one more on the local network, and add the sponsored close to what works. On a tree where
-the section reads as it does at the start of this part, replace:
+In `README.md`, section `## Status`, make three changes. Other stages rewrite this paragraph too, and it wraps in the
+file, so match on the words, not on the lines, and rewrap only the lines you change:
 
-```markdown
-the facilitator with its sweeper, the gate with its timers, the client library, an MCP server
-and an example agent.
-```
+1. After `the facilitator with its sweeper`, add ` and its sponsored close (a buyer with no SOL closes its session
+   through the facilitator when the gate cannot)`.
+2. In the sentence that counts the end-to-end scenarios, add one to each count of scenarios that pass (on the local
+   network, and on devnet where the sentence counts it apart), and take one from the count the run report lists as
+   pending.
+3. In `Not built yet:`, replace `fallback closes` with `the other fallback closes`.
 
-with:
+For change 2: where the sentence reads `Seven of the 35 … pass on a local network and on devnet, and the run report
+lists the other 28 as pending` (the README at the start of this part), it becomes `Eight … the other 27`. Where it
+reads `Nine of the 35 … pass on a local network and on devnet, and the run report lists the other 26 as pending` (after
+stage 5, its devnet upgrade included), it becomes `Ten … the other 25`.
 
-```markdown
-the facilitator with its sweeper and its sponsored close (a buyer with no SOL closes its session through
-the facilitator when the gate cannot), the gate with its timers, the client library, an MCP server and an
-example agent.
-```
-
-and:
-
-```markdown
-facilitator's own rent payer. Seven of the 35 end-to-end scenarios of the
-[specification](docs/specs/stint-system.md) (section 12.7) pass on a local network and on devnet, and the run
-report lists the other 28 as pending. Not built yet: top-ups, fallback closes, refusals of bad payments and
-```
-
-with:
-
-```markdown
-facilitator's own rent payer. Eight of the 35 end-to-end scenarios of the
-[specification](docs/specs/stint-system.md) (section 12.7) pass on a local network and on devnet, and the run
-report lists the other 27 as pending. Not built yet: top-ups, the other fallback closes, refusals of bad payments and
-```
-
-Task 5 runs scenario 15 on devnet before this part is merged, so the count holds for both networks once it is.
+Task 5 runs scenario 15 on devnet before this part is merged, so the devnet count holds once it is.
 
 - [ ] **Step 4: Run every check**
 
@@ -1645,10 +1709,12 @@ git commit -m "Run scenario 15 on devnet with the other required scenarios"
 ## Spec edits made by this part
 
 Each is made in Task 3, and states a fact the code relies on:
-- §5.4, sponsored row: the refusal each check gives, and that the rent payer funds nothing; the refusal table's
-  `invalid_payload` and `invalid_terms`, widened to cover those refusals;
-- §6.1, `GET /close`: the encoding of the heights and of `session`, and the `404` body;
-- §6.1, `POST /close`: the success without amounts, the refusal's body, and `400 invalid_json`.
+- §5.4, sponsored row: the refusal each check gives, that the session's account must be the program's, and that the
+  rent payer funds nothing; the refusal table's `invalid_payload` and `invalid_terms`, widened to cover those refusals;
+- §6.1, `GET /close`: how recent the blockhash is, the encoding of the heights and of `session`, the stored fields it
+  leaves out, and the `404` body;
+- §6.1, `POST /close`: the success without amounts, the refusal's body and when it carries a signature, the answer to a
+  sponsored close sent while another of the session is being settled, and `400 invalid_json`.
 
 Not edited, on purpose: §6.1's rate limits and §5.5's settlement records, which the spec keeps for the facilitator as it
 is meant to be; this part builds neither (see "What this part builds, and what it leaves").
