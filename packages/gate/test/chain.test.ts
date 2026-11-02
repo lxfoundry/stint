@@ -1,5 +1,6 @@
 import {
   generateKeyPairSigner,
+  getBase58Decoder,
   getBase64Decoder,
   type Address,
   type Rpc,
@@ -7,7 +8,14 @@ import {
   type SolanaRpcApi,
   type SolanaRpcSubscriptionsApi,
 } from "@solana/kit";
-import { STINT_PROGRAM_ADDRESS, getSessionEncoder, type SessionArgs } from "@lxfoundry/stint-program-client";
+import {
+  CloseKind,
+  EVENT_IX_TAG,
+  STINT_PROGRAM_ADDRESS,
+  getClosedEventEncoder,
+  getSessionEncoder,
+  type SessionArgs,
+} from "@lxfoundry/stint-program-client";
 import { describe, expect, it } from "vitest";
 import { createRpcChain } from "../src/chain.js";
 
@@ -191,5 +199,100 @@ describe("the RPC chain's subscription to a session", () => {
 
   it("offers no subscription without an RPC subscriptions client", () => {
     expect(createRpcChain(rpcHolding(null)).watchSession).toBeUndefined();
+  });
+});
+
+/** A transaction as `getTransaction` returns it with `json` encoding, its inner instructions holding `events` (base58 data). */
+function recorded(events: string[]) {
+  return {
+    transaction: { message: { accountKeys: [STINT_PROGRAM_ADDRESS], instructions: [] } },
+    meta: { err: null, innerInstructions: [{ index: 0, instructions: events.map((data) => ({ programIdIndex: 0, accounts: [], data })) }] },
+  };
+}
+
+/** The base58 data of the `Closed` event of a close of `session`, `at` on the chain's clock, for a session paid until 1,800,000,030. */
+function closedEventData(session: Address, at: bigint): string {
+  const event = getClosedEventEncoder().encode({
+    session,
+    kind: CloseKind.Standard,
+    claimed: 0n,
+    owed: 8_000n,
+    refunded: 22_000n,
+    redirected: 0n,
+    closedBy: session,
+    paidUntil: 1_800_000_030n,
+    at,
+  });
+  return getBase58Decoder().decode(Uint8Array.from([...EVENT_IX_TAG, ...event]));
+}
+
+/** An RPC that lists `entries` for any address, newest first, and returns `transactions` by signature; `fetched` records each read. */
+function rpcListing(entries: { signature: string; err: unknown }[], transactions: Record<string, unknown>) {
+  const fetched: string[] = [];
+  const rpc = {
+    getSignaturesForAddress: () => ({
+      send: async () => entries.map((entry) => ({ ...entry, slot: 1n, blockTime: null, confirmationStatus: "confirmed", memo: null })),
+    }),
+    getTransaction: (signature: string) => ({
+      send: async () => {
+        fetched.push(signature);
+        return transactions[signature] ?? null;
+      },
+    }),
+  } as unknown as Rpc<SolanaRpcApi>;
+  return { rpc, fetched };
+}
+
+const signatureFilledWith = (fill: number) => getBase58Decoder().decode(new Uint8Array(64).fill(fill));
+
+describe("the RPC chain's lookup of a session's last close", () => {
+  const where = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDyLb" as Address;
+  const [LATER, FAILED, CLOSE, OPEN] = [1, 2, 3, 4].map(signatureFilledWith) as [string, string, string, string];
+
+  it("returns the Closed event of the newest successful close of the session, past a later transfer and a failed transaction", async () => {
+    const { rpc, fetched } = rpcListing(
+      [
+        { signature: LATER, err: null },
+        { signature: FAILED, err: { InstructionError: [0, { Custom: 6004 }] } },
+        { signature: CLOSE, err: null },
+        { signature: OPEN, err: null },
+      ],
+      { [LATER]: recorded([]), [CLOSE]: recorded([closedEventData(where, 1_800_000_008n)]), [OPEN]: recorded([]) },
+    );
+
+    const event = await createRpcChain(rpc).lastClose!(where);
+
+    expect(event).toMatchObject({ session: where, kind: CloseKind.Standard, at: 1_800_000_008n, paidUntil: 1_800_000_030n });
+    expect(fetched).toEqual([LATER, CLOSE]); // the failed one is never read, nor anything past the close
+  });
+
+  it("returns undefined when no listed transaction holds a close of this session, or the node cannot return it yet", async () => {
+    const other = (await generateKeyPairSigner()).address;
+    const { rpc, fetched } = rpcListing(
+      [
+        { signature: CLOSE, err: null },
+        { signature: OPEN, err: null },
+      ],
+      { [CLOSE]: recorded([closedEventData(other, 1_800_000_008n)]) },
+    );
+
+    expect(await createRpcChain(rpc).lastClose!(where)).toBeUndefined();
+    expect(fetched).toEqual([CLOSE, OPEN]); // one read each in a look: the gate repeats the look
+  });
+
+  it("does not read again, given the same set, a transaction that an earlier look found to hold no close", async () => {
+    const { rpc, fetched } = rpcListing(
+      [
+        { signature: LATER, err: null },
+        { signature: OPEN, err: null },
+      ],
+      { [LATER]: recorded([]), [OPEN]: recorded([]) },
+    );
+    const chain = createRpcChain(rpc);
+    const notCloses = new Set<string>();
+
+    expect(await chain.lastClose!(where, notCloses)).toBeUndefined();
+    expect(await chain.lastClose!(where, notCloses)).toBeUndefined();
+    expect(fetched).toEqual([LATER, OPEN]);
   });
 });
