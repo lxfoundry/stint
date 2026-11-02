@@ -17,8 +17,8 @@ export interface Watch {
 
 /**
  * Connects to `session`, subscribes to `watched`'s USDC account, and has `payer` send it one base unit every 500 ms until
- * `stop`. Whatever the gate forwards shows up as a frame, so the frames show when the session was served (scenarios 4 and
- * 34). The watched account must exist before the subscription: the node then sends one message per change (scenario 22).
+ * `stop`. Whatever the gate forwards shows up as a frame, so the frames show when the session was served (scenarios 3, 4
+ * and 34). The watched account must exist before the subscription: the node then sends one message per change (scenario 22).
  */
 export async function watchWhilePaying(context: ScenarioContext, session: StintSession, payer: Buyer, watched: Buyer): Promise<Watch> {
   const frames: number[] = [];
