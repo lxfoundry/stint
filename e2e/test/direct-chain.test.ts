@@ -1,4 +1,5 @@
 import { fetchToken } from "@solana-program/token";
+import { createStintClient } from "@lxfoundry/stint-client";
 import { rejectedWithProgramError, sleep, type DirectChain } from "@lxfoundry/stint-conformance";
 import { CloseKind, STINT_ERROR__SESSION_EXPIRED, fetchMaybeSession, fetchSession, paidUntil } from "@lxfoundry/stint-program-client";
 import { fetchClosedEvent, lamportBalances, tokenBalanceChanges } from "@lxfoundry/stint-x402";
@@ -107,6 +108,30 @@ describe("sessions opened straight on the program, on the local stack", () => {
 
     expect((await fetchToken(stack.network.rpc, buyer.usdcAccount, { commitment: "confirmed" })).data.amount).toBe(1_000_000n);
   });
+
+  it("has the stack's gate follow a top-up made on the program: it accepts a connection within its margin of the old end", async () => {
+    const buyer = await buyerWith(1_000_000n);
+    const client = createStintClient({
+      signer: buyer.signer,
+      policy: { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } },
+    });
+    // 8 s, and no connection until near its end: under the stack's idle close of 10 s.
+    const session = await client.open(stack.stream.url, { seconds: 8 });
+    const oldEndMs = session.paidUntil * 1_000;
+    // The gate's subscription is not acknowledged when the open answers; the local target's subscription wait covers it.
+    await sleep(1_500);
+
+    await direct.topUp({ buyer, session: session.id, seconds: 20 });
+    expect(Date.now(), "the top-up was confirmed more than 2 s before the old end: the open and the top-up took too long").toBeLessThan(
+      oldEndMs - 2_000,
+    );
+    await sleep(Math.max(0, oldEndMs - 1_000 - Date.now()));
+
+    // 1 s before the old end, within the gate's 2 s margin: a gate that has not seen the top-up refuses with 402.
+    const socket = await session.connect();
+    socket.terminate();
+    await session.close();
+  }, 60_000);
 
   it("tops up a session on the program, signed by the buyer, until its paid time runs out: then SessionExpired", async () => {
     const buyer = await buyerWith(1_000_000n);

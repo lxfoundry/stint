@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Rpc, SolanaRpcApi } from "@solana/kit";
+import { createSolanaRpcSubscriptions, type Rpc, type SolanaRpcApi } from "@solana/kit";
 import type { GateStartOptions } from "@lxfoundry/stint-conformance";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import { startStream, type RunningStream, type StreamConfig } from "@lxfoundry/stint-example-stream";
@@ -135,7 +135,8 @@ export async function startServices(options: ServicesOptions): Promise<Services>
         maxTimeoutSeconds: options.maxTimeoutSeconds,
         readRetry: options.readRetry,
         facilitator: createFacilitatorClient(facilitator.url, facilitatorApiKey),
-        chain: createRpcChain(options.rpc),
+        // The gate follows each session's account over the node's WebSocket (spec §7.3).
+        chain: createRpcChain(options.rpc, createSolanaRpcSubscriptions(options.rpcWsUrl)),
       },
     };
     let running: RunningStream | undefined = await startStream(streamConfig);
