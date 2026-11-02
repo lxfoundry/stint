@@ -1,5 +1,4 @@
-# >>> scaffold-hackathon-repo >>>
-# Product repo: may become public at any time. Nothing secret is ever committed:
+# This repository is public. Nothing secret is ever committed:
 # when in doubt, add the pattern here first. Commit a .env.example with empty values.
 
 # --- Secrets & credentials (never commit, no exceptions) ---
@@ -53,9 +52,8 @@ coverage/
 test-results/
 .cache/
 e2e/report/
-# <<< scaffold-hackathon-repo <<<
 
-# >>> solana >>>
+# --- Solana ---
 # Solana key material and local state. Anchor writes a program's keypair, which controls its
 # deploy address, to target/deploy/<name>-keypair.json; the CLI's default wallet is id.json.
 target/
@@ -65,4 +63,3 @@ id.json
 test-ledger/
 .anchor/
 .surfpool/
-# <<< solana <<<
