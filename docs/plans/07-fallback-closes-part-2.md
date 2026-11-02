@@ -56,8 +56,8 @@ options, `closeWaitSeconds`, the close fallback chain), 12.2 (stack control) and
 Built: the lookup of a session's close in the scheme package, and `GateChain.lastClose`; the gate's handling of a
 session that another party closed (spec section 7.3); the client's close fallback chain (spec section 9.3), with
 `closeWaitSeconds` in the policy, an optional `rpc`, `requestTimeoutMs` and `closeRequestTimeoutMs` in the client's
-options, and `via` on its receipts; stack control of the facilitator and SOL for a buyer in the harness; scenarios 7, 24 and 25 on `local` and on
-devnet.
+options, and `via` on its receipts; stack control of the facilitator and SOL for a buyer in the harness; scenarios 7,
+24 and 25 on `local` and on devnet.
 
 Not built, and not to be built here:
 - **The other uses of the client's `rpc`** (spec section 9.1): checking refunds on-chain after a close, and finding
@@ -420,7 +420,8 @@ The rules, in the order the gate applies them:
 2. Otherwise forwarding stops at once, both ways, as at the end of the paid time: the session is over on chain. From
    then on the gate answers a new connection, a close and a top-up of the session with `404`, and its end timer is
    disarmed: nothing is left to settle. Work already in flight does not undo that: a top-up whose settlement confirms
-   during the look does not resume forwarding, and an end-timer pass already running sends no close.
+   during the look does not resume forwarding, and an end-timer pass already running neither resumes forwarding, nor
+   ends the session, nor sends a close, whatever its re-read finds.
 3. The gate looks the close up (`lastClose`), repeating the look every `readRetry.delayMs`, within
    `readRetry.attempts`, while none shows: the node's list of an address's transactions can lag the account
    notification. The whole lookup takes 2 s at most, looks included, and a look still running then is given up: the
@@ -440,7 +441,7 @@ The rules, in the order the gate applies them:
 
 **Interfaces:**
 - Consumes: `GateChain.lastClose` (Task 1); in the gate, `mute`, `disarm`, `end`, `startClose`, `paidLonger`,
-  `attempt`, `upstream`, `sameSession`, `readRetry` and `CLOSE_CODES`, all already there.
+  `settledByChain`, `upstream`, `sameSession`, `readRetry` and `CLOSE_CODES`, all already there.
 - Produces: no new export. The gate logs `{ event: "closed_elsewhere", session, found }` when it ends a session this way.
   `EndReason` already holds `"closedElsewhere"`.
 
@@ -699,13 +700,13 @@ Then insert, before the last line of the file (the `});` that closes the outer `
     });
 
     it("gives the lookup up after 2 s, however many looks readRetry allows, and goes by its session clock", async () => {
-      await restartWithReadRetry({ attempts: 1_000, delayMs: 1_000 });
+      await restartWithReadRetry({ attempts: 1_000, delayMs: 700 });
       const { session, dropped } = await openConnected();
 
       notify(session, "gone");
 
       expect(await dropped).toBe(4410);
-      expect(h.reads.lastClose).toBe(2); // at 0 s and at 1 s: a third look would start at the 2 s bound
+      expect(h.reads.lastClose).toBe(3); // at 0, 0.7 and 1.4 s: a fourth look would start past the 2 s bound
     });
 
     it("gives up a look that never answers at the end of the 2 s, and goes by its session clock", async () => {
@@ -816,6 +817,36 @@ Then insert, before the last line of the file (the `});` that closes the outer `
       expect(h.calls.teardown).toEqual(["closedElsewhere"]);
     });
 
+    it.each<[string, (stored: Session) => Session | undefined]>([
+      ["a later paid_until, from a node that lags", (stored) => ({ ...stored, deposited: stored.deposited + 10_000n })],
+      ["the account gone", () => undefined],
+    ])("leaves the session to the lookup when an end-timer pass already running re-reads %s", async (_, reread) => {
+      const { session, server, frames, dropped } = await openConnected();
+      const stored = h.sessions.get(session)!;
+      const reading = latch();
+      h.hold.readSession = reading.promise;
+      const reads = h.reads.session;
+      h.timers.fire(pendingDue(END_DUE)); // the pass mutes the session and starts its re-read
+      await expect.poll(() => h.reads.session).toBe(reads + 1);
+      const looking = latch();
+      h.hold.lastClose = looking.promise;
+      h.closes.set(session, closedAt(session, EARLY));
+
+      notify(session, "gone");
+      const found = reread(stored);
+      if (found) h.sessions.set(session, found); // what the re-read, answering after the notification, finds
+      reading.release();
+      await settleDown();
+      server.send("tick:after-close");
+      await settleDown();
+
+      expect(frames).not.toContain("tick:after-close");
+      expect(h.timers.pending).toEqual([]);
+      looking.release();
+      expect(await dropped).toBe(4410); // from the Closed event, not the end timer's 4402
+      expect(h.calls.teardown).toEqual(["closedElsewhere"]);
+    });
+
     it("lets a close of its own in flight decide: once confirmed, that close ends the session with its own reason and code", async () => {
       const { session, dropped } = await openConnected();
       const held = latch();
@@ -899,7 +930,8 @@ Then insert, before the last line of the file (the `});` that closes the outer `
 
 Run: `pnpm --filter @lxfoundry/stint-gate test follow.test.ts`
 Expected: FAIL in the new tests of "when another party closes the session": the `dropped` promises never resolve
-(vitest's timeout), `teardown` stays `[]`, `reads.lastClose` stays `0`, or a frame or an end close gets through. The
+(vitest's timeout), `teardown` stays `[]`, `reads.lastClose` stays `0`, a frame or an end close gets through, or the
+end timer ends the session (`4402`, `expired`). The
 tests outside that `describe` pass, and the test "lets a close of its own in flight decide" may pass already: today the
 gate ignores the notification and its own close ends the session.
 
@@ -1056,11 +1088,12 @@ with:
   /**
    * Ends a session that another party closed. Forwarding stops at once: the session is over on chain, whatever the lookup
    * finds. From then on a new connection, a close or a top-up is answered `404` (`endingElsewhere` is set), a top-up that
-   * confirms does not resume forwarding, and the end timer is disarmed, since there is nothing left to settle. The close
-   * is looked up (`lookUpClose`). The connections get `4402` if the close came at or after its `paid_until`, since the
-   * paid time ran out whoever closed it, and `4410` before; without the close, the session clock is compared with the
-   * last `paid_until` the gate saw. The session ends whatever the lookup did: with its end timer disarmed, nothing else
-   * would end it.
+   * confirms does not resume forwarding, an end-timer pass already running leaves the session to this (`settledByChain`),
+   * and the end timer is disarmed, since there is nothing left to settle. The close is looked up (`lookUpClose`). The
+   * connections get `4402` if the close came at or after its `paid_until`, since the paid time ran out whoever closed it,
+   * and `4410` before; without the close, the session clock is compared with the last `paid_until` the gate saw. The
+   * session ends whatever the lookup did, and before anything is logged: with its end timer disarmed, nothing else would
+   * end it.
    */
   async function endClosedElsewhere(tracked: Tracked<U>): Promise<void> {
     mute(tracked);
@@ -1068,14 +1101,14 @@ with:
     const session = tracked.info.session;
     let event: ClosedEvent | undefined;
     try {
-      if (config.chain.lastClose) event = await lookUpClose(session, config.chain.lastClose);
+      if (config.chain.lastClose) event = await lookUpClose(session, config.chain.lastClose.bind(config.chain));
     } catch (error) {
       logError(error);
     } finally {
       if (!tracked.ended) {
         const ranOut = event ? event.at >= event.paidUntil : BigInt(Math.floor(sessionClock() / 1000)) >= tracked.paidUntil;
-        log({ event: "closed_elsewhere", session, found: event !== undefined });
         await end(tracked, "closedElsewhere", ranOut ? CLOSE_CODES.PAID_TIME_ENDED : CLOSE_CODES.SESSION_CLOSED);
+        log({ event: "closed_elsewhere", session, found: event !== undefined });
       }
     }
   }
@@ -1085,17 +1118,17 @@ with:
    * address's transactions can lag the account notification, so the look is repeated every `readRetry.delayMs`, within
    * `readRetry.attempts`, for `CLOSE_LOOKUP_MS` at most, looks included: a look still running then is given up. The looks
    * share one `notCloses`, so a transaction read and found to hold no close is not read again. A look that fails ends the
-   * lookup.
+   * lookup. The bound is kept on a monotonic clock (`performance.now`), which a change of the system clock does not move.
    */
   async function lookUpClose(
     session: Address,
     lastClose: (session: Address, notCloses: Set<string>) => Promise<ClosedEvent | undefined>,
   ): Promise<ClosedEvent | undefined> {
-    const deadline = Date.now() + CLOSE_LOOKUP_MS;
+    const deadline = performance.now() + CLOSE_LOOKUP_MS;
     const notCloses = new Set<string>();
     for (let look = 1; ; look++) {
-      const event = await within(upstream(() => lastClose(session, notCloses)), deadline - Date.now());
-      if (event || look >= readRetry.attempts || Date.now() + readRetry.delayMs >= deadline) return event;
+      const event = await within(upstream(() => lastClose(session, notCloses)), deadline - performance.now());
+      if (event || look >= readRetry.attempts || performance.now() + readRetry.delayMs >= deadline) return event;
       await sleep(readRetry.delayMs);
     }
   }
@@ -1114,33 +1147,79 @@ with:
     if (tracked.ended || tracked.endingElsewhere || until <= tracked.paidUntil) return;
 ```
 
-In the function `attempt`, replace:
+Replace the function `settledByChain` and its comment:
 
 ```ts
-    // The account's subscription (or the route) resumed the session during the re-read: there is nothing to close.
-    if (!tracked.muted) return true;
+  /**
+   * Re-reads the session at `confirmed`, once. True when that settles the matter: the session ended meanwhile; or its
+   * account is gone or holds another session, so it ends here with 4402; or `paid_until` moved later on the same
+   * session, so it runs on. A read that fails settles nothing, and neither does one that returns while a close is in
+   * flight: that close ends the session, with its own reason and code.
+   *
+   * One read, not `readRetry`'s several: the account was read when the open settled, so finding nothing now means it has
+   * closed, not that the RPC has yet to see it. An account at the address that started at another moment, or on other
+   * terms, is another session opened there after a close (spec §4.1): the one tracked here is gone, and its connections
+   * are not served on the newcomer's account.
+   */
+  async function settledByChain(tracked: Tracked<U>): Promise<boolean> {
+    try {
+      const stored = await upstream(() => config.chain.readSession(tracked.info.session));
+      if (tracked.ended) return true;
+      // A close that started during the read decides: it is the reason the account may be gone, and it ends the session.
+      if (tracked.closing) return false;
+      if (!sameSession(tracked, stored)) {
+        await end(tracked, "expired", CLOSE_CODES.PAID_TIME_ENDED);
+        return true;
+      }
+      const until = paidUntil(stored);
+      if (until <= tracked.paidUntil) return false;
+      resume(tracked, until);
+      return true;
+    } catch (error) {
+      logError(error);
+      return false;
+    }
+  }
 ```
 
 with:
 
 ```ts
-    // The account's subscription (or the route) resumed the session during the re-read: there is nothing to close. Or
-    // another party closed it meanwhile: `endClosedElsewhere` ends it, and nothing is left to settle.
-    if (!tracked.muted || tracked.endingElsewhere) return true;
-```
-
-and replace:
-
-```ts
-    // The close failed. The chain may have changed under it: a top-up landed, or another party closed the session.
-    return settledByChain(tracked);
-```
-
-with:
-
-```ts
-    // The close failed. The chain may have changed under it: a top-up landed, or another party closed the session.
-    return tracked.endingElsewhere !== undefined || settledByChain(tracked);
+  /**
+   * Re-reads the session at `confirmed`, once. True when that settles the matter: the session ended meanwhile; or another
+   * party closed it, and its close is being looked up (`endClosedElsewhere`), which ends the session whatever the read
+   * found, and even if the read failed; or its account is gone or holds another session, so it ends here with 4402; or
+   * `paid_until` moved later on the same session, so it runs on. A read that fails settles nothing otherwise, and neither
+   * does one that returns while a close is in flight: that close ends the session, with its own reason and code.
+   *
+   * One read, not `readRetry`'s several: the account was read when the open settled, so finding nothing now means it has
+   * closed, not that the RPC has yet to see it. An account at the address that started at another moment, or on other
+   * terms, is another session opened there after a close (spec §4.1): the one tracked here is gone, and its connections
+   * are not served on the newcomer's account.
+   */
+  async function settledByChain(tracked: Tracked<U>): Promise<boolean> {
+    try {
+      const stored = await upstream(() => config.chain.readSession(tracked.info.session));
+      if (tracked.ended) return true;
+      // The lookup of another party's close ends the session, with the code its Closed event gives: a node that lags may
+      // still show the account, with a later `paid_until`, and an account gone here is that close, not the end timer's.
+      if (tracked.endingElsewhere) return true;
+      // A close that started during the read decides: it is the reason the account may be gone, and it ends the session.
+      if (tracked.closing) return false;
+      if (!sameSession(tracked, stored)) {
+        await end(tracked, "expired", CLOSE_CODES.PAID_TIME_ENDED);
+        return true;
+      }
+      const until = paidUntil(stored);
+      if (until <= tracked.paidUntil) return false;
+      resume(tracked, until);
+      return true;
+    } catch (error) {
+      logError(error);
+      // The lookup of another party's close ends the session: an end-timer pass sends no close and arms no retry.
+      return tracked.endingElsewhere !== undefined;
+    }
+  }
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
@@ -1167,13 +1246,16 @@ fails where stated, and undo it:
 8. In `endClosedElsewhere`, delete `disarm(tracked, "end");`: that test fails (the end timer is still pending).
 9. In `paidLonger`, delete `|| tracked.endingElsewhere`: "does not resume forwarding when a top-up that was settling
    confirms …" fails (the frame gets through).
-10. In `attempt`, `!tracked.muted || tracked.endingElsewhere` → `!tracked.muted`: "sends no end close while it looks the
-    close up …" fails (an end close is sent).
-11. In `lookUpClose`, delete `|| Date.now() + readRetry.delayMs >= deadline`: "gives the lookup up after 2 s, however
-    many looks readRetry allows" fails on vitest's 5 s limit.
-12. In `lookUpClose`, replace `await within(upstream(() => lastClose(session, notCloses)), deadline - Date.now())` with
-    `await upstream(() => lastClose(session, notCloses))`: "gives up a look that never answers …" fails on vitest's 5 s
-    limit.
+10. In the `catch` of `settledByChain`, `return tracked.endingElsewhere !== undefined;` → `return false;`: "sends no end
+    close while it looks the close up …" fails (an end close is sent).
+11. In `lookUpClose`, delete `|| performance.now() + readRetry.delayMs >= deadline`: "gives the lookup up after 2 s,
+    however many looks readRetry allows" fails on vitest's 5 s limit.
+12. In `lookUpClose`, replace `await within(upstream(() => lastClose(session, notCloses)), deadline - performance.now())`
+    with `await upstream(() => lastClose(session, notCloses))`: "gives up a look that never answers …" fails on vitest's
+    5 s limit.
+13. In `settledByChain`, delete `if (tracked.endingElsewhere) return true;`: both cases of "leaves the session to the
+    lookup when an end-timer pass already running re-reads …" fail (the frame gets through; the session ends with
+    `4402`).
 
 - [ ] **Step 7: Update the spec**
 
@@ -1440,8 +1522,9 @@ Every request has a time limit, so that a host that takes the connection and nev
 while the session is charged: a read (the gate's status, `GET closeUrl`) is given up after `requestTimeoutMs` (10 s), a
 request that sends a close (the gate's close, `POST closeUrl`) after `closeRequestTimeoutMs` (60 s), longer than the
 facilitator's wait for a close to confirm before it answers (30 s by default). The reason given for a close request
-given up says that its close may still land. Both limits are checked when the client is created: `AbortSignal.timeout`
-takes whole milliseconds only.
+given up says that its close may still land, and so does the final error. Both limits are checked when the client is
+created: `AbortSignal.timeout` takes whole milliseconds only, and Node's timers keep no delay longer than
+2,147,483,647 ms (a longer one fires at once).
 
 Only the gate's own `404 unknown_session` on its status counts as the session gone: another `404`, such as a proxy's, is
 waited out like a status that still finds the session.
@@ -1472,7 +1555,7 @@ Receipts gain `via`: `"gate"`, `"sponsored"` or `"unilateral"`.
     10,000) and `readonly closeRequestTimeoutMs?: number` (default 60,000);
   - in the test gate (`packages/client/test/gate.ts`): `NETWORK`, and on `TestGate`: `feePayer`, `stored`,
     `closeSettlement`, `sessionOpen`, `facilitatorSessionOpen`, `gateDown`, `facilitatorDown`, `gateSilent`,
-    `facilitatorSilent`, `statusSilent`, `sponsoredSilent`, `sponsored`, `sponsoredAnswer`.
+    `facilitatorSilent`, `statusSilent`, `sponsoredSilent`, `sponsoredStalls`, `sponsored`, `sponsoredAnswer`.
 
 - [ ] **Step 1: Give the test gate the facilitator's buyer endpoints**
 
@@ -1532,6 +1615,8 @@ export interface TestGate {
   statusSilent: boolean;
   /** While set, `POST /close` takes each request and never answers it; `GET /close` still answers. */
   sponsoredSilent: boolean;
+  /** While set, `POST /close` takes the close, starts its answer and never finishes it. */
+  sponsoredStalls: boolean;
   /** The transactions posted to `closeUrl`, in order. */
   readonly sponsored: string[];
   /** What `POST /close` answers. Default: closed, `sponsored-sig`, 8,000 paid and 22,000 refunded. */
@@ -1629,6 +1714,11 @@ export async function startTestGate(buyer: Address, onAttach: (socket: WebSocket
     }
     const body = (await readJson(req)) as { transaction?: unknown } | undefined;
     testGate.sponsored.push(String(body?.transaction));
+    if (testGate.sponsoredStalls) {
+      // Headers and a first byte, then nothing: `stop` closes the connection.
+      res.writeHead(200, { "content-type": "application/json" }).write("{");
+      return true;
+    }
     sendJson(res, 200, testGate.sponsoredAnswer);
     return true;
   }
@@ -1668,6 +1758,7 @@ export async function startTestGate(buyer: Address, onAttach: (socket: WebSocket
     facilitatorSilent: false,
     statusSilent: false,
     sponsoredSilent: false,
+    sponsoredStalls: false,
     sponsored: [],
     sponsoredAnswer: { success: true, transaction: "sponsored-sig", paid: "8000", refunded: "22000" },
     stop: async () => {
@@ -1892,8 +1983,16 @@ describe("the close fallback chain (spec §9.3)", () => {
     gate.sponsoredSilent = true;
 
     await expect(session.close()).rejects.toThrow(
-      /the facilitator did not answer its close within 300 ms, and that close may still land[\s\S]*runs to the end of its paid time/,
+      /the facilitator did not answer its close within 300 ms, and that close may still land[\s\S]*unless that close lands or a later close succeeds/,
     );
+  });
+
+  it("says that close may still land when closeUrl starts its answer to the close and never finishes it", async () => {
+    const session = await openSession();
+    gate.gateDown = true;
+    gate.sponsoredStalls = true;
+
+    await expect(session.close()).rejects.toThrow(/the facilitator did not answer its close within 300 ms, and that close may still land/);
   });
 
   it("gives up a read of the gate's status that never answers, and moves on once closeWaitSeconds have gone by", async () => {
@@ -1915,9 +2014,11 @@ describe("the close fallback chain (spec §9.3)", () => {
     expect(await session.close()).toEqual(SPONSORED);
   });
 
-  it("refuses a time limit that is not a whole number of milliseconds", () => {
+  it("refuses a time limit that is not a whole number of milliseconds that Node's timers keep", () => {
     expect(() => createStintClient({ signer: buyer, policy, requestTimeoutMs: Infinity })).toThrow(RangeError);
     expect(() => createStintClient({ signer: buyer, policy, closeRequestTimeoutMs: 1.5 })).toThrow(RangeError);
+    expect(() => createStintClient({ signer: buyer, policy, closeRequestTimeoutMs: 2 ** 31 })).toThrow(RangeError);
+    expect(() => createStintClient({ signer: buyer, policy, requestTimeoutMs: 2 ** 31 - 1 })).not.toThrow();
   });
 
   it("shares one chain between overlapping calls: one close is sent, and both get its receipt", async () => {
@@ -1935,8 +2036,9 @@ describe("the close fallback chain (spec §9.3)", () => {
 
 Run: `pnpm --filter @lxfoundry/stint-client test fallback.test.ts`
 Expected: FAIL, every test. The type check of vitest's transform does not run, so the file loads; the first test fails on
-the missing `via`, the test of a gate that never answers on vitest's 5 s limit (today's close has no time limit), and
-every other test with `Close failed (HTTP …)` or a `fetch failed` rejection, or a message that does not match.
+the missing `via`, the test of a gate that never answers on vitest's 5 s limit (today's close has no time limit), the
+test that refuses a time limit with `expected function to throw` (today's client takes any option), and every other
+test with `Close failed (HTTP …)` or a `fetch failed` rejection, or a message that does not match.
 
 - [ ] **Step 3: Add `closeWaitSeconds` to the policy**
 
@@ -2069,13 +2171,13 @@ with:
   readonly closePollMs?: number;
   /**
    * Milliseconds after which a read of the close fallback chain (the gate's status, `GET closeUrl`) that has no answer
-   * is given up (spec §9.3). Default 10,000. A whole number from 1 to 4,294,967,295.
+   * is given up (spec §9.3). Default 10,000. A whole number from 1 to 2,147,483,647.
    */
   readonly requestTimeoutMs?: number;
   /**
    * Milliseconds after which a request of the close fallback chain that sends a close (the gate's close, `POST closeUrl`)
    * and has no answer is given up (spec §9.3); that close may still land. Default 60,000: longer than the facilitator's
-   * wait for a close to confirm before it answers (30 s by default). A whole number from 1 to 4,294,967,295.
+   * wait for a close to confirm before it answers (30 s by default). A whole number from 1 to 2,147,483,647.
    */
   readonly closeRequestTimeoutMs?: number;
 }
@@ -2103,10 +2205,15 @@ const DEFAULT_CLOSE_POLL_MS = 1_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_CLOSE_REQUEST_TIMEOUT_MS = 60_000;
 
-/** A time limit as `AbortSignal.timeout` takes it, whole milliseconds that fit 32 bits, checked when the client is created. */
+/** The longest delay Node's timers keep: `AbortSignal.timeout` takes up to 2^32 - 1, but fires at once past this. */
+const MAX_TIME_LIMIT_MS = 2_147_483_647;
+
+/** A time limit as `AbortSignal.timeout` keeps it, whole milliseconds up to `MAX_TIME_LIMIT_MS`, checked when the client is created. */
 function timeLimitMs(name: string, value: number | undefined, fallback: number): number {
   const ms = value ?? fallback;
-  if (!Number.isInteger(ms) || ms < 1 || ms > 0xffff_ffff) throw new RangeError(`${name} must be a whole number of milliseconds from 1 to 4294967295: got ${ms}`);
+  if (!Number.isInteger(ms) || ms < 1 || ms > MAX_TIME_LIMIT_MS) {
+    throw new RangeError(`${name} must be a whole number of milliseconds from 1 to ${MAX_TIME_LIMIT_MS}: got ${ms}`);
+  }
   return ms;
 }
 
@@ -2126,14 +2233,14 @@ function receiptFrom(body: unknown, via: CloseVia): CloseReceipt {
 
 /**
  * What one step of the close fallback chain came to (spec §9.3). `pending`, on a step that did not close the session, is
- * a close it sent that may still land.
+ * a close it sent that may still land; `unanswered`, a close it sent whose request had no answer, which may land too.
  */
 type CloseStep =
   | { readonly kind: "closed"; readonly receipt: CloseReceipt }
   /** A check found the session closed. */
   | { readonly kind: "gone"; readonly reason: string; readonly pending?: CloseReceipt }
   /** The step did not close the session. */
-  | { readonly kind: "next"; readonly reason: string; readonly pending?: CloseReceipt };
+  | { readonly kind: "next"; readonly reason: string; readonly pending?: CloseReceipt; readonly unanswered?: true };
 ```
 
 In `createStintClient`, replace:
@@ -2179,14 +2286,16 @@ with:
     async function closeWithFallbacks(): Promise<CloseReceipt> {
       const passed: string[] = [];
       const pending: CloseReceipt[] = [];
+      let unanswered = 0;
       for (const step of [closeThroughGate, closeThroughFacilitator]) {
         const outcome = await step();
         if (outcome.kind === "closed") return outcome.receipt;
         if (outcome.pending) pending.push(outcome.pending);
         if (outcome.kind === "gone") return alreadyClosed(pending);
+        if (outcome.unanswered) unanswered += 1;
         passed.push(outcome.reason);
       }
-      throw notClosed(passed, pending);
+      throw notClosed(passed, pending, unanswered);
     }
 
     /**
@@ -2200,11 +2309,15 @@ with:
       throw new StintError("The session is already closed", 404);
     }
 
-    /** No step closed the session: why each was passed over, the closes sent that may still land, and what that costs. */
-    function notClosed(passed: readonly string[], pending: readonly CloseReceipt[]): StintError {
+    /**
+     * No step closed the session: why each was passed over, the closes sent that may still land (`pending`, named, and
+     * `unanswered` more, whose requests had no answer), and what that costs.
+     */
+    function notClosed(passed: readonly string[], pending: readonly CloseReceipt[], unanswered: number): StintError {
       const sent = pending.map((close) => `${close.transaction} (${close.via})`).join(", ");
       const named = pending.length === 0 ? "" : pending.length === 1 ? ` A close sent may still land: ${sent}.` : ` Closes sent may still land: ${sent}.`;
-      const lands = pending.length === 0 ? "" : pending.length === 1 ? "that close lands or " : "one of those closes lands or ";
+      const mayLand = pending.length + unanswered;
+      const lands = mayLand === 0 ? "" : mayLand === 1 ? "that close lands or " : "one of those closes lands or ";
       return new StintError(
         `The session could not be closed: ${passed.join("; ")}.${named} ` +
           `It runs to the end of its paid time, which is charged in full, unless ${lands}a later close succeeds`,
@@ -2230,10 +2343,10 @@ with:
         status = response.status;
         body = await readBody(response);
       } catch (error) {
-        const reason = timedOut(error)
-          ? `the gate did not answer its close within ${closeRequestTimeoutMs} ms, and that close may still land`
-          : `the gate cannot be reached (${describeError(error)})`;
-        return { kind: "next", reason };
+        if (timedOut(error)) {
+          return { kind: "next", reason: `the gate did not answer its close within ${closeRequestTimeoutMs} ms, and that close may still land`, unanswered: true };
+        }
+        return { kind: "next", reason: `the gate cannot be reached (${describeError(error)})` };
       }
       if (status === 200) return { kind: "closed", receipt: receiptFrom(body, "gate") };
       if (status === 202) return awaitGateClose(body);
@@ -2286,6 +2399,7 @@ with:
         // Refuses a body that describes another session or program, or names this signer as the fee payer (spec S14).
         const transaction = await buildSponsoredClose(info, { session: address(opened.session), closer: options.signer });
         let posted: Response;
+        let answer: SponsoredCloseResponse;
         try {
           posted = await fetch(closeUrl, {
             method: "POST",
@@ -2293,11 +2407,13 @@ with:
             body: JSON.stringify({ transaction }),
             signal: AbortSignal.timeout(closeRequestTimeoutMs),
           });
+          // The time limit runs on while the answer is read: an answer started and never finished is no answer.
+          answer = (await readBody(posted)) as SponsoredCloseResponse;
         } catch (error) {
           if (!timedOut(error)) throw error;
-          return { kind: "next", reason: `the facilitator did not answer its close within ${closeRequestTimeoutMs} ms, and that close may still land` };
+          const reason = `the facilitator did not answer its close within ${closeRequestTimeoutMs} ms, and that close may still land`;
+          return { kind: "next", reason, unanswered: true };
         }
-        const answer = (await readBody(posted)) as SponsoredCloseResponse;
         if (posted.status === 200 && answer.success) return { kind: "closed", receipt: receiptFrom(answer, "sponsored") };
         const reason = `the facilitator did not close it (HTTP ${posted.status}: ${describeBody(answer)})`;
         // A close the facilitator sent and could not confirm may still land: if a later check finds the session closed, it is the receipt.
@@ -2413,7 +2529,7 @@ The tools' outputs (spec section 9.5: `paid`, `refunded`, `transaction`) do not 
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `pnpm --filter @lxfoundry/stint-client test && pnpm typecheck`
-Expected: PASS, every test of the client's suite, the twenty-one new ones included; no type error in the workspace (the
+Expected: PASS, every test of the client's suite, the twenty-two new ones included; no type error in the workspace (the
 MCP server and the example agent use the tools' outputs, which are unchanged).
 
 - [ ] **Step 7: Mutation check**
@@ -2444,7 +2560,13 @@ fails where stated, and undo it:
 11. In `awaitGateClose`, delete `, { signal: AbortSignal.timeout(requestTimeoutMs) }`: "gives up a read of the gate's
     status that never answers" fails on vitest's 5 s limit.
 12. In `timeLimitMs`, delete `!Number.isInteger(ms) || `: "refuses a time limit that is not a whole number of
-    milliseconds" fails (`1.5` is taken).
+    milliseconds …" fails (`1.5` is taken).
+13. In `timeLimitMs`, `ms > MAX_TIME_LIMIT_MS` → `ms > 0xffff_ffff`: the same test fails (`2 ** 31` is taken).
+14. In `closeWithFallbacks`, delete `if (outcome.unanswered) unanswered += 1;`: "passes over a closeUrl that takes the
+    close and never answers" fails (the error ends "unless a later close succeeds").
+15. In `closeThroughFacilitator`, move `answer = (await readBody(posted)) as SponsoredCloseResponse;` out of its `try`,
+    to just after it: "says that close may still land when closeUrl starts its answer …" fails (the error says the
+    sponsored close failed).
 
 - [ ] **Step 8: Update the spec**
 
@@ -2971,14 +3093,16 @@ comments:
     async function closeWithFallbacks(): Promise<CloseReceipt> {
       const passed: string[] = [];
       const pending: CloseReceipt[] = [];
+      let unanswered = 0;
       for (const step of [closeThroughGate, closeThroughFacilitator]) {
         const outcome = await step();
         if (outcome.kind === "closed") return outcome.receipt;
         if (outcome.pending) pending.push(outcome.pending);
         if (outcome.kind === "gone") return alreadyClosed(pending);
+        if (outcome.unanswered) unanswered += 1;
         passed.push(outcome.reason);
       }
-      throw notClosed(passed, pending);
+      throw notClosed(passed, pending, unanswered);
     }
 
     /**
@@ -3007,14 +3131,16 @@ with:
     async function closeWithFallbacks(): Promise<CloseReceipt> {
       const passed: string[] = [];
       const pending: CloseReceipt[] = [];
+      let unanswered = 0;
       for (const step of [closeThroughGate, closeThroughFacilitator, closeOnChain]) {
         const outcome = await step();
         if (outcome.kind === "closed") return outcome.receipt;
         if (outcome.pending) pending.push(outcome.pending);
         if (outcome.kind === "gone" && (step === closeOnChain || !(await stillOpen()))) return alreadyClosed(pending);
+        if (outcome.kind === "next" && outcome.unanswered) unanswered += 1;
         passed.push(outcome.reason);
       }
-      throw notClosed(passed, pending);
+      throw notClosed(passed, pending, unanswered);
     }
 
     /**
@@ -3031,9 +3157,9 @@ with:
 
     /**
      * The session is closed. A close passed on by an earlier step is the receipt: with the client's `rpc`, the one the
-     * chain shows landed (`findClose`), with its amounts; without it, or while the chain shows no close yet, the latest,
-     * without amounts. With none passed on, or when the close that landed is none of them, another party closed the
-     * session: that is reported, and the session counts as closed.
+     * chain shows landed (`findClose`), with its amounts; without it, while the chain shows no close yet, or when the
+     * lookup cannot be read, the latest, without amounts. With none passed on, or when the close that landed is none of
+     * them, another party closed the session: that is reported, and the session counts as closed.
      */
     async function alreadyClosed(pending: readonly CloseReceipt[]): Promise<CloseReceipt> {
       let mine = pending.at(-1);
@@ -3152,8 +3278,9 @@ closed with its own read of the account: if the chain still shows the session, t
 on; if the read fails, that word stands. When it finds the session closed with closes of its own
 passed on, it looks the close up on the chain: the one it matches is the receipt, with its
 amounts; a close that matches none of them was another party's; while the chain shows no close,
-the latest close passed on is the receipt. Step 3 needs the authority to hold the fee of one
-signature on top of a rent-exempt balance, since a fee payer may not drop below it.
+or the lookup cannot be read, the latest close passed on is the receipt. Step 3 needs the
+authority to hold the fee of one signature on top of a rent-exempt balance, since a fee payer
+may not drop below it.
 ```
 
 Run: `grep -c "if the read fails, that word stands" docs/specs/stint-system.md`
@@ -4212,7 +4339,8 @@ git commit -m "Record the scenarios of the fallback closes that pass on devnet"
 - Scenarios 7, 24 and 25 are `required` and pass on `local` and on devnet, with every earlier required scenario.
 - The gate drops the connections of a session that another party closed as soon as its subscription sees the account
   go, with `4402` or `4410` as spec section 7.3 says, within about 2 s; it sends no close of its own for it, and serves
-  no new connection, close or top-up of it meanwhile, nor resumes it for a top-up that confirms then.
+  no new connection, close or top-up of it meanwhile, nor resumes or ends it for a top-up that confirms, or an
+  end-timer pass that re-reads it, then.
 - `session.close()` closes through the gate, through `closeUrl` when the gate cannot, and on the chain with the client's
   `rpc` and SOL when neither can; it waits for a close the gate reports pending; no request holds it up past its time
   limit; with an `rpc`, it checks a seller's word that the session is closed with its own read; it says which step closed
