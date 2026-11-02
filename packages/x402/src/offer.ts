@@ -80,11 +80,13 @@ export function checkOpenDuration(terms: Terms, seconds: number): DurationCheck 
 }
 
 /**
- * Valid top-up durations: whole seconds from 1 to what `maxSeconds` leaves after the `covered` seconds the session's
- * deposit already buys; `minSeconds` does not apply (spec §5.2). A refusal states the bounds, and its `maxSeconds` is 0
- * when the session is already paid for `maxSeconds`.
+ * Valid top-up durations: whole seconds from 1 to what `maxSeconds` leaves after the seconds the session's `deposited`
+ * already covers, a part second counting as a whole one so that the total stays within `rate × maxSeconds`;
+ * `minSeconds` does not apply (spec §5.2). A refusal states the bounds, and its `maxSeconds` is 0 when the session is
+ * already paid for `maxSeconds`.
  */
-export function checkTopUpDuration(terms: Terms, covered: bigint, seconds: number): DurationCheck {
+export function checkTopUpDuration(terms: Terms, deposited: bigint, seconds: number): DurationCheck {
+  const covered = (deposited + terms.rate - 1n) / terms.rate;
   const room = BigInt(terms.maxSeconds) > covered ? Number(BigInt(terms.maxSeconds) - covered) : 0;
   return Number.isInteger(seconds) && seconds >= 1 && seconds <= room ? { ok: true } : { ok: false, minSeconds: 1, maxSeconds: room };
 }

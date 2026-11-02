@@ -61,15 +61,23 @@ describe("offers", () => {
   });
 
   it("accepts top-up durations from 1 to what maxSeconds leaves after the covered seconds, whatever minSeconds (spec §5.2)", () => {
-    const terms = input.terms; // 5 to 120 s
-    expect(checkTopUpDuration(terms, 30n, 1)).toEqual({ ok: true });
-    expect(checkTopUpDuration(terms, 30n, 90)).toEqual({ ok: true });
+    const terms = input.terms; // 1,000 per second, 5 to 120 s
+    expect(checkTopUpDuration(terms, 30_000n, 1)).toEqual({ ok: true });
+    expect(checkTopUpDuration(terms, 30_000n, 90)).toEqual({ ok: true });
     for (const seconds of [0, 91, 2.5, Number.NaN]) {
-      expect(checkTopUpDuration(terms, 30n, seconds)).toEqual({ ok: false, minSeconds: 1, maxSeconds: 90 });
+      expect(checkTopUpDuration(terms, 30_000n, seconds)).toEqual({ ok: false, minSeconds: 1, maxSeconds: 90 });
     }
     // A session paid for maxSeconds has no room left; nor has one paid for more, which an open never allows.
-    expect(checkTopUpDuration(terms, 120n, 1)).toEqual({ ok: false, minSeconds: 1, maxSeconds: 0 });
-    expect(checkTopUpDuration(terms, 121n, 1)).toEqual({ ok: false, minSeconds: 1, maxSeconds: 0 });
+    expect(checkTopUpDuration(terms, 120_000n, 1)).toEqual({ ok: false, minSeconds: 1, maxSeconds: 0 });
+    expect(checkTopUpDuration(terms, 121_000n, 1)).toEqual({ ok: false, minSeconds: 1, maxSeconds: 0 });
+  });
+
+  it("counts a part second of the deposit as covered, so the total stays within maxSeconds (spec §5.2)", () => {
+    const terms = input.terms; // 1,000 per second, 5 to 120 s
+    // 30.5 s paid: 90 s more would make 120.5 s, past the 120,000 that maxSeconds allows.
+    expect(checkTopUpDuration(terms, 30_500n, 89)).toEqual({ ok: true });
+    expect(checkTopUpDuration(terms, 30_500n, 90)).toEqual({ ok: false, minSeconds: 1, maxSeconds: 89 });
+    expect(checkTopUpDuration(terms, 119_500n, 1)).toEqual({ ok: false, minSeconds: 1, maxSeconds: 0 });
   });
 
   it("accepts open durations from minSeconds to maxSeconds only (spec §5.2)", () => {

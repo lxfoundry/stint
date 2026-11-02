@@ -112,7 +112,7 @@ export function checkTopUp(policy: Policy, offer: ElapsedRequirements, requested
   }
   if (extra.seconds !== requested) return no(`the offer is for ${extra.seconds} s, not the ${requested} s requested`);
   const rate = BigInt(extra.rate);
-  const duration = checkTopUpDuration({ rate, minSeconds: extra.minSeconds, maxSeconds: extra.maxSeconds }, context.sessionTotal / rate, extra.seconds);
+  const duration = checkTopUpDuration({ rate, minSeconds: extra.minSeconds, maxSeconds: extra.maxSeconds }, context.sessionTotal, extra.seconds);
   if (!duration.ok) return no(`${extra.seconds} s is outside 1..${duration.maxSeconds}, what maxSeconds leaves`);
   return checkAmount(policy, offer, context.sessionTotal, context.locked, allowed.decimals);
 }

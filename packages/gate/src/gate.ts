@@ -550,13 +550,14 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     if (!sameSession(tracked, stored)) {
       return sendJson(response, 404, { error: "unknown_session" });
     }
-    const covered = stored.deposited / stored.rate;
     const requested = url.searchParams.get("seconds");
     const durations =
-      requested === null ? menu.filter((seconds) => checkTopUpDuration(config.terms, covered, seconds).ok) : [Number(requested)];
+      requested === null ? menu.filter((seconds) => checkTopUpDuration(config.terms, stored.deposited, seconds).ok) : [Number(requested)];
     // When no duration of the menu fits, the 400 states the bounds, so that the buyer can ask for one that does.
     const checks =
-      durations.length === 0 ? [checkTopUpDuration(config.terms, covered, 0)] : durations.map((seconds) => checkTopUpDuration(config.terms, covered, seconds));
+      durations.length === 0
+        ? [checkTopUpDuration(config.terms, stored.deposited, 0)]
+        : durations.map((seconds) => checkTopUpDuration(config.terms, stored.deposited, seconds));
     for (const check of checks) {
       if (!check.ok) return sendJson(response, 400, { error: "invalid_duration", minSeconds: check.minSeconds, maxSeconds: check.maxSeconds });
     }
