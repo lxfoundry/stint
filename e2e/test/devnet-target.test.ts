@@ -95,7 +95,7 @@ describe("the devnet target, run against the local network", () => {
   const usdcOf = async (account: Address) => (await fetchToken(chain.network.rpc, account)).data.amount;
   const openSession = async (running: DevnetStack, reason: string) => {
     const context = running.context();
-    const buyer = await context.newBuyer(100_000n); // the session costs 30,000 (40,000 on devnet): a run lends no more than its buyers spend
+    const buyer = await context.newBuyer(100_000n); // the session costs 30,000: a run lends no more than its buyers spend
     const { tools } = createSessionTools(
       createStintClient({
         signer: buyer.signer,

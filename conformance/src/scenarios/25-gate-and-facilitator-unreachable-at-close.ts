@@ -49,9 +49,10 @@ export async function gateAndFacilitatorUnreachableAtClose(context: ScenarioCont
   // Each session gets a connection as soon as it opens: it keeps the gate's idle timer from closing it before the gate stops (spec §7.3).
   const paying = await buyerClient(withSol, { rpc: context.rpc }).open(context.gateUrl, { seconds: sessionSeconds(context.target, 30) });
   const payingSocket = await paying.connect();
+  payingSocket.on("error", () => {});
   const stranded = await buyerClient(withoutSol, { rpc: context.rpc }).open(context.gateUrl, { seconds: sessionSeconds(context.target, 15) });
   const strandedSocket = await stranded.connect();
-  for (const socket of [payingSocket, strandedSocket]) socket.on("error", () => {});
+  strandedSocket.on("error", () => {});
   const storedPaying = await readOpenedSession(context, paying.id);
   const storedStranded = await readOpenedSession(context, stranded.id);
   expectEqual(storedStranded.rentPayer, stack.rentPayer, "the session without SOL names the facilitator's rent payer: the sweeper's to close");

@@ -56,7 +56,11 @@ export interface StackControl {
 export interface DirectSession {
   readonly session: Address;
   readonly vault: Address;
-  /** A harness key that is not the facilitator's: the rent of the session account and its vault returns to it at the close. */
+  /**
+   * The session's rent payer, to which the rent of the session account and its vault returns at the close: a harness key
+   * that is not the facilitator's for a session opened straight on the program, the facilitator's for one the gate's flow
+   * opened (`directSessionOf`).
+   */
   readonly rentPayer: Address;
   /** The seller's token account, which a close pays. */
   readonly receiverToken: Address;
