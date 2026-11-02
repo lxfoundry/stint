@@ -197,6 +197,10 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   };
   const wsUrl = (session: Address) => `${config.origin.replace(/^http/, "ws")}/sessions/${session}/ws`;
 
+  /** True when the account still holds the tracked session: the same `started_at`, on terms this gate offers (spec §4.1). */
+  const sameSession = (tracked: Tracked<U>, stored: Session | undefined): stored is Session =>
+    !!stored && stored.startedAt === tracked.stored.startedAt && sessionMatches(stored, seller);
+
   /** `feePayer`, `rentPayer`, `programId` and `closeUrl` are copied from `/supported` (spec §5.1). */
   const fromFacilitator = (): Promise<FacilitatorExtra> => upstream(loadFacilitatorExtra);
 
@@ -405,7 +409,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       if (tracked.ended) return true;
       // A close that started during the read decides: it is the reason the account may be gone, and it ends the session.
       if (tracked.closing) return false;
-      if (!stored || stored.startedAt !== tracked.stored.startedAt || !sessionMatches(stored, seller)) {
+      if (!sameSession(tracked, stored)) {
         await end(tracked, "expired", CLOSE_CODES.PAID_TIME_ENDED);
         return true;
       }
@@ -434,7 +438,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       tracked.unwatch = config.chain.watchSession(
         session,
         (stored) => {
-          if (!stored || stored.startedAt !== tracked.stored.startedAt || !sessionMatches(stored, seller)) return;
+          if (!sameSession(tracked, stored)) return;
           paidLonger(tracked, paidUntil(stored));
         },
         failed,
@@ -543,7 +547,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     if (!tracked || tracked.ended) return sendJson(response, 404, { error: "unknown_session" });
     if (tracked.muted) return paymentRequired(response, menu, "session_expired");
     const stored = await upstream(() => config.chain.readSession(session));
-    if (!stored || stored.startedAt !== tracked.stored.startedAt || !sessionMatches(stored, seller)) {
+    if (!sameSession(tracked, stored)) {
       return sendJson(response, 404, { error: "unknown_session" });
     }
     const covered = stored.deposited / stored.rate;
