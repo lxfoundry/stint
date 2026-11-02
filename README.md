@@ -15,15 +15,16 @@ Brand assets and usage rules: [`brand/`](brand/README.md).
 
 ## Status
 
-Work in progress. Working today: the Solana program, deployed on devnet (`open`, `claim`, and `close`, which pays
-the seller for the time used, or for the whole paid time once it has run out, and refunds the rest); the x402
-`elapsed` scheme; the facilitator with its sweeper, the gate with its timers, the client library, an MCP server
-and an example agent.
+Work in progress. Working today: the Solana program (`open`, `top_up`, `claim`, and `close`, which pays the seller
+for the time used, or for the whole paid time once it has run out, and refunds the rest; the devnet deployment is
+of the earlier version, without `top_up`, until it is upgraded); the x402 `elapsed` scheme; the facilitator with its
+sweeper, the gate with its timers, the client library, an MCP server and an example agent.
 A session ends by itself: the gate drops its connection with `4402` when the paid time runs out, closes a session
 that nobody connects to, and the sweeper closes an expired session that nobody closed, if it names the
-facilitator's own rent payer. Seven of the 35 end-to-end scenarios of the
-[specification](docs/specs/stint-system.md) (section 12.7) pass on a local network and on devnet, and the run
-report lists the other 28 as pending. Not built yet: top-ups, fallback closes, refusals of bad payments and
+facilitator's own rent payer. A buyer can top up a session before its paid time runs out, which moves its end; a
+session whose paid time has run out cannot be extended. Nine of the 35 end-to-end scenarios of the
+[specification](docs/specs/stint-system.md) (section 12.7) pass on a local network, seven of them also on devnet,
+and the run report lists the other 26 as pending. Not built yet: fallback closes, refusals of bad payments and
 settlement records, and resilience across restarts.
 The [plans](docs/plans/README.md) list the stages that remain.
 

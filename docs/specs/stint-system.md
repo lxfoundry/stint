@@ -1410,7 +1410,8 @@ run is repeatable.
 - **Stack control:** the harness runs the services, so it holds their keys (the seller's wallet,
   the receiver authorizer, the facilitator's API key, the resource's admin key) and can stop,
   restart or add instances of them. In particular, it can stop the gate and start it again on the same
-  address while the facilitator, its sweeper and Kora keep running (scenario 26).
+  address while the facilitator, its sweeper and Kora keep running (scenario 26), and start it with its session
+  clock running ahead of the wall clock (scenario 34).
 - **Facilitator API:** the harness can call the facilitator's `/verify` with an API key (section 6.5). Always
   on `local` and `devnet`; on `external` only with `--facilitator` and `--facilitator-key`.
 - **Allowance:** the facilitator accepts an allowance pull as the funding instruction (section

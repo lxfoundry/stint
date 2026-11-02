@@ -4,10 +4,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startLocalStack, type LocalStack } from "../src/targets/local.js";
 
 /**
- * The required scenarios, all passing on `local`. Together they take about two minutes: scenario 1 sleeps 7 s, 3 runs about
- * 25 s, 9 about 15 s, 16 about 15 s and 26 about 20 s, so the test's limit is generous.
+ * The required scenarios, all passing on `local`. Together they take about three minutes: scenario 1 sleeps 7 s, 3 runs
+ * about 25 s, 4 about 35 s, 9 about 15 s, 16 about 15 s, 26 about 20 s and 34 about 35 s, so the test's limit is generous.
  */
-const REQUIRED = [1, 2, 3, 4, 9, 16, 22, 26];
+const REQUIRED = [1, 2, 3, 4, 9, 16, 22, 26, 34];
 
 describe("local target", () => {
   let stack: LocalStack;
@@ -39,7 +39,7 @@ describe("local target", () => {
     expect(outcomes.find((outcome) => outcome.id === 12)?.result).toBe("not applicable");
     expect(outcomes.filter((outcome) => outcome.result === "pending")).toHaveLength(35 - 1 - REQUIRED.length);
     expect(exitCodeFor(outcomes)).toBe(0);
-  }, 300_000);
+  }, 420_000);
 
   it("gives scenarios control of the gate and sessions opened straight on the program", async () => {
     const context = stack.context();
