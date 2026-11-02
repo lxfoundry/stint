@@ -2,6 +2,7 @@ import { openConnectCloseEarly } from "./scenarios/01-open-connect-close.js";
 import { closeBeforeMinSeconds } from "./scenarios/02-close-before-min-seconds.js";
 import { expiry } from "./scenarios/03-expiry.js";
 import { topUpBeforeAndAfterExpiry } from "./scenarios/04-top-up.js";
+import { unilateralClose } from "./scenarios/07-unilateral-close.js";
 import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
 import { sponsoredClose } from "./scenarios/15-sponsored-close.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
@@ -38,7 +39,7 @@ export const catalogue: readonly Scenario[] = [
   required(4, "Top-up before and after expiry", topUpBeforeAndAfterExpiry),
   pending(5, "Payment with wrong terms, a wrong amount, or a Memo instruction"),
   pending(6, "Failed payment"),
-  pending(7, "Unilateral on-chain close"),
+  required(7, "Unilateral on-chain close", unilateralClose),
   pending(8, "Token: expired, wrong aud, wrong purpose, replayed"),
   required(9, "Disconnect past the grace period; reconnect within it; never connect", disconnectAndGrace),
   pending(10, "Resource outage", ["stack"], "ownStack"),
