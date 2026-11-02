@@ -18,16 +18,16 @@ Brand assets and usage rules: [`brand/`](brand/README.md).
 Work in progress. Working today: the Solana program, deployed on devnet (`open`, `top_up`, `claim`, and `close`,
 which pays the seller for the time used, or for the whole paid time once it has run out, and refunds the rest); the
 x402 `elapsed` scheme; the facilitator with its sweeper and its sponsored close (a buyer with no SOL closes its
-session through the facilitator when the gate cannot), the gate with its timers, the client library, an MCP
-server and an example agent.
+session through the facilitator when the gate cannot), the gate with its timers, the client library, which falls back
+on the facilitator's sponsored close, then on a close of its own when it has a node and SOL, an MCP server and an
+example agent.
 A session ends by itself: the gate drops its connection with `4402` when the paid time runs out, closes a session
-that nobody connects to, and the sweeper closes an expired session that nobody closed, if it names the
-facilitator's own rent payer. A buyer can top up a session before its paid time runs out, which moves its end; a
-session whose paid time has run out cannot be extended. Ten of the 35 end-to-end scenarios of the
-[specification](docs/specs/stint-system.md) (section 12.7) pass on a local network and on devnet, and the run
-report lists the other 25 as pending. Not built yet: the client's fallback closes (the client does not use the
-facilitator's sponsored close yet), refusals of bad payments and settlement records, the facilitator's rate
-limits, and resilience across restarts.
+that nobody connects to, and drops at once the connections of a session that another party closed; the sweeper
+closes an expired session that nobody closed, if it names the facilitator's own rent payer. A buyer can top up a
+session before its paid time runs out, which moves its end; a session whose paid time has run out cannot be
+extended. Thirteen of the 35 end-to-end scenarios of the [specification](docs/specs/stint-system.md) (section 12.7)
+pass on a local network, ten of them also on devnet, and the run report lists the other 22 as pending. Not built
+yet: refusals of bad payments and settlement records, the facilitator's rate limits, and resilience across restarts.
 The [plans](docs/plans/README.md) list the stages that remain.
 
 ## Development
