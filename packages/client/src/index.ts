@@ -4,6 +4,7 @@ export {
   createStintClient,
   type ClientOptions,
   type CloseReceipt,
+  type CloseVia,
   type StintClient,
   type StintSession,
   type TopUpReceipt,

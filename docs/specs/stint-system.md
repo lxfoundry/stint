@@ -1237,6 +1237,20 @@ that close is pending. The client polls the status until `404`, for at most `clo
 then moves on. A gate close that lands later is harmless: the next step first checks that the
 session is still open, and two closes of one session cannot both land.
 
+The client moves to the next step on any answer to the gate's close but `200` and `202`, and
+when the gate cannot be reached: a refusal of the close itself, such as `409`, is met again by
+the later steps, which judge the close for themselves. It also moves on when the facilitator
+cannot be reached, answers `GET closeUrl` with anything but the session's fields or `404
+unknown_session`, or does not close the session. A request with no answer is given up: a read
+after a few seconds, a request that sends a close after a longer limit, past the facilitator's
+wait for the close to confirm; that close may still land. A step whose close may still land (a
+`202` past `closeWaitSeconds`, or `settlement_pending` from the facilitator) passes its
+signature on. The check finds the session closed when the gate's status or `GET closeUrl`
+answers `404 unknown_session`: the latest close passed on is then the receipt, and with none
+the client reports the session closed by another party. When no step closes the session, the
+client names the closes that may still land. Overlapping closes of one session share one chain.
+The receipt says which step closed the session.
+
 ### 9.4 API
 
 ```ts

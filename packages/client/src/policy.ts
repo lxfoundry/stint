@@ -22,6 +22,11 @@ export interface Policy {
   readonly budget: { readonly amount: bigint; readonly periodSeconds: number };
   /** Default 300. */
   readonly maxMinSeconds?: number;
+  /**
+   * Seconds to wait for a close that the gate reports pending (`202`) before the next step of the close fallback chain
+   * (spec §9.2, §9.3). Default 180: it must exceed two blockhash lifetimes, the gate's close and its one resend.
+   */
+  readonly closeWaitSeconds?: number;
 }
 
 type Refusal = { readonly ok: false; readonly reason: string };

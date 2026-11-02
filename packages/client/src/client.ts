@@ -3,15 +3,18 @@ import {
   HEADERS,
   X402_VERSION,
   buildOpenTransaction,
+  buildSponsoredClose,
   buildTopUpTransaction,
   createSessionToken,
   decodePaymentRequiredHeader,
   encodePaymentSignatureHeader,
+  readCloseInfo,
   readElapsedRequirements,
   type ElapsedRequirements,
   type PaymentPayload,
   type PaymentRequired,
   type SessionStatus,
+  type SponsoredCloseResponse,
   type TokenPurpose,
 } from "@lxfoundry/stint-x402";
 import { WebSocket } from "ws";
@@ -28,11 +31,18 @@ export class StintError extends Error {
   }
 }
 
-/** `paid` and `refunded` are absent when the gate could not read the `Closed` event of a confirmed close. */
+/**
+ * Which step of the close fallback chain closed the session (spec §9.3): the gate's close, the facilitator's sponsored
+ * close through the offer's `closeUrl`, or a close the client sent to the chain itself.
+ */
+export type CloseVia = "gate" | "sponsored" | "unilateral";
+
+/** `paid` and `refunded` are absent when the amounts of a confirmed close could not be read, or a pending close was not. */
 export interface CloseReceipt {
   readonly paid?: bigint;
   readonly refunded?: bigint;
   readonly transaction: string;
+  readonly via: CloseVia;
 }
 
 /** What a top-up bought. */
@@ -59,6 +69,11 @@ export interface StintSession {
   topUp(options: { readonly seconds: number }): Promise<TopUpReceipt>;
   /** The status the gate reports from the chain (spec §7.1): estimates use the gate's clock. */
   status(): Promise<SessionStatus>;
+  /**
+   * Closes the session through the close fallback chain (spec §9.3), and says which step closed it. Throws when the
+   * session is already closed (`404`), and when no step can close it: the session then runs to the end of its paid time,
+   * and a later call tries again. Overlapping calls share one chain.
+   */
   close(): Promise<CloseReceipt>;
   [Symbol.asyncDispose](): Promise<void>;
 }
@@ -74,6 +89,19 @@ export interface ClientOptions {
   readonly policy: Policy;
   /** Milliseconds; runs the period budget. Default `Date.now`. */
   readonly now?: () => number;
+  /** Milliseconds between reads of the gate's status while its close is pending (spec §9.3). Default 1,000. */
+  readonly closePollMs?: number;
+  /**
+   * Milliseconds after which a read of the close fallback chain (the gate's status, `GET closeUrl`) that has no answer
+   * is given up (spec §9.3). Default 10,000. A whole number from 1 to 2,147,483,647.
+   */
+  readonly requestTimeoutMs?: number;
+  /**
+   * Milliseconds after which a request of the close fallback chain that sends a close (the gate's close, `POST closeUrl`)
+   * and has no answer is given up (spec §9.3); that close may still land. Default 60,000: longer than the facilitator's
+   * wait for a close to confirm before it answers (30 s by default). A whole number from 1 to 2,147,483,647.
+   */
+  readonly closeRequestTimeoutMs?: number;
 }
 
 async function readBody(response: Response): Promise<unknown> {
@@ -87,9 +115,60 @@ async function readBody(response: Response): Promise<unknown> {
 
 const describeBody = (body: unknown) => (typeof body === "string" ? body : JSON.stringify(body));
 
+/** An error's message, with its cause's: `fetch` reports a host that cannot be reached as "fetch failed", and why in its cause. */
+const describeError = (error: unknown): string =>
+  error instanceof Error ? `${error.message}${error.cause instanceof Error ? `: ${error.cause.message}` : ""}` : String(error);
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const DEFAULT_CLOSE_WAIT_SECONDS = 180;
+const DEFAULT_CLOSE_POLL_MS = 1_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_CLOSE_REQUEST_TIMEOUT_MS = 60_000;
+
+/** The longest delay Node's timers keep: `AbortSignal.timeout` takes up to 2^32 - 1, but fires at once past this. */
+const MAX_TIME_LIMIT_MS = 2_147_483_647;
+
+/** A time limit as `AbortSignal.timeout` keeps it, whole milliseconds up to `MAX_TIME_LIMIT_MS`, checked when the client is created. */
+function timeLimitMs(name: string, value: number | undefined, fallback: number): number {
+  const ms = value ?? fallback;
+  if (!Number.isInteger(ms) || ms < 1 || ms > MAX_TIME_LIMIT_MS) {
+    throw new RangeError(`${name} must be a whole number of milliseconds from 1 to ${MAX_TIME_LIMIT_MS}: got ${ms}`);
+  }
+  return ms;
+}
+
+/** Whether a request was given up at its time limit (`AbortSignal.timeout`), rather than refused. */
+const timedOut = (error: unknown) => error instanceof Error && error.name === "TimeoutError";
+
+/** The receipt of a close whose answer reports it: the gate's `200`, or the facilitator's successful sponsored close. */
+function receiptFrom(body: unknown, via: CloseVia): CloseReceipt {
+  const answer = body as { paid?: string; refunded?: string; transaction: string };
+  return {
+    ...(answer.paid === undefined ? {} : { paid: BigInt(answer.paid) }),
+    ...(answer.refunded === undefined ? {} : { refunded: BigInt(answer.refunded) }),
+    transaction: answer.transaction,
+    via,
+  };
+}
+
+/**
+ * What one step of the close fallback chain came to (spec §9.3). `pending`, on a step that did not close the session, is
+ * a close it sent that may still land; `unanswered`, a close it sent whose request had no answer, which may land too.
+ */
+type CloseStep =
+  | { readonly kind: "closed"; readonly receipt: CloseReceipt }
+  /** A check found the session closed. */
+  | { readonly kind: "gone"; readonly reason: string; readonly pending?: CloseReceipt }
+  /** The step did not close the session. */
+  | { readonly kind: "next"; readonly reason: string; readonly pending?: CloseReceipt; readonly unanswered?: true };
+
 /** The buyer's runtime (spec §9.4). It needs only a signer: no SOL and no node access (spec §9.1). */
 export function createStintClient(options: ClientOptions): StintClient {
   const now = options.now ?? Date.now;
+  const closePollMs = options.closePollMs ?? DEFAULT_CLOSE_POLL_MS;
+  const requestTimeoutMs = timeLimitMs("requestTimeoutMs", options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
+  const closeRequestTimeoutMs = timeLimitMs("closeRequestTimeoutMs", options.closeRequestTimeoutMs, DEFAULT_CLOSE_REQUEST_TIMEOUT_MS);
   const ledger: { readonly at: number; readonly amount: bigint }[] = [];
   const locked = () => {
     const since = now() - options.policy.budget.periodSeconds * 1000;
@@ -140,6 +219,157 @@ export function createStintClient(options: ClientOptions): StintClient {
     let closed = false;
     let paidUntil = opened.paidUntil;
     let cost = deposit;
+    /** The close fallback chain in flight: overlapping calls of `close()` share it. */
+    let closing: Promise<CloseReceipt> | undefined;
+    const closeWaitSeconds = options.policy.closeWaitSeconds ?? DEFAULT_CLOSE_WAIT_SECONDS;
+
+    /**
+     * The close fallback chain (spec §9.3): the gate's close, then the facilitator's sponsored close through the offer's
+     * `closeUrl`. A step that finds the session closed ends the chain, since a close from an earlier step can land late: a
+     * close that an earlier step passed on is then the receipt. When no step closes the session, it runs to the end of its
+     * paid time.
+     */
+    async function closeWithFallbacks(): Promise<CloseReceipt> {
+      const passed: string[] = [];
+      const pending: CloseReceipt[] = [];
+      let unanswered = 0;
+      for (const step of [closeThroughGate, closeThroughFacilitator]) {
+        const outcome = await step();
+        if (outcome.kind === "closed") return outcome.receipt;
+        if (outcome.pending) pending.push(outcome.pending);
+        if (outcome.kind === "gone") return alreadyClosed(pending);
+        if (outcome.unanswered) unanswered += 1;
+        passed.push(outcome.reason);
+      }
+      throw notClosed(passed, pending, unanswered);
+    }
+
+    /**
+     * The session is closed: the latest close passed on by an earlier step is the receipt, without amounts. With none,
+     * another party closed the session: that is reported, and the session counts as closed.
+     */
+    function alreadyClosed(pending: readonly CloseReceipt[]): CloseReceipt {
+      const latest = pending.at(-1);
+      if (latest) return latest;
+      closed = true;
+      throw new StintError("The session is already closed", 404);
+    }
+
+    /**
+     * No step closed the session: why each was passed over, the closes sent that may still land (`pending`, named, and
+     * `unanswered` more, whose requests had no answer), and what that costs.
+     */
+    function notClosed(passed: readonly string[], pending: readonly CloseReceipt[], unanswered: number): StintError {
+      const sent = pending.map((close) => `${close.transaction} (${close.via})`).join(", ");
+      const named = pending.length === 0 ? "" : pending.length === 1 ? ` A close sent may still land: ${sent}.` : ` Closes sent may still land: ${sent}.`;
+      const mayLand = pending.length + unanswered;
+      const lands = mayLand === 0 ? "" : mayLand === 1 ? "that close lands or " : "one of those closes lands or ";
+      return new StintError(
+        `The session could not be closed: ${passed.join("; ")}.${named} ` +
+          `It runs to the end of its paid time, which is charged in full, unless ${lands}a later close succeeds`,
+      );
+    }
+
+    /**
+     * Step 1: the gate's close. `200` is the receipt, and a `202` is waited for. Any other answer moves the chain on, as
+     * does a gate that cannot be reached or does not answer within `closeRequestTimeoutMs`: a `404` (it does not track the
+     * session, as after a restart), a `5xx`, a `401` (a token it refuses, say from a skewed clock), and a refusal of the
+     * close itself, such as `409`, which the later steps judge for themselves.
+     */
+    async function closeThroughGate(): Promise<CloseStep> {
+      const authorization = `Bearer ${await token("close")}`;
+      let status: number;
+      let body: unknown;
+      try {
+        const response = await fetch(`${gateUrl}/sessions/${opened.session}/close`, {
+          method: "POST",
+          headers: { authorization },
+          signal: AbortSignal.timeout(closeRequestTimeoutMs),
+        });
+        status = response.status;
+        body = await readBody(response);
+      } catch (error) {
+        if (timedOut(error)) {
+          return { kind: "next", reason: `the gate did not answer its close within ${closeRequestTimeoutMs} ms, and that close may still land`, unanswered: true };
+        }
+        return { kind: "next", reason: `the gate cannot be reached (${describeError(error)})` };
+      }
+      if (status === 200) return { kind: "closed", receipt: receiptFrom(body, "gate") };
+      if (status === 202) return awaitGateClose(body);
+      return { kind: "next", reason: `the gate answered ${status}: ${describeBody(body)}` };
+    }
+
+    /**
+     * The gate's close is pending (`202`): its status is read every `closePollMs` until it answers `404 unknown_session`,
+     * for at most `closeWaitSeconds`. That answer means the session is closed, and the pending close is the receipt,
+     * without amounts; another `404`, such as a proxy's, is not the gate's word and is waited out. Past the wait the chain
+     * moves on, passing the pending close on, and the next step first checks that the session is still open.
+     */
+    async function awaitGateClose(body: unknown): Promise<CloseStep> {
+      const transaction = (body as { transaction?: unknown } | null)?.transaction;
+      const still = typeof transaction === "string" ? { pending: { transaction, via: "gate" as const } } : {};
+      const deadline = Date.now() + closeWaitSeconds * 1000;
+      for (;;) {
+        try {
+          const response = await fetch(`${gateUrl}/sessions/${opened.session}`, { signal: AbortSignal.timeout(requestTimeoutMs) });
+          const answer = await readBody(response);
+          if (response.status === 404 && (answer as { error?: unknown } | null)?.error === "unknown_session") {
+            return { kind: "gone", reason: "the gate's status finds no session", ...still };
+          }
+        } catch {
+          // A gate that cannot be reached now may answer at the next read.
+        }
+        if (Date.now() >= deadline) {
+          return { kind: "next", reason: `the gate's close stayed pending for ${closeWaitSeconds} s`, ...still };
+        }
+        await sleep(closePollMs);
+      }
+    }
+
+    /**
+     * Step 2: the facilitator's sponsored close (spec §6.1, §9.3). `GET closeUrl?session=` says whether the session is
+     * still open (`404 unknown_session`: it is closed) and gives the fee payer, a blockhash and the session's fields. The
+     * client builds the close from them, signs it as the session's authority, and posts it. Any failure moves the chain on:
+     * the facilitator cannot be reached or does not answer in time, answers something else, or does not close it.
+     */
+    async function closeThroughFacilitator(): Promise<CloseStep> {
+      const closeUrl = offer.extra.closeUrl;
+      try {
+        const lookup = await fetch(`${closeUrl}?session=${opened.session}`, { signal: AbortSignal.timeout(requestTimeoutMs) });
+        const found = await readBody(lookup);
+        if (lookup.status === 404 && (found as { error?: unknown } | null)?.error === "unknown_session") {
+          return { kind: "gone", reason: "GET closeUrl finds no session" };
+        }
+        const info = lookup.status === 200 ? readCloseInfo(found) : undefined;
+        if (!info) return { kind: "next", reason: `GET closeUrl answered ${lookup.status}: ${describeBody(found)}` };
+        // Refuses a body that describes another session or program, or names this signer as the fee payer (spec S14).
+        const transaction = await buildSponsoredClose(info, { session: address(opened.session), closer: options.signer });
+        let posted: Response;
+        let answer: SponsoredCloseResponse;
+        try {
+          posted = await fetch(closeUrl, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ transaction }),
+            signal: AbortSignal.timeout(closeRequestTimeoutMs),
+          });
+          // The time limit runs on while the answer is read: an answer started and never finished is no answer.
+          answer = (await readBody(posted)) as SponsoredCloseResponse;
+        } catch (error) {
+          if (!timedOut(error)) throw error;
+          const reason = `the facilitator did not answer its close within ${closeRequestTimeoutMs} ms, and that close may still land`;
+          return { kind: "next", reason, unanswered: true };
+        }
+        if (posted.status === 200 && answer.success) return { kind: "closed", receipt: receiptFrom(answer, "sponsored") };
+        const reason = `the facilitator did not close it (HTTP ${posted.status}: ${describeBody(answer)})`;
+        // A close the facilitator sent and could not confirm may still land: if a later check finds the session closed, it is the receipt.
+        const unconfirmed = posted.status === 200 && !answer.success && answer.errorReason === "settlement_pending";
+        return { kind: "next", reason, ...(unconfirmed ? { pending: { transaction: answer.transaction, via: "sponsored" as const } } : {}) };
+      } catch (error) {
+        return { kind: "next", reason: `the facilitator's sponsored close failed (${describeError(error)})` };
+      }
+    }
+
     const session: StintSession = {
       id: address(opened.session),
       gateUrl,
@@ -224,19 +454,13 @@ export function createStintClient(options: ClientOptions): StintClient {
         return body as SessionStatus;
       },
       async close() {
-        const response = await fetch(`${gateUrl}/sessions/${opened.session}/close`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${await token("close")}` },
+        // Overlapping calls share one chain: two chains would each send a close, and only one can land.
+        closing ??= closeWithFallbacks().finally(() => {
+          closing = undefined;
         });
-        const body = await readBody(response);
-        if (response.status !== 200) throw new StintError(`Close failed (HTTP ${response.status}): ${describeBody(body)}`, response.status, body);
+        const receipt = await closing;
         closed = true;
-        const receipt = body as { paid?: string; refunded?: string; transaction: string };
-        return {
-          ...(receipt.paid === undefined ? {} : { paid: BigInt(receipt.paid) }),
-          ...(receipt.refunded === undefined ? {} : { refunded: BigInt(receipt.refunded) }),
-          transaction: receipt.transaction,
-        };
+        return receipt;
       },
       async [Symbol.asyncDispose]() {
         if (!closed) await session.close();

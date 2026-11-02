@@ -60,7 +60,7 @@ describe("session client (spec §9.3, §9.4)", () => {
     const session = await client.open(gate.url, { seconds: 30 });
     const socket = await session.connect();
     const dropped = new Promise<number>((resolve) => socket.once("close", (code) => resolve(code)));
-    expect(await session.close()).toEqual({ paid: 8_000n, refunded: 22_000n, transaction: "sig" });
+    expect(await session.close()).toEqual({ paid: 8_000n, refunded: 22_000n, transaction: "sig", via: "gate" });
     expect(await dropped).toBe(4410);
   });
 
@@ -68,7 +68,7 @@ describe("session client (spec §9.3, §9.4)", () => {
     const client = createStintClient({ signer: buyer, policy });
     const session = await client.open(gate.url, { seconds: 30 });
     gate.hideClosedEvent = true;
-    expect(await session.close()).toEqual({ transaction: "sig" });
+    expect(await session.close()).toEqual({ transaction: "sig", via: "gate" });
     // Disposing a closed session must not close it again.
     await session[Symbol.asyncDispose]();
   });
