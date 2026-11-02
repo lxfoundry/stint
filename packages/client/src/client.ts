@@ -1,15 +1,28 @@
-import { address, type Address, type KeyPairSigner } from "@solana/kit";
+import {
+  address,
+  fetchEncodedAccount,
+  type Address,
+  type Base64EncodedWireTransaction,
+  type KeyPairSigner,
+  type Rpc,
+  type SolanaRpcApi,
+} from "@solana/kit";
+import { CloseKind, STINT_PROGRAM_ADDRESS, decodeSession, type ClosedEvent, type Session } from "@lxfoundry/stint-program-client";
 import {
   HEADERS,
   X402_VERSION,
+  buildCloseTransaction,
   buildOpenTransaction,
   buildSponsoredClose,
   buildTopUpTransaction,
   createSessionToken,
   decodePaymentRequiredHeader,
   encodePaymentSignatureHeader,
+  fetchClosedEvent,
+  findClose,
   readCloseInfo,
   readElapsedRequirements,
+  waitForConfirmation,
   type ElapsedRequirements,
   type PaymentPayload,
   type PaymentRequired,
@@ -102,6 +115,13 @@ export interface ClientOptions {
    * wait for a close to confirm before it answers (30 s by default). A whole number from 1 to 2,147,483,647.
    */
   readonly closeRequestTimeoutMs?: number;
+  /**
+   * A node, for the last step of the close fallback chain: a close the client sends to the chain itself, its fee paid by
+   * the signer, which must hold SOL for it (spec §9.1, §9.3). With one, the client checks with its own read of the
+   * session account a gate's or a facilitator's word that the session is closed. Without one, a session that neither the
+   * gate nor the facilitator can close runs to the end of its paid time.
+   */
+  readonly rpc?: Rpc<SolanaRpcApi>;
 }
 
 async function readBody(response: Response): Promise<unknown> {
@@ -125,6 +145,26 @@ const DEFAULT_CLOSE_WAIT_SECONDS = 180;
 const DEFAULT_CLOSE_POLL_MS = 1_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_CLOSE_REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * The fee of a transaction with one signature. A fee payer may not drop below the rent-exempt minimum, so a signer must
+ * hold this on top of it to send a close of its own.
+ */
+const SIGNATURE_FEE_LAMPORTS = 5_000n;
+/** How the `Closed` event of the client's own close is read while the node does not return the transaction yet. */
+const EVENT_READ_RETRY = { attempts: 5, delayMs: 200 };
+
+/**
+ * The session at `session`, read at `confirmed`, or undefined if no account of the program is there: anyone can send
+ * lamports to the address of a closed session (S12), which leaves a wallet there, not a session.
+ */
+async function readOwnSession(rpc: Rpc<SolanaRpcApi>, session: Address): Promise<Session | undefined> {
+  const account = await fetchEncodedAccount(rpc, session, { commitment: "confirmed" });
+  if (!account.exists || account.programAddress !== STINT_PROGRAM_ADDRESS) return undefined;
+  return decodeSession(account).data;
+}
+
+/** A close's amounts as a receipt reports them, from its `Closed` event: `paid` is all the receiver was paid for the session. */
+const amountsOf = (event: ClosedEvent) => ({ paid: event.claimed + event.owed + event.redirected, refunded: event.refunded });
 
 /** The longest delay Node's timers keep: `AbortSignal.timeout` takes up to 2^32 - 1, but fires at once past this. */
 const MAX_TIME_LIMIT_MS = 2_147_483_647;
@@ -225,32 +265,55 @@ export function createStintClient(options: ClientOptions): StintClient {
 
     /**
      * The close fallback chain (spec §9.3): the gate's close, then the facilitator's sponsored close through the offer's
-     * `closeUrl`. A step that finds the session closed ends the chain, since a close from an earlier step can land late: a
-     * close that an earlier step passed on is then the receipt. When no step closes the session, it runs to the end of its
-     * paid time.
+     * `closeUrl`, then a close the client sends to the chain itself. A step that finds the session closed ends the chain,
+     * since a close from an earlier step can land late: a close that an earlier step passed on is then the receipt. With
+     * an `rpc`, the gate's or the facilitator's word that the session is closed is checked with the client's own read
+     * (`stillOpen`): the chain goes on only if the chain still shows the session. When no step closes the session, it runs
+     * to the end of its paid time.
      */
     async function closeWithFallbacks(): Promise<CloseReceipt> {
       const passed: string[] = [];
       const pending: CloseReceipt[] = [];
       let unanswered = 0;
-      for (const step of [closeThroughGate, closeThroughFacilitator]) {
+      for (const step of [closeThroughGate, closeThroughFacilitator, closeOnChain]) {
         const outcome = await step();
         if (outcome.kind === "closed") return outcome.receipt;
         if (outcome.pending) pending.push(outcome.pending);
-        if (outcome.kind === "gone") return alreadyClosed(pending);
-        if (outcome.unanswered) unanswered += 1;
+        if (outcome.kind === "gone" && (step === closeOnChain || !(await stillOpen()))) return alreadyClosed(pending);
+        if (outcome.kind === "next" && outcome.unanswered) unanswered += 1;
         passed.push(outcome.reason);
       }
       throw notClosed(passed, pending, unanswered);
     }
 
     /**
-     * The session is closed: the latest close passed on by an earlier step is the receipt, without amounts. With none,
-     * another party closed the session: that is reported, and the session counts as closed.
+     * Whether the client's own read still finds the session (spec §9.3), to check a gate's or a facilitator's word that it
+     * is closed. False without an `rpc`, and when the read fails: the seller's word then stands.
      */
-    function alreadyClosed(pending: readonly CloseReceipt[]): CloseReceipt {
-      const latest = pending.at(-1);
-      if (latest) return latest;
+    async function stillOpen(): Promise<boolean> {
+      if (!options.rpc) return false;
+      return readOwnSession(options.rpc, address(opened.session)).then(
+        (stored) => stored !== undefined,
+        () => false,
+      );
+    }
+
+    /**
+     * The session is closed. A close passed on by an earlier step is the receipt: with the client's `rpc`, the one the
+     * chain shows landed (`findClose`), with its amounts; without it, while the chain shows no close yet, or when the
+     * lookup cannot be read, the latest, without amounts. With none passed on, or when the close that landed is none of
+     * them, another party closed the session: that is reported, and the session counts as closed.
+     */
+    async function alreadyClosed(pending: readonly CloseReceipt[]): Promise<CloseReceipt> {
+      let mine = pending.at(-1);
+      if (options.rpc && mine) {
+        const landed = await findClose(options.rpc, address(opened.session)).catch(() => undefined);
+        if (landed) {
+          const match = pending.find((close) => close.transaction === landed.signature);
+          mine = match && { ...match, ...amountsOf(landed.event) };
+        }
+      }
+      if (mine) return mine;
       closed = true;
       throw new StintError("The session is already closed", 404);
     }
@@ -367,6 +430,52 @@ export function createStintClient(options: ClientOptions): StintClient {
         return { kind: "next", reason, ...(unconfirmed ? { pending: { transaction: answer.transaction, via: "sponsored" as const } } : {}) };
       } catch (error) {
         return { kind: "next", reason: `the facilitator's sponsored close failed (${describeError(error)})` };
+      }
+    }
+
+    /**
+     * Step 3: a close of the client's own, sent with its `rpc`, its fee paid by the signer (spec §9.1, §9.3). The session
+     * account is read first: no session of the program at the address means it is closed, which ends the chain. The
+     * signer must hold the fee on top of a rent-exempt balance. The close is a `Standard` close by the authority, built
+     * from the stored fields, and nothing else. One that does not confirm moves the chain on; one still pending is passed
+     * on.
+     */
+    async function closeOnChain(): Promise<CloseStep> {
+      const rpc = options.rpc;
+      if (!rpc) return { kind: "next", reason: "the client has no rpc to send a close of its own" };
+      try {
+        const stored = await readOwnSession(rpc, address(opened.session));
+        if (!stored) return { kind: "gone", reason: "the chain holds no session at its address" };
+        const { value: lamports } = await rpc.getBalance(options.signer.address, { commitment: "confirmed" }).send();
+        const needed = SIGNATURE_FEE_LAMPORTS + (await rpc.getMinimumBalanceForRentExemption(0n, { commitment: "confirmed" }).send());
+        if (lamports < needed) {
+          return {
+            kind: "next",
+            reason: `the signer holds ${lamports} lamports, less than the fee of a close of its own on top of a rent-exempt balance (${needed})`,
+          };
+        }
+        const { value: lifetime } = await rpc.getLatestBlockhash({ commitment: "confirmed" }).send();
+        const transaction = await buildCloseTransaction({
+          session: address(opened.session),
+          stored,
+          closer: options.signer,
+          // The signer pays the fee: the one signature covers both roles.
+          feePayer: options.signer.address,
+          lifetime,
+          kind: CloseKind.Standard,
+        });
+        const signature = await rpc
+          .sendTransaction(transaction as Base64EncodedWireTransaction, { encoding: "base64", preflightCommitment: "confirmed" })
+          .send();
+        const confirmation = await waitForConfirmation(rpc, signature, lifetime.blockhash);
+        if (confirmation !== "confirmed") {
+          const still = confirmation === "pending" ? { pending: { transaction: signature, via: "unilateral" as const } } : {};
+          return { kind: "next", reason: `the client's own close ${signature} is ${confirmation}`, ...still };
+        }
+        const event = await fetchClosedEvent(rpc, signature, EVENT_READ_RETRY);
+        return { kind: "closed", receipt: { ...(event ? amountsOf(event) : {}), transaction: signature, via: "unilateral" } };
+      } catch (error) {
+        return { kind: "next", reason: `the client's own close failed (${describeError(error)})` };
       }
     }
 

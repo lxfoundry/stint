@@ -1,8 +1,17 @@
 import { generateKeyPairSigner, type KeyPairSigner } from "@solana/kit";
+import {
+  CloseKind,
+  STINT_PROGRAM_ADDRESS,
+  StintInstruction,
+  identifyStintInstruction,
+  parseCloseInstruction,
+  type ClosedEventArgs,
+} from "@lxfoundry/stint-program-client";
 import { inspectTransaction } from "@lxfoundry/stint-x402";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StintError, createStintClient, type Policy, type StintSession } from "../src/index.js";
 import { NETWORK, startTestGate, type TestGate } from "./gate.js";
+import { RENT_EXEMPT_LAMPORTS, SENT_SIGNATURE, fakeRpc, fakeSignature, type FakeNode } from "./rpc.js";
 
 const policy: Policy = {
   maxRate: 1_000n,
@@ -146,6 +155,7 @@ describe("the close fallback chain (spec §9.3)", () => {
     expect(error).toBeInstanceOf(StintError);
     expect((error as Error).message).toMatch(/the gate cannot be reached/);
     expect((error as Error).message).toMatch(/sponsored close failed/);
+    expect((error as Error).message).toMatch(/no rpc/);
     expect((error as Error).message).toMatch(/runs to the end of its paid time/);
     gate.gateDown = false;
     expect(await session.close()).toMatchObject({ via: "gate" });
@@ -248,5 +258,185 @@ describe("the close fallback chain (spec §9.3)", () => {
     expect(first).toEqual(SPONSORED);
     expect(second).toEqual(SPONSORED);
     expect(gate.sponsored).toHaveLength(1);
+  });
+});
+
+describe("the client's own close on the chain (spec §9.3, step 3)", () => {
+  let buyer: KeyPairSigner;
+  let gate: TestGate;
+
+  beforeEach(async () => {
+    buyer = await generateKeyPairSigner();
+    gate = await startTestGate(buyer.address);
+  });
+
+  afterEach(async () => {
+    await gate.stop();
+    expect(gate.escaped).toEqual([]);
+  });
+
+  /** The `Closed` event of the client's own close: 8,000 paid, 22,000 refunded. */
+  const closedBy = (session: StintSession): ClosedEventArgs => ({
+    session: session.id,
+    kind: CloseKind.Standard,
+    claimed: 0n,
+    owed: 8_000n,
+    refunded: 22_000n,
+    redirected: 0n,
+    closedBy: buyer.address,
+    paidUntil: BigInt(gate.stored.startedAt) + 30n,
+    at: BigInt(gate.stored.startedAt) + 8n,
+  });
+
+  /** A 30 s session on the test gate, for a client whose node is `node`; the gate and the facilitator then go down. */
+  async function strandedSession(node: FakeNode): Promise<StintSession> {
+    const client = createStintClient({ signer: buyer, policy, rpc: fakeRpc(node) });
+    const session = await client.open(gate.url, { seconds: 30 });
+    gate.gateDown = true;
+    gate.facilitatorDown = true;
+    return session;
+  }
+
+  it("closes the session itself when neither the gate nor the facilitator can: a Standard close by the authority, which also pays the fee", async () => {
+    const node: FakeNode = { session: gate.stored, lamports: 1_000_000n, sent: [] };
+    const session = await strandedSession(node);
+    node.closed = closedBy(session); // the fake node reads `closed` when the close is fetched
+
+    expect(await session.close()).toEqual({ paid: 8_000n, refunded: 22_000n, transaction: SENT_SIGNATURE, via: "unilateral" });
+
+    expect(node.sent).toHaveLength(1);
+    const close = inspectTransaction(node.sent[0]!)!;
+    expect(close.feePayer).toBe(buyer.address);
+    expect([...close.signed]).toEqual([buyer.address]);
+    expect(close.instructions).toHaveLength(1);
+    const instruction = close.instructions[0]!;
+    expect(instruction.programAddress).toBe(STINT_PROGRAM_ADDRESS);
+    expect(identifyStintInstruction(instruction.data!)).toBe(StintInstruction.Close);
+    const parsed = parseCloseInstruction(instruction as Parameters<typeof parseCloseInstruction>[0]);
+    expect(parsed.data.kind).toBe(CloseKind.Standard);
+    expect(parsed.accounts.session.address).toBe(session.id);
+    expect(parsed.accounts.closer.address).toBe(buyer.address);
+  });
+
+  it("sends nothing, and says the session runs to the end of its paid time, when the signer holds no SOL", async () => {
+    const node: FakeNode = { session: gate.stored, lamports: 0n, sent: [] };
+    const session = await strandedSession(node);
+
+    await expect(session.close()).rejects.toThrow(/holds 0 lamports[\s\S]*runs to the end of its paid time/);
+    expect(node.sent).toEqual([]);
+  });
+
+  it("ends the chain when the chain holds no session at the address: the session is closed", async () => {
+    const node: FakeNode = { lamports: 1_000_000n, sent: [] };
+    const session = await strandedSession(node);
+
+    await expect(session.close()).rejects.toMatchObject({ status: 404, message: "The session is already closed" });
+    expect(node.sent).toEqual([]);
+  });
+
+  it("reports a close that the node refuses, and the session runs on", async () => {
+    const session = await strandedSession({ session: gate.stored, lamports: 1_000_000n, refuse: new Error("Transaction simulation failed"), sent: [] });
+
+    const error = await session.close().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(StintError);
+    expect((error as Error).message).toMatch(/own close failed \(Transaction simulation failed\)/);
+    expect((error as Error).message).toMatch(/runs to the end of its paid time/);
+  });
+
+  it("sends nothing to the chain while the gate can close the session", async () => {
+    const sent: string[] = [];
+    const client = createStintClient({ signer: buyer, policy, rpc: fakeRpc({ session: gate.stored, lamports: 1_000_000n, sent }) });
+    const session = await client.open(gate.url, { seconds: 30 });
+
+    expect(await session.close()).toMatchObject({ via: "gate" });
+    expect(sent).toEqual([]);
+  });
+
+  it("sends nothing when the signer holds less than the fee on top of a rent-exempt balance: a fee payer may not drop below it", async () => {
+    const lamports = RENT_EXEMPT_LAMPORTS + 4_999n;
+    const node: FakeNode = { session: gate.stored, lamports, sent: [] };
+    const session = await strandedSession(node);
+
+    const error = await session.close().catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toContain(`the signer holds ${lamports} lamports, less than`);
+    expect(node.sent).toEqual([]);
+  });
+
+  it("checks on the chain a session that closeUrl reports closed, and closes it itself when the chain still holds it", async () => {
+    const node: FakeNode = { session: gate.stored, lamports: 1_000_000n, sent: [] };
+    const session = await strandedSession(node);
+    gate.facilitatorDown = false;
+    gate.facilitatorSessionOpen = false; // the facilitator's node, lagging or not, finds no session
+    node.closed = closedBy(session);
+
+    expect(await session.close()).toMatchObject({ transaction: SENT_SIGNATURE, via: "unilateral" });
+    expect(node.sent).toHaveLength(1);
+    expect(gate.sponsored).toEqual([]);
+  });
+
+  /**
+   * A session whose gate's close and then sponsored close both stay pending, for a client whose node is `node` and shows
+   * no session at the address: the chain ends at step 3's read, with both closes passed on.
+   */
+  async function bothClosesPending(node: FakeNode) {
+    const client = createStintClient({ signer: buyer, policy: { ...policy, closeWaitSeconds: 0.2 }, closePollMs: 20, rpc: fakeRpc(node) });
+    const session = await client.open(gate.url, { seconds: 30 });
+    const [gateClose, sponsoredClose] = [fakeSignature(1), fakeSignature(2)];
+    gate.closeSettlement = { success: false, errorReason: "settlement_pending", transaction: gateClose, network: NETWORK };
+    gate.sponsoredAnswer = { success: false, errorReason: "settlement_pending", errorMessage: "not confirmed", transaction: sponsoredClose };
+    node.closed = closedBy(session);
+    return { session, gateClose, sponsoredClose };
+  }
+
+  it("returns the pending close that the chain shows landed, with its amounts, when it finds the session closed", async () => {
+    const node: FakeNode = { lamports: 1_000_000n, sent: [] };
+    const { session, gateClose } = await bothClosesPending(node);
+    node.landed = gateClose; // the gate's close landed, not the facilitator's, which was sent later
+
+    expect(await session.close()).toEqual({ paid: 8_000n, refunded: 22_000n, transaction: gateClose, via: "gate" });
+    expect(node.sent).toEqual([]);
+  });
+
+  it("reports the session closed by another party when the close the chain shows is none of its own", async () => {
+    const node: FakeNode = { lamports: 1_000_000n, sent: [] };
+    const { session } = await bothClosesPending(node);
+    node.landed = fakeSignature(3); // the gate's end close, say: neither pending close landed
+
+    await expect(session.close()).rejects.toMatchObject({ status: 404, message: "The session is already closed" });
+  });
+
+  it("returns the latest pending close, without amounts, when the list of the address's transactions cannot be read", async () => {
+    const node: FakeNode = { lamports: 1_000_000n, listFails: true, sent: [] };
+    const { session, sponsoredClose } = await bothClosesPending(node);
+
+    expect(await session.close()).toEqual({ transaction: sponsoredClose, via: "sponsored" });
+  });
+
+  it("checks the gate's word that the session is closed with its own read, and tries no sponsored close", async () => {
+    const node: FakeNode = { lamports: 1_000_000n, sent: [] };
+    const client = createStintClient({ signer: buyer, policy: { ...policy, closeWaitSeconds: 60 }, closePollMs: 20, rpc: fakeRpc(node) });
+    const session = await client.open(gate.url, { seconds: 30 });
+    const gateClose = fakeSignature(1);
+    gate.closeSettlement = { success: false, errorReason: "settlement_pending", transaction: gateClose, network: NETWORK };
+    gate.facilitatorSessionOpen = true; // the facilitator's node still shows the session
+    node.closed = closedBy(session);
+    node.landed = gateClose;
+    const closing = gate; // not `gate`, which names the next test's gate by the time a late timer fires
+    setTimeout(() => (closing.sessionOpen = false), 100); // the gate's close lands, and its status finds no session
+
+    expect(await session.close()).toEqual({ paid: 8_000n, refunded: 22_000n, transaction: gateClose, via: "gate" });
+    expect(gate.sponsored).toEqual([]);
+  });
+
+  it("takes the seller's word that the session is closed when its own read fails", async () => {
+    const node: FakeNode = { session: gate.stored, lamports: 1_000_000n, readFails: true, sent: [] };
+    const session = await strandedSession(node);
+    gate.facilitatorDown = false;
+    gate.facilitatorSessionOpen = false;
+
+    await expect(session.close()).rejects.toMatchObject({ status: 404, message: "The session is already closed" });
+    expect(node.sent).toEqual([]);
   });
 });

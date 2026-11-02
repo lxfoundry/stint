@@ -1251,6 +1251,15 @@ the client reports the session closed by another party. When no step closes the 
 client names the closes that may still land. Overlapping closes of one session share one chain.
 The receipt says which step closed the session.
 
+With an `rpc`, the client checks the gate's or the facilitator's word that the session is
+closed with its own read of the account: if the chain still shows the session, the chain goes
+on; if the read fails, that word stands. When it finds the session closed with closes of its own
+passed on, it looks the close up on the chain: the one it matches is the receipt, with its
+amounts; a close that matches none of them was another party's; while the chain shows no close,
+or the lookup cannot be read, the latest close passed on is the receipt. Step 3 needs the
+authority to hold the fee of one signature on top of a rent-exempt balance, since a fee payer
+may not drop below it.
+
 ### 9.4 API
 
 ```ts
