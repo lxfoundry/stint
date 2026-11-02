@@ -430,6 +430,20 @@ describe("verifyPayment (spec §5.4)", () => {
       expect(node.simulated).toBe(0);
     });
 
+    it("refuses as session_expired a top-up the program refuses because the session has run out on the chain's clock", async () => {
+      await withSession();
+      // Instruction 1 is `top_up`; 6003 is the program's SessionExpired.
+      node.simulation = { err: { InstructionError: [1, { Custom: 6003 }] }, logs: ["Program log: AnchorError: SessionExpired"] };
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "session_expired" });
+    });
+
+    it("refuses as simulation_failed the same error code raised by another program of the transaction", async () => {
+      await withSession();
+      // Instruction 0 is the token transfer.
+      node.simulation = { err: { InstructionError: [0, { Custom: 6003 }] } };
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "simulation_failed" });
+    });
+
     it("refuses a top-up that would take the session past maxSeconds", async () => {
       // Paid for 110 s of 120: 12 s more would make 122.
       await withSession({ deposited: 110_000n });

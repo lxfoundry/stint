@@ -7,8 +7,16 @@ import {
   type KeyPairSigner,
   type Rpc,
   type SolanaRpcApi,
+  type TransactionError,
 } from "@solana/kit";
-import { STINT_PROGRAM_ADDRESS, fetchMaybeSession, getSessionSize, paidUntil, type Session } from "@lxfoundry/stint-program-client";
+import {
+  STINT_ERROR__SESSION_EXPIRED,
+  STINT_PROGRAM_ADDRESS,
+  fetchMaybeSession,
+  getSessionSize,
+  paidUntil,
+  type Session,
+} from "@lxfoundry/stint-program-client";
 import {
   TOP_UP_MARGIN_SECONDS,
   X402_VERSION,
@@ -175,7 +183,19 @@ async function simulate(ctx: FacilitatorContext, tx: InspectedTransaction, fundi
     .send();
   if (value.err) {
     const last = value.logs?.at(-1) ?? "";
-    return refuse("simulation_failed", `${json(value.err)} ${last}`.trim());
+    const message = `${json(value.err)} ${last}`.trim();
+    // Only `top_up` raises it, from `paid_until` on (spec §4.3): the chain's clock had reached the end, though the
+    // facilitator's had not.
+    if (programError(tx, value.err) === STINT_ERROR__SESSION_EXPIRED) return refuse("session_expired", message);
+    return refuse("simulation_failed", message);
   }
   return checkPayerFunding(executedInstructions(tx, value.innerInstructions), ctx.keys, funding);
+}
+
+/** The program's error code, when the instruction that failed is one of the program's own. */
+function programError(tx: InspectedTransaction, err: TransactionError): number | undefined {
+  if (typeof err !== "object" || !("InstructionError" in err)) return undefined;
+  const [index, error] = err.InstructionError;
+  if (tx.instructions[Number(index)]?.programAddress !== STINT_PROGRAM_ADDRESS) return undefined;
+  return typeof error === "object" && "Custom" in error ? Number(error.Custom) : undefined;
 }
