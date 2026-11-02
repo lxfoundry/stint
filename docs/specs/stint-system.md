@@ -725,7 +725,7 @@ it is used.
 | `invalid_payload` | The payload or its transaction cannot be decoded |
 | `invalid_payment_requirements` | `accepted` differs from the issued entry, or the scheme, network or asset differ |
 | `invalid_terms` | The terms differ from the offer |
-| `invalid_amount` | The funding is not exactly `amount` |
+| `invalid_amount` | The funding is not exactly `amount`, or a top-up would take the session past `maxSeconds` |
 | `unexpected_instruction` | An instruction outside the allowed layout |
 | `payer_misuse` | The fee payer or the rent payer appears where section 5.3 forbids it |
 | `blockhash_expired` | The transaction's blockhash is no longer valid |
