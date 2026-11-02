@@ -444,6 +444,12 @@ describe("verifyPayment (spec §5.4)", () => {
       expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "simulation_failed" });
     });
 
+    it("accepts a top-up that takes the session to maxSeconds exactly", async () => {
+      // Paid for 108 s of 120: 12 s more makes 120.
+      await withSession({ deposited: 108_000n });
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: true, type: "topUp" });
+    });
+
     it("refuses a top-up that would take the session past maxSeconds", async () => {
       // Paid for 110 s of 120: 12 s more would make 122.
       await withSession({ deposited: 110_000n });
