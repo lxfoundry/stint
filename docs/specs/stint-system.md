@@ -618,9 +618,8 @@ Network identifiers: devnet `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`, mainnet
 - With it, the 402 lists exactly that duration.
 - Valid durations:
   - for an open, `minSeconds`…`maxSeconds`;
-  - for a top-up, 1…(`maxSeconds` − the seconds already covered); `minSeconds` does not apply. A
-    part second of the deposit counts as covered (⌈`deposited` ÷ `rate`⌉), so that the total stays
-    within `rate × maxSeconds` (§5.4).
+  - for a top-up, 1…(`maxSeconds` − ⌈`deposited` ÷ `rate`⌉), the most that keeps
+    `deposited + rate × seconds` within `rate × maxSeconds` (§5.4); `minSeconds` does not apply.
 - A duration outside these bounds is refused with `400 invalid_duration`, with the bounds stated
   in the body.
 - **A client cannot deposit more than the `amount` of the entry it accepts.** To pay more it asks
