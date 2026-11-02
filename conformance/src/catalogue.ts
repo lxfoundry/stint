@@ -7,6 +7,7 @@ import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
 import { sponsoredClose } from "./scenarios/15-sponsored-close.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
+import { gateUnreachableAtClose } from "./scenarios/24-gate-unreachable-at-close.js";
 import { expiredSessionNobodyCloses } from "./scenarios/26-expired-session-nobody-closes.js";
 import { topUpWhileClosingAtExpiry } from "./scenarios/34-top-up-while-closing.js";
 import type { Capability, IsolationGroup, Scenario } from "./types.js";
@@ -56,7 +57,7 @@ export const catalogue: readonly Scenario[] = [
   pending(21, "Refund account closed, a stray base unit, then expiry"),
   required(22, "The example agent's task, scripted", exampleAgentTask, ["stack"]),
   pending(23, "The gate restarts with a session open", ["stack"], "ownStack"),
-  pending(24, "The gate is unreachable when the buyer closes", ["stack"], "ownStack"),
+  required(24, "The gate is unreachable when the buyer closes", gateUnreachableAtClose, ["stack"], "ownStack"),
   pending(25, "The gate and the facilitator are unreachable when the buyer closes", ["stack"], "ownStack"),
   required(26, "An expired session that nobody closes", expiredSessionNobodyCloses, ["stack"], "ownStack"),
   pending(27, "The seller has closed its receiver_token before a close that pays it", ["stack"], "ownStack"),
