@@ -1,3 +1,4 @@
+import { blockhash, generateKeyPairSigner } from "@solana/kit";
 import type { Buyer } from "@lxfoundry/stint-conformance";
 import { fetchMaybeSession, fetchSession } from "@lxfoundry/stint-program-client";
 import {
@@ -7,13 +8,17 @@ import {
   buildCloseTransaction,
   buildOpenOffer,
   buildOpenTransaction,
+  buildSponsoredClose,
   fetchClosedEvent,
+  readCloseInfo,
   tokenBalanceChanges,
+  type CloseInfo,
   type ElapsedRequirements,
   type FacilitatorExtra,
   type OfferInput,
   type PaymentPayload,
   type SettleResponse,
+  type SponsoredCloseResponse,
   type SupportedResponse,
 } from "@lxfoundry/stint-x402";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -70,6 +75,26 @@ describe("facilitator on the local network, through Kora", () => {
     return { offer, payload, session: built.session };
   }
 
+  /** `GET closeUrl?session=`, read as any client reads it. */
+  async function closeInfoFor(session: string): Promise<CloseInfo> {
+    const response = await fetch(`${stack.facilitator.closeUrl}?session=${session}`);
+    expect(response.status).toBe(200);
+    const info = readCloseInfo(await response.json());
+    expect(info?.session).toBeDefined();
+    return info!;
+  }
+
+  /** `POST closeUrl`, with no API key. */
+  async function postClose(transaction: string): Promise<SponsoredCloseResponse> {
+    const response = await fetch(stack.facilitator.closeUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ transaction }),
+    });
+    expect(response.status).toBe(200);
+    return (await response.json()) as SponsoredCloseResponse;
+  }
+
   it("verifies an open without changing the chain", async () => {
     const buyer = await newBuyer(stack.network.rpc, stack.keys.mintAuthority.signer, 1_000_000n);
     const { offer, payload, session } = await openPayment(buyer);
@@ -119,5 +144,64 @@ describe("facilitator on the local network, through Kora", () => {
     expect(changes.get(stack.keys.sellerUsdcAccount)).toBe(event.owed);
     expect(changes.get(buyer.usdcAccount)).toBe(event.refunded);
     expect((await fetchMaybeSession(stack.network.rpc, session)).exists).toBe(false);
+  });
+
+  it("answers GET /close with its fee payer, a current blockhash and the block height, and 404 for an address with no session", async () => {
+    const info = readCloseInfo(await (await fetch(stack.facilitator.closeUrl)).json());
+    expect(info).toMatchObject({ feePayer: stack.facilitator.feePayer, programId: base.facilitator.programId });
+    const { value: valid } = await stack.network.rpc.isBlockhashValid(blockhash(info!.recentBlockhash), { commitment: "confirmed" }).send();
+    expect(valid).toBe(true);
+    expect(BigInt(info!.blockHeight)).toBeLessThanOrEqual(BigInt(info!.lastValidBlockHeight));
+    // No session: an address that holds no account, and an account that another program owns (the fee payer's wallet).
+    for (const address of [(await generateKeyPairSigner()).address, stack.facilitator.feePayer]) {
+      const missing = await fetch(`${stack.facilitator.closeUrl}?session=${address}`);
+      expect(missing.status).toBe(404);
+    }
+  });
+
+  it("settles a sponsored close built only from GET /close and signed by the authority, with no API key", async () => {
+    const buyer = await newBuyer(stack.network.rpc, stack.keys.mintAuthority.signer, 1_000_000n);
+    const { offer, payload, session } = await openPayment(buyer);
+    expect(await call("/settle", payload, offer)).toMatchObject({ success: true });
+
+    const info = await closeInfoFor(session);
+    expect(info.session).toMatchObject({
+      address: session,
+      authority: buyer.signer.address,
+      rentPayer: stack.facilitator.rentPayer,
+      deposited: "30000",
+    });
+    const closed = await postClose(await buildSponsoredClose(info, { session, closer: buyer.signer }));
+    expect(closed.success).toBe(true);
+
+    const event = (await fetchClosedEvent(stack.network.rpc, closed.transaction))!;
+    expect(event.closedBy).toBe(buyer.signer.address);
+    expect(closed).toEqual({
+      success: true,
+      transaction: closed.transaction,
+      paid: (event.claimed + event.owed + event.redirected).toString(),
+      refunded: event.refunded.toString(),
+    });
+    const changes = await tokenBalanceChanges(stack.network.rpc, closed.transaction);
+    expect(changes.get(buyer.usdcAccount)).toBe(event.refunded);
+    expect((await fetchMaybeSession(stack.network.rpc, session)).exists).toBe(false);
+  });
+
+  it("refuses a sponsored close of a session whose rent payer is not the facilitator's, and leaves the session open", async () => {
+    const direct = stack.context().direct!;
+    const buyer = await newBuyer(stack.network.rpc, stack.keys.mintAuthority.signer, 1_000_000n);
+    const opened = await direct.open({ buyer, seconds: 10 });
+    try {
+      const info = await closeInfoFor(opened.session);
+      expect(info.session?.rentPayer).toBe(opened.rentPayer);
+      expect(await postClose(await buildSponsoredClose(info, { session: opened.session, closer: buyer.signer }))).toMatchObject({
+        success: false,
+        errorReason: "invalid_terms",
+        transaction: "",
+      });
+      expect((await fetchMaybeSession(stack.network.rpc, opened.session)).exists).toBe(true);
+    } finally {
+      await direct.close(opened, buyer.signer);
+    }
   });
 });
