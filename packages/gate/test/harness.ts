@@ -85,14 +85,16 @@ export interface Harness {
   verifyAnswer: VerifyResponse;
   settleAnswer: (payload: PaymentPayload) => SettleResponse;
   sessions: Map<Address, Session>;
+  /** The close `lastClose` finds for each session; a session absent here has no close showing. */
+  closes: Map<Address, ClosedEvent>;
   /** Faults and pauses a test switches on. */
-  fail: { supported: boolean; settleClose: boolean; closedEvent: boolean; provision: boolean; teardown: boolean; watch: boolean };
-  hold: { provision?: Promise<void>; settleClose?: Promise<void>; settleTopUp?: Promise<void>; readSession?: Promise<void> };
+  fail: { supported: boolean; settleClose: boolean; closedEvent: boolean; provision: boolean; teardown: boolean; watch: boolean; lastClose: boolean };
+  hold: { provision?: Promise<void>; settleClose?: Promise<void>; settleTopUp?: Promise<void>; readSession?: Promise<void>; lastClose?: Promise<void> };
   /** Runs inside the fake facilitator's close, after `hold` and before `fail`: a test changes the chain here. */
   onSettleClose?: () => void;
   /** How many reads the fake chain answers with nothing before the real answer, and the reads made. */
   missing: { session: number; closedEvent: number };
-  reads: { session: number; closedEvent: number };
+  reads: { session: number; closedEvent: number; lastClose: number };
   /** Rejections that escaped `handleRequest`: the gate must contain its own errors. */
   escaped: unknown[];
   /** The gate's session clock and its timers: the timers run only when a test fires them. */
@@ -108,7 +110,7 @@ export interface Harness {
   readonly unwatched: Address[];
 }
 
-export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" | "endRetrySeconds"> = {}): Promise<Harness> {
+export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" | "endRetrySeconds" | "readRetry"> = {}): Promise<Harness> {
   const buyer = await generateKeyPairSigner();
   const authorizer = await generateKeyPairSigner();
   const seller = await generateKeyPairSigner();
@@ -128,10 +130,11 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
     verifyAnswer: { isValid: true },
     settleAnswer: () => ({ success: true, transaction: "sig", network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" }),
     sessions: new Map<Address, Session>(),
-    fail: { supported: false, settleClose: false, closedEvent: false, provision: false, teardown: false, watch: false },
+    closes: new Map<Address, ClosedEvent>(),
+    fail: { supported: false, settleClose: false, closedEvent: false, provision: false, teardown: false, watch: false, lastClose: false },
     hold: {},
     missing: { session: 0, closedEvent: 0 },
-    reads: { session: 0, closedEvent: 0 },
+    reads: { session: 0, closedEvent: 0, lastClose: 0 },
     escaped: [],
     clock,
     timers: new FakeTimers(clock),
@@ -153,6 +156,13 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
       if (harness.fail.closedEvent) throw new Error("rpc down");
       if (harness.reads.closedEvent++ < harness.missing.closedEvent) return undefined;
       return { claimed: 0n, owed: 8_000n, refunded: 22_000n, redirected: 0n, kind: CloseKind.Standard } as ClosedEvent;
+    },
+    // A held look is counted when it starts.
+    lastClose: async (session) => {
+      harness.reads.lastClose++;
+      await harness.hold.lastClose;
+      if (harness.fail.lastClose) throw new Error("rpc down");
+      return harness.closes.get(session);
     },
     watchSession: (session, onChange, onError) => {
       if (harness.fail.watch) throw new Error("subscriptions down");
@@ -229,7 +239,7 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
     tokenClock: () => NOW_MS,
     sessionClock: () => clock.now,
     timers: harness.timers,
-    readRetry: { attempts: 3, delayMs: 5 },
+    readRetry: timings.readRetry ?? { attempts: 3, delayMs: 5 },
     log: (entry) => void harness.logs.push(entry),
   });
   server.on("request", (req, res) => {
