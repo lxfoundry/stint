@@ -103,6 +103,29 @@ describe("the services of a stack, run against the local chain", () => {
     expect(await openAndClose(url)).toBe(30_000n);
   }, 90_000);
 
+  it("stops the facilitator and starts it again on the same URL, with the gate and Kora as they were, and stops it with the rest", async () => {
+    const own = await start();
+    const { kora } = own;
+    const url = own.facilitator.url;
+    const gateUrl = own.stream.url;
+
+    await own.stopFacilitator();
+
+    expect(await unreachable(url)).toBe(true);
+    expect(await healthy(gateUrl)).toBe(true);
+
+    await own.startFacilitator();
+
+    expect(own.facilitator.url).toBe(url);
+    expect(await healthy(url)).toBe(true);
+    expect(own.kora).toBe(kora);
+    // The gate settles through the facilitator started again: a session opens and closes on it.
+    expect(await openAndClose(gateUrl)).toBe(30_000n);
+
+    await own.stop();
+    expect(await unreachable(url)).toBe(true);
+  }, 90_000);
+
   it("takes a second stop or a second start of the gate as it comes", async () => {
     const url = services.stream.url;
 

@@ -3,7 +3,7 @@ import { createSolanaRpcSubscriptions, type Rpc, type SolanaRpcApi } from "@sola
 import type { GateStartOptions } from "@lxfoundry/stint-conformance";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import { startStream, type RunningStream, type StreamConfig } from "@lxfoundry/stint-example-stream";
-import { startFacilitator, type RunningFacilitator } from "@lxfoundry/stint-facilitator";
+import { startFacilitator as runFacilitator, type FacilitatorConfig, type RunningFacilitator } from "@lxfoundry/stint-facilitator";
 import { createFacilitatorClient, createRpcChain } from "@lxfoundry/stint-gate";
 import { SOLANA_DEVNET, USDC_DEVNET, type RetryOptions, type Terms } from "@lxfoundry/stint-x402";
 import type { HarnessKey } from "../fixtures/keys.js";
@@ -18,9 +18,9 @@ export const TEST_DURATIONS = [30] as const;
 export const TEST_IDLE_CLOSE_SECONDS = 10;
 /** How often the facilitator's sweeper runs in a test stack (spec §12.4): often enough that a session nobody closed ends within a scenario's patience. */
 export const TEST_SWEEPER_INTERVAL_MS = 2_000;
-/** How many times a restart of the gate tries a port that something still holds, and how long it waits between tries. */
-const GATE_RESTART_ATTEMPTS = 10;
-const GATE_RESTART_DELAY_MS = 200;
+/** How many times a service that starts again tries a port that something still holds, and how long it waits between tries. */
+const RESTART_ATTEMPTS = 10;
+const RESTART_DELAY_MS = 200;
 
 /** The keys the services run with. */
 export interface ServiceKeys {
@@ -47,6 +47,7 @@ export interface ServicesOptions {
 
 export interface Services {
   readonly kora: KoraProcess;
+  /** The facilitator that is current: after `stopFacilitator()` and `startFacilitator()`, the new one, at the same URL. */
   readonly facilitator: RunningFacilitator;
   readonly facilitatorApiKey: string;
   /** The gate and the example stream that are current: after `stopGate()` and `startGate()`, the new ones, at the same URL. */
@@ -64,6 +65,17 @@ export interface Services {
    * gate started then would be one that nothing stops.
    */
   startGate(options?: GateStartOptions): Promise<void>;
+  /**
+   * Stops the facilitator and its sweeper; Kora and the gate keep running, and the gate's calls to the facilitator fail
+   * meanwhile. Safe to repeat when the calls are made one after another, not while a `startFacilitator()` is under way.
+   */
+  stopFacilitator(): Promise<void>;
+  /**
+   * Starts the facilitator again on the port it had, with the same keys and API key, so that the gate's facilitator client
+   * and the `closeUrl` of its offers stay valid; its sweeper starts with it. Safe to repeat when the calls are made one after
+   * another, not for two that overlap. It does nothing once `stop()` has been called.
+   */
+  startFacilitator(): Promise<void>;
   /** Stops everything that is running, a stopped gate included. Safe to repeat. */
   stop(): Promise<void>;
 }
@@ -82,23 +94,34 @@ export async function stopAll(stops: readonly (() => Promise<void> | void)[]): P
 }
 
 /**
- * Starts the example stream on `port`. A gate that has just stopped may still hold its port for a moment, so a port that is
- * in use is tried again a few times.
+ * Starts a service again with `start`. One that has just stopped may still hold its port for a moment, so a port that is in
+ * use is tried again a few times.
  */
-async function startStreamOn(config: StreamConfig, port: number): Promise<RunningStream> {
+async function startOnFreedPort<T>(start: () => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     try {
-      return await startStream({ ...config, port });
+      return await start();
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE" || attempt >= GATE_RESTART_ATTEMPTS) throw error;
-      await new Promise((resolve) => setTimeout(resolve, GATE_RESTART_DELAY_MS));
+      if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE" || attempt >= RESTART_ATTEMPTS) throw error;
+      await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS));
     }
   }
+}
+
+/**
+ * A client's keep-alive socket to a stopped server is seen to be closed only when the event loop polls for I/O. One has to run
+ * between the server's sockets being destroyed and the next request, or that request goes out on the dead socket once the
+ * server is back on the same port. Two hops through the check phase always have a poll between them; a timer does not.
+ */
+async function letSocketsClose(): Promise<void> {
+  for (let hop = 0; hop < 2; hop++) await new Promise((resolve) => setImmediate(resolve));
 }
 
 /** Kora, the facilitator with its sweeper, and the example stream with its gate, against the network at `rpcUrl`. */
 export async function startServices(options: ServicesOptions): Promise<Services> {
   const stops: (() => Promise<void> | void)[] = [];
+  /** Set by `stop()`: no service starts again after it. */
+  let stopped = false;
   try {
     const kora = await startKora({
       rpcUrl: options.rpcUrl,
@@ -112,7 +135,7 @@ export async function startServices(options: ServicesOptions): Promise<Services>
     });
     stops.unshift(() => kora.stop());
     const facilitatorApiKey = randomUUID();
-    const facilitator = await startFacilitator({
+    const facilitatorConfig: FacilitatorConfig = {
       rpcUrl: options.rpcUrl,
       network: SOLANA_DEVNET,
       kora: { url: kora.url, apiKey: kora.apiKey },
@@ -120,8 +143,25 @@ export async function startServices(options: ServicesOptions): Promise<Services>
       apiKeys: [facilitatorApiKey],
       readRetry: options.readRetry,
       sweeper: { intervalMs: options.sweeperIntervalMs ?? TEST_SWEEPER_INTERVAL_MS, scanRpcUrl: options.scanRpcUrl },
-    });
-    stops.unshift(() => facilitator.stop());
+    };
+    let facilitator: RunningFacilitator | undefined = await runFacilitator(facilitatorConfig);
+    let latestFacilitator: RunningFacilitator = facilitator;
+    // A restarted facilitator takes the port it had, so that the gate's client and the offers' closeUrl stay valid.
+    const facilitatorPort = Number(new URL(facilitator.url).port);
+    const stopFacilitator = async (): Promise<void> => {
+      const current = facilitator;
+      facilitator = undefined;
+      await current?.stop();
+      await letSocketsClose();
+    };
+    const startFacilitator = async (): Promise<void> => {
+      if (facilitator || stopped) return;
+      const started = await startOnFreedPort(() => runFacilitator({ ...facilitatorConfig, port: facilitatorPort }));
+      // A stop that landed during the start's tries found no facilitator to stop: this one would run on, with nothing to stop it.
+      if (stopped) return started.stop();
+      latestFacilitator = facilitator = started;
+    };
+    stops.unshift(stopFacilitator);
     const streamConfig: StreamConfig = {
       rpcWsUrl: options.rpcWsUrl,
       gate: {
@@ -134,7 +174,7 @@ export async function startServices(options: ServicesOptions): Promise<Services>
         idleCloseSeconds: TEST_IDLE_CLOSE_SECONDS,
         maxTimeoutSeconds: options.maxTimeoutSeconds,
         readRetry: options.readRetry,
-        facilitator: createFacilitatorClient(facilitator.url, facilitatorApiKey),
+        facilitator: createFacilitatorClient(latestFacilitator.url, facilitatorApiKey),
         // The gate follows each session's account over the node's WebSocket (spec §7.3).
         chain: createRpcChain(options.rpc, createSolanaRpcSubscriptions(options.rpcWsUrl)),
       },
@@ -147,19 +187,15 @@ export async function startServices(options: ServicesOptions): Promise<Services>
       const current = running;
       running = undefined;
       await current?.stop();
-      // A client's keep-alive socket to the old gate is seen to be closed only when the event loop polls for I/O. One has to run
-      // between the old gate's sockets being destroyed and the next request, or that request goes out on the dead socket once the
-      // gate is back on the same port. Two hops through the check phase always have a poll between them; a timer does not.
-      for (let hop = 0; hop < 2; hop++) await new Promise((resolve) => setImmediate(resolve));
+      await letSocketsClose();
     };
-    let stopped = false;
     const startGate = async (options: GateStartOptions = {}): Promise<void> => {
       if (running || stopped) return;
       const ahead = options.sessionClockAheadMs ?? 0;
       // Its idle and end timers fire `ahead` early; the chain's clock still decides every amount.
       const config: StreamConfig =
         ahead === 0 ? streamConfig : { ...streamConfig, gate: { ...streamConfig.gate, sessionClock: () => Date.now() + ahead } };
-      const started = await startStreamOn(config, port);
+      const started = await startOnFreedPort(() => startStream({ ...config, port }));
       // A stop that landed during the start's tries found no gate to stop: this one would run on, with nothing to stop it.
       if (stopped) return started.stop();
       latest = running = started;
@@ -168,13 +204,17 @@ export async function startServices(options: ServicesOptions): Promise<Services>
     let stopping: Promise<void> | undefined;
     return {
       kora,
-      facilitator,
+      get facilitator() {
+        return latestFacilitator;
+      },
       facilitatorApiKey,
       get stream() {
         return latest;
       },
       stopGate,
       startGate,
+      stopFacilitator,
+      startFacilitator,
       stop: () => ((stopped = true), (stopping ??= stopAll(stops))),
     };
   } catch (error) {

@@ -27,6 +27,11 @@ const READ_RETRY = { attempts: 20, delayMs: 500 };
  * 4.7 million lamports, for a few sessions at once, with the rent-exempt minimum left on the key. The clean-up returns what is left.
  */
 const DIRECT_RENT_LAMPORTS = 20_000_000n;
+/**
+ * The most a buyer is given by `fundSol`: the fee of a few transactions above the rent-exempt minimum of an empty account
+ * (890,880 lamports). The clean-up returns what is left.
+ */
+const MAX_BUYER_LAMPORTS = 10_000_000n;
 
 export interface DevnetStackOptions {
   readonly rpcUrl: string;
@@ -175,6 +180,8 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
     rentPayer: services.facilitator.rentPayer,
     stopGate: () => services.stopGate(),
     startGate: (options) => services.startGate(options),
+    stopFacilitator: () => services.stopFacilitator(),
+    startFacilitator: () => services.startFacilitator(),
   };
   const sellerWallet = keys.stack.seller.signer.address;
   const direct = createDirectChain({
@@ -217,6 +224,12 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
       readRetry: READ_RETRY,
       stack: control,
       direct,
+      // From the funding key, to a buyer of the pool, whose SOL the clean-up returns.
+      fundSol: async (owner, lamports) => {
+        if (!keys.holders.has(owner)) throw new Error(`SOL goes only to a key of the pool, which the clean-up empties: ${owner} is not one`);
+        if (lamports > MAX_BUYER_LAMPORTS) throw new Error(`A buyer is given at most ${MAX_BUYER_LAMPORTS} lamports: got ${lamports}`);
+        await sendSol(rpc, funding.signer, owner, lamports, send);
+      },
     }),
     stop: () => {
       stopping ??= (async () => {

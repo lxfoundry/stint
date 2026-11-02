@@ -67,6 +67,8 @@ export async function startLocalStack(): Promise<LocalStack> {
       rentPayer: services.facilitator.rentPayer,
       stopGate: () => services.stopGate(),
       startGate: (options) => services.startGate(options),
+      stopFacilitator: () => services.stopFacilitator(),
+      startFacilitator: () => services.startFacilitator(),
     };
     const target: Target = { name: "local", capabilities: new Set(["chain", "stack", "facilitatorApi"]) };
     return {
@@ -74,7 +76,9 @@ export async function startLocalStack(): Promise<LocalStack> {
       network: chain.network,
       keys: chain.keys,
       kora: services.kora,
-      facilitator: services.facilitator,
+      get facilitator() {
+        return services.facilitator;
+      },
       facilitatorApiKey: services.facilitatorApiKey,
       get stream() {
         return services.stream;
@@ -89,6 +93,11 @@ export async function startLocalStack(): Promise<LocalStack> {
         readRetry: READ_RETRY,
         stack: control,
         direct,
+        // A cheatcode sets the balance; the next slot makes it visible.
+        fundSol: async (owner, lamports) => {
+          chain.network.surfnet.fundSol(owner, Number(lamports));
+          await waitForNewSlot(chain.network.rpc);
+        },
       }),
       stop: () => stopAll(stops),
     };

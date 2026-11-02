@@ -8,6 +8,8 @@ const recording = (calls: string[]): StackControl => ({
   rentPayer: "RENT" as Address,
   stopGate: async () => void calls.push("stop"),
   startGate: async () => void calls.push("start"),
+  stopFacilitator: async () => void calls.push("stop facilitator"),
+  startFacilitator: async () => void calls.push("start facilitator"),
 });
 
 describe("whileGateStopped", () => {

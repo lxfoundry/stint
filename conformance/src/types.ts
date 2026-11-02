@@ -46,6 +46,10 @@ export interface StackControl {
    * `options` hold for that gate only: the next start without them brings up an ordinary one.
    */
   startGate(options?: GateStartOptions): Promise<void>;
+  /** Stops the facilitator, its sweeper included. Kora and the gate keep running; the gate's calls to the facilitator fail meanwhile. */
+  stopFacilitator(): Promise<void>;
+  /** Starts the facilitator again on the port it had, with the same keys, so that the `closeUrl` in the gate's offers stays valid. */
+  startFacilitator(): Promise<void>;
 }
 
 /** A session opened straight on the program, with no gate and no facilitator: nothing of the stack holds it. */
@@ -120,6 +124,12 @@ export interface ScenarioContext {
   readonly stack?: StackControl;
   /** Sessions opened and closed straight on the program. Absent where the harness holds none of the keys to do it with. */
   readonly direct?: DirectChain;
+  /**
+   * Gives `owner`, a buyer this context made, `lamports` from the harness, for a scenario whose buyer pays a fee itself
+   * (scenario 25); a buyer holds no SOL otherwise (spec §9.1). Give at least the rent-exempt minimum of an empty account,
+   * 890,880 lamports, or the network refuses the transfer. Absent where the harness holds no SOL to give.
+   */
+  fundSol?(owner: Address, lamports: bigint): Promise<void>;
 }
 
 export interface Scenario {

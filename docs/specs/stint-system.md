@@ -1434,8 +1434,9 @@ run is repeatable.
 - **Stack control:** the harness runs the services, so it holds their keys (the seller's wallet,
   the receiver authorizer, the facilitator's API key, the resource's admin key) and can stop,
   restart or add instances of them. In particular, it can stop the gate and start it again on the same
-  address while the facilitator, its sweeper and Kora keep running (scenario 26), and start it with its session
-  clock running ahead of the wall clock (scenario 34).
+  address while the facilitator, its sweeper and Kora keep running (scenario 26), start it with its session
+  clock running ahead of the wall clock (scenario 34), and stop the facilitator, its sweeper included, and start it
+  again on the same address while Kora keeps running (scenario 25).
 - **Facilitator API:** the harness can call the facilitator's `/verify` with an API key (section 6.5). Always
   on `local` and `devnet`; on `external` only with `--facilitator` and `--facilitator-key`.
 - **Allowance:** the facilitator accepts an allowance pull as the funding instruction (section
@@ -1462,6 +1463,9 @@ the payment's amount, because the node sends one message per change, the account
 included. The stream's `slot` is asserted only on `devnet`: the local network reports the slot of the
 subscription (T6). The rent payer's balance change is read from the close transaction's lamport
 balances (`preBalances` and `postBalances`), which are not the token balances that T9 is about.
+
+A buyer holds no SOL (section 9.1). A scenario whose buyer pays a fee itself gives it SOL through the context's
+`fundSol`, from the harness (scenario 25).
 
 **Status.** Every scenario is `required` or `pending`; the library records which, beside the
 scenario.
