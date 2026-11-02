@@ -25,8 +25,9 @@ that nobody connects to, and the sweeper closes an expired session that nobody c
 facilitator's own rent payer. A buyer can top up a session before its paid time runs out, which moves its end; a
 session whose paid time has run out cannot be extended. Ten of the 35 end-to-end scenarios of the
 [specification](docs/specs/stint-system.md) (section 12.7) pass on a local network and on devnet, and the run
-report lists the other 25 as pending. Not built yet: the other fallback closes, refusals of bad payments and
-settlement records, and resilience across restarts.
+report lists the other 25 as pending. Not built yet: the client's fallback closes (the client does not use the
+facilitator's sponsored close yet), refusals of bad payments and settlement records, the facilitator's rate
+limits, and resilience across restarts.
 The [plans](docs/plans/README.md) list the stages that remain.
 
 ## Development
