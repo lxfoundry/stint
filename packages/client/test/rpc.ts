@@ -33,6 +33,10 @@ export interface FakeNode {
   readFails?: boolean;
   /** While set, the list of the session address's transactions cannot be read. */
   listFails?: boolean;
+  /** While set, the status of a transaction sent cannot be read, so its confirmation cannot be told. */
+  statusFails?: boolean;
+  /** While set, a transaction cannot be fetched, so the `Closed` event of a close cannot be read. */
+  transactionFails?: boolean;
   /** The transactions accepted, as base64 wire transactions. */
   readonly sent: string[];
 }
@@ -63,9 +67,12 @@ export function fakeRpc(node: FakeNode): Rpc<SolanaRpcApi> {
         return SENT_SIGNATURE;
       },
     }),
-    getSignatureStatuses: () => answer({ context: { slot: 1n }, value: [{ slot: 1n, confirmations: null, err: null, confirmationStatus: "confirmed" }] }),
+    getSignatureStatuses: () =>
+      node.statusFails
+        ? failing()
+        : answer({ context: { slot: 1n }, value: [{ slot: 1n, confirmations: null, err: null, confirmationStatus: "confirmed" }] }),
     isBlockhashValid: () => answer({ context: { slot: 1n }, value: true }),
-    getTransaction: () => answer(node.closed ? closeTransaction(node.closed) : null),
+    getTransaction: () => (node.transactionFails ? failing() : answer(node.closed ? closeTransaction(node.closed) : null)),
   } as unknown as Rpc<SolanaRpcApi>;
 }
 

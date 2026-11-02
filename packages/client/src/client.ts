@@ -10,6 +10,7 @@ import {
 import { CloseKind, STINT_PROGRAM_ADDRESS, decodeSession, type ClosedEvent, type Session } from "@lxfoundry/stint-program-client";
 import {
   HEADERS,
+  TransactionFailedError,
   X402_VERSION,
   buildCloseTransaction,
   buildOpenTransaction,
@@ -438,11 +439,13 @@ export function createStintClient(options: ClientOptions): StintClient {
      * account is read first: no session of the program at the address means it is closed, which ends the chain. The
      * signer must hold the fee on top of a rent-exempt balance. The close is a `Standard` close by the authority, built
      * from the stored fields, and nothing else. One that does not confirm moves the chain on; one still pending is passed
-     * on.
+     * on, and so is one sent whose confirmation cannot be read, since it may still land. A confirmed close is the receipt
+     * even when its `Closed` event cannot be read: it then has no amounts.
      */
     async function closeOnChain(): Promise<CloseStep> {
       const rpc = options.rpc;
       if (!rpc) return { kind: "next", reason: "the client has no rpc to send a close of its own" };
+      let signature: string | undefined;
       try {
         const stored = await readOwnSession(rpc, address(opened.session));
         if (!stored) return { kind: "gone", reason: "the chain holds no session at its address" };
@@ -464,7 +467,7 @@ export function createStintClient(options: ClientOptions): StintClient {
           lifetime,
           kind: CloseKind.Standard,
         });
-        const signature = await rpc
+        signature = await rpc
           .sendTransaction(transaction as Base64EncodedWireTransaction, { encoding: "base64", preflightCommitment: "confirmed" })
           .send();
         const confirmation = await waitForConfirmation(rpc, signature, lifetime.blockhash);
@@ -472,9 +475,14 @@ export function createStintClient(options: ClientOptions): StintClient {
           const still = confirmation === "pending" ? { pending: { transaction: signature, via: "unilateral" as const } } : {};
           return { kind: "next", reason: `the client's own close ${signature} is ${confirmation}`, ...still };
         }
-        const event = await fetchClosedEvent(rpc, signature, EVENT_READ_RETRY);
+        const event = await fetchClosedEvent(rpc, signature, EVENT_READ_RETRY).catch(() => undefined);
         return { kind: "closed", receipt: { ...(event ? amountsOf(event) : {}), transaction: signature, via: "unilateral" } };
       } catch (error) {
+        // A close that was sent and did not fail on the chain may still land: its signature is passed on.
+        if (signature && !(error instanceof TransactionFailedError)) {
+          const reason = `the client's own close ${signature} was sent, but its confirmation could not be read (${describeError(error)})`;
+          return { kind: "next", reason, pending: { transaction: signature, via: "unilateral" } };
+        }
         return { kind: "next", reason: `the client's own close failed (${describeError(error)})` };
       }
     }

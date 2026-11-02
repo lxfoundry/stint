@@ -344,6 +344,29 @@ describe("the client's own close on the chain (spec §9.3, step 3)", () => {
     expect((error as Error).message).toMatch(/runs to the end of its paid time/);
   });
 
+  it("names a close it sent as one that may still land when its confirmation cannot be read", async () => {
+    const node: FakeNode = { session: gate.stored, lamports: 1_000_000n, statusFails: true, sent: [] };
+    const session = await strandedSession(node);
+
+    const error = await session.close().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(StintError);
+    expect(node.sent).toHaveLength(1);
+    expect((error as Error).message).toContain(`A close sent may still land: ${SENT_SIGNATURE} (unilateral)`);
+    expect((error as Error).message).toContain("confirmation could not be read");
+    expect((error as Error).message).toMatch(/runs to the end of its paid time/);
+  });
+
+  it("returns a close that confirmed, without amounts, when its Closed event cannot be read", async () => {
+    const node: FakeNode = { session: gate.stored, lamports: 1_000_000n, transactionFails: true, sent: [] };
+    const session = await strandedSession(node);
+
+    const receipt = await session.close();
+
+    expect(receipt).toEqual({ transaction: SENT_SIGNATURE, via: "unilateral" });
+    expect(node.sent).toHaveLength(1);
+  });
+
   it("sends nothing to the chain while the gate can close the session", async () => {
     const sent: string[] = [];
     const client = createStintClient({ signer: buyer, policy, rpc: fakeRpc({ session: gate.stored, lamports: 1_000_000n, sent }) });
