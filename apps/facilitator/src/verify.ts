@@ -192,9 +192,13 @@ async function simulate(ctx: FacilitatorContext, tx: InspectedTransaction, fundi
   return checkPayerFunding(executedInstructions(tx, value.innerInstructions), ctx.keys, funding);
 }
 
-/** The program's error code, when the instruction that failed is one of the program's own. */
+/**
+ * The custom error code reported against one of the program's own instructions: its own error, or that of a program it
+ * invoked.
+ */
 function programError(tx: InspectedTransaction, err: TransactionError): number | undefined {
   if (typeof err !== "object" || !("InstructionError" in err)) return undefined;
+  // Kit's RPC returns the index and the code as bigints, though `TransactionError` types them as numbers.
   const [index, error] = err.InstructionError;
   if (tx.instructions[Number(index)]?.programAddress !== STINT_PROGRAM_ADDRESS) return undefined;
   return typeof error === "object" && "Custom" in error ? Number(error.Custom) : undefined;
