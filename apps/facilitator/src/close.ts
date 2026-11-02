@@ -71,7 +71,8 @@ export function createCloseInfoSource(
 
   const lifetime = (): Promise<Lifetime> => {
     const now = clock();
-    if (!cached || now - cached.at >= ttlMs) {
+    // A clock earlier than the cached read counts as expired: the blockhash would otherwise be served until it catches up.
+    if (!cached || now < cached.at || now - cached.at >= ttlMs) {
       const entry = { at: now, lifetime: fetchLifetime() };
       // A read that failed is not served again: the next request asks the node.
       entry.lifetime.catch(() => {

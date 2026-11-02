@@ -42,6 +42,8 @@ interface Node {
   failLifetime: boolean;
   /** Set: `sendTransaction` answers once it settles. */
   holdSend?: Promise<void>;
+  /** Set: `sendTransaction` throws, as a node does when it refuses a transaction at preflight. */
+  failSend?: boolean;
   calls: { read: number; simulate: number; send: number; lifetime: number };
 }
 
@@ -81,6 +83,7 @@ function fakeRpc(node: Node, closed: () => unknown): Rpc<SolanaRpcApi> {
       call(async () => {
         node.calls.send++;
         await node.holdSend;
+        if (node.failSend) throw new Error("preflight refused");
         return "sent";
       }),
     getSignatureStatuses: () => call(() => ({ value: [{ confirmationStatus: "confirmed", err: null }] })),
@@ -257,6 +260,15 @@ describe("the sponsored close (spec §6.1)", () => {
       expect(node.calls.lifetime).toBe(2);
     });
 
+    it("asks the node again when the clock has gone back", async () => {
+      let now = 5_000;
+      const source = createCloseInfoSource(context(), { ttlMs: 2_000, clock: () => now });
+      await source.read();
+      now = 1_000;
+      await source.read();
+      expect(node.calls.lifetime).toBe(2);
+    });
+
     it("does not serve a read that failed: the next request asks the node", async () => {
       const source = createCloseInfoSource(context(), { clock: () => 0 });
       node.failLifetime = true;
@@ -400,6 +412,16 @@ describe("the sponsored close (spec §6.1)", () => {
       expect(a).toMatchObject({ success: true, paid: "8500" });
       expect(b).toEqual(a);
       expect(node.calls.send).toBe(1);
+    });
+
+    it("sends a close of a session again once an earlier close of it has failed, which answered simulation_failed with its signature", async () => {
+      const settle = createSponsoredCloser(context());
+      node.failSend = true;
+      const failed = await settle(await closeBy(buyer));
+      expect(failed).toMatchObject({ success: false, errorReason: "simulation_failed", transaction: expect.stringMatching(/.+/) });
+      node.failSend = false;
+      expect(await settle(await closeBy(buyer))).toMatchObject({ success: true, paid: "8500" });
+      expect(node.calls.send).toBe(2);
     });
 
     it("reports a confirmed close without amounts when its Closed event cannot be read", async () => {
