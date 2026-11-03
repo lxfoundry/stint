@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,17 +48,50 @@ describe("the agent's wallet", () => {
     const folder = mkdtempSync(join(parent, "stint-claude-demo-test-"));
     try {
       if (!keepsModes(folder)) context.skip("the home directory does not keep file modes");
-      const created = await loadOrCreateWallet(join(folder, "stint-demo"), DEVNET);
+      const dir = join(folder, "stint-demo");
+      const created = await loadOrCreateWallet(dir, DEVNET);
       expect(statSync(created.path).mode & 0o777).toBe(0o600);
+      expect(readdirSync(dir)).toEqual([WALLET_FILE]);
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }
   });
 
-  it("makes one key when two copies start at once", async () => {
-    const [first, second] = await Promise.all([loadOrCreateWallet(home, DEVNET), loadOrCreateWallet(home, DEVNET)]);
-    expect(first.signer.address).toBe(second.signer.address);
-    expect([first.created, second.created].sort()).toEqual([false, true]);
+  it("makes one key when several copies start at once, and leaves nothing but the key file", async () => {
+    const wallets = await Promise.all(Array.from({ length: 8 }, () => loadOrCreateWallet(home, DEVNET)));
+    expect(new Set(wallets.map((wallet) => wallet.signer.address)).size).toBe(1);
+    expect(wallets.filter((wallet) => wallet.created)).toHaveLength(1);
+    expect(readdirSync(home)).toEqual([WALLET_FILE]);
+  });
+
+  it("is not blocked by a temporary file that a crashed writer left, and does not take it for the wallet", async () => {
+    const other = await loadOrCreateWallet(join(home, "other"), DEVNET);
+    const whole = join(home, `${WALLET_FILE}.4242.dead.tmp`);
+    const truncated = join(home, `${WALLET_FILE}.4243.dead.tmp`);
+    writeFileSync(whole, readFileSync(other.path));
+    writeFileSync(truncated, "[12, 34");
+    const created = await loadOrCreateWallet(home, DEVNET);
+    expect(created.created).toBe(true);
+    expect(created.signer.address).not.toBe(other.signer.address);
+    expect((await loadOrCreateWallet(home, DEVNET)).signer.address).toBe(created.signer.address);
+    expect(readFileSync(whole)).toEqual(readFileSync(other.path));
+    expect(readFileSync(truncated, "utf8")).toBe("[12, 34");
+  });
+
+  it("waits for a key file that is there but not yet written, as one made by an older version or another tool can be", async () => {
+    const source = await loadOrCreateWallet(join(home, "source"), DEVNET);
+    const dir = join(home, "slow");
+    mkdirSync(dir);
+    const path = join(dir, WALLET_FILE);
+    writeFileSync(path, "");
+    const fill = setTimeout(() => writeFileSync(path, readFileSync(source.path)), 150);
+    try {
+      const loaded = await loadOrCreateWallet(dir, DEVNET);
+      expect(loaded).toMatchObject({ created: false, path });
+      expect(loaded.signer.address).toBe(source.signer.address);
+    } finally {
+      clearTimeout(fill);
+    }
   });
 
   it("never overwrites a file that is not a key, and quotes none of it", async () => {

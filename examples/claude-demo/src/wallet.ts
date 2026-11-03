@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createKeyPairSignerFromBytes, createKeyPairSignerFromPrivateKeyBytes, getAddressEncoder, type KeyPairSigner } from "@solana/kit";
 import type { Policy } from "@lxfoundry/stint-client";
@@ -6,7 +6,7 @@ import { SOLANA_DEVNET } from "@lxfoundry/stint-x402";
 
 /** The agent's key, in the `stint-demo` folder of `STINT_DEMO_HOME`: a Solana CLI keypair file, a JSON array of 64 bytes. */
 export const WALLET_FILE = "agent.json";
-/** A copy that finds the file another has just created reads it a few times while it may be half written. */
+/** A key file that is not yet complete (one made by an older version or another tool) is read a few times before it is called invalid. */
 const READ_ATTEMPTS = 5;
 const READ_DELAY_MS = 100;
 
@@ -56,26 +56,49 @@ async function readWhenWritten(path: string): Promise<KeyPairSigner> {
 }
 
 /**
+ * Makes `path` hold `contents`, whole and readable by its owner only, unless the name is taken: true when this call
+ * made it, false when another did. The contents go to a temporary file beside `path` (a name unique to this call, mode
+ * 0600 from its creation), which is then linked to `path`: the link fails if the name exists, and the name appears with
+ * everything in it at once. The temporary file is removed in every case. After a crash, a `*.tmp` file may remain.
+ */
+function publish(path: string, contents: string): boolean {
+  const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    writeFileSync(temp, contents, { mode: 0o600, flag: "wx" });
+    try {
+      linkSync(temp, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
+    return true;
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+/**
  * The agent's key at `dir/agent.json` (`dir` is `STINT_DEMO_HOME/stint-demo`), the folder created if it is missing. A
  * file that is there is used, and never overwritten, even one that is not a key: that is an error. With none, a fresh
- * key is written, readable by its owner only, and only for a policy that allows devnet alone. Two copies that start at
- * once make one key: the second finds the first's file.
+ * key is made, and only for a policy that allows devnet alone.
+ *
+ * What is guaranteed. The name `agent.json` never exists half written: the key is written whole to a private temporary
+ * file in the same folder (mode 0600 from its creation), which is then linked to `agent.json` (the link fails if the
+ * name is taken). A crash or a kill can leave an `agent.json.*.tmp` file (a full disk leaves none), never a truncated
+ * `agent.json`, and a leftover `*.tmp` file is neither read as the key nor in the way. Copies that start at once make
+ * one key: the one whose link succeeds keeps it, and the others read its file. A key file that is there but not yet complete (one made
+ * by an older version or another tool) is read a few times, about 0.4 s in all, before it is called invalid.
  */
 export async function loadOrCreateWallet(dir: string, policy: Pick<Policy, "networks">): Promise<Wallet> {
   mkdirSync(dir, { recursive: true });
   const path = join(dir, WALLET_FILE);
-  if (existsSync(path)) return { signer: await readWallet(path), path, created: false };
+  if (existsSync(path)) return { signer: await readWhenWritten(path), path, created: false };
   if (!allowsDevnetOnly(policy)) {
     throw new WalletError(`There is no key at ${path}, and none is made for a policy that allows a network other than devnet`);
   }
   const privateKey = crypto.getRandomValues(new Uint8Array(32));
   const signer = await createKeyPairSignerFromPrivateKeyBytes(privateKey);
   const bytes = [...privateKey, ...getAddressEncoder().encode(signer.address)];
-  try {
-    writeFileSync(path, JSON.stringify(bytes), { mode: 0o600, flag: "wx" });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    return { signer: await readWhenWritten(path), path, created: false };
-  }
+  if (!publish(path, JSON.stringify(bytes))) return { signer: await readWhenWritten(path), path, created: false };
   return { signer, path, created: true };
 }
