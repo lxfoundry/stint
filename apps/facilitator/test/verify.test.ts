@@ -456,11 +456,24 @@ describe("verifyPayment (spec §5.4)", () => {
       expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: true, type: "topUp" });
     });
 
-    it("refuses a top-up that would take the session past maxSeconds", async () => {
+    it.each([
+      ["simulates", (): void => {}, 1],
+      ["fails its simulation", (): void => void (node.simulation = { err: { InstructionError: [0n, { Custom: 1n }] } }), 1],
+      ["is refused by the program as expired", (): void => void (node.simulation = { err: { InstructionError: [1n, { Custom: 6003n }] } }), 1],
+      ["has an expired blockhash", (): void => void (node.blockhashValid = false), 0],
+    ] as const)("refuses as invalid_amount a top-up that would take the session past maxSeconds and %s", async (_, change, simulations) => {
       // Paid for 110 s of 120: 12 s more would make 122.
       await withSession({ deposited: 110_000n });
+      change();
       expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "invalid_amount" });
-      expect(node.simulated).toBe(0);
+      expect(node.simulated).toBe(simulations);
+    });
+
+    it("answers already_processed, not invalid_amount, for a top-up past maxSeconds whose simulation reports this very message processed", async () => {
+      // The top-up landed, and the facilitator holds no record of it: its 12 s are already in the 110 s of 120 read now.
+      await withSession({ deposited: 110_000n });
+      node.simulation = { err: "AlreadyProcessed" };
+      expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "already_processed" });
     });
 
     it("refuses a top-up signed by a key other than the session's authority", async () => {

@@ -98,6 +98,8 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
   let facts: { payer: Address; session: Address };
   // A close and a top-up fund nothing: the rent payer only receives a closed session's rent back.
   let funding: Funding = { destinations: [], budget: 0n };
+  // The answer to a top-up past `maxSeconds`, whatever comes after, unless the simulation finds this message processed.
+  let pastMaxSeconds: Verified | undefined;
   if (elapsed.type === "open") {
     const check = await checkOpenTransaction(tx, requirements, ctx.keys);
     if (!check.ok) return check;
@@ -124,7 +126,9 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
     const check = await checkTopUpTransaction(tx, requirements, stored, ctx.keys);
     if (!check.ok) return check;
     if (stored.deposited + BigInt(requirements.amount) > stored.rate * BigInt(stored.maxSeconds)) {
-      return refuse("invalid_amount", "the top-up would take the session past maxSeconds");
+      // Not answered yet: a top-up that landed with no record of it is in the deposit read now, and near maxSeconds fails
+      // this check, though its simulation reports it already processed, which is not final (spec §5.5).
+      pastMaxSeconds = refuse("invalid_amount", "the top-up would take the session past maxSeconds");
     }
     facts = { payer: stored.authority, session };
   } else {
@@ -137,9 +141,10 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
   }
 
   const { value: valid } = await ctx.rpc.isBlockhashValid(blockhash(tx.blockhash), { commitment: "confirmed" }).send();
-  if (!valid) return refuse("blockhash_expired", "the transaction's blockhash is no longer valid");
+  if (!valid) return pastMaxSeconds ?? refuse("blockhash_expired", "the transaction's blockhash is no longer valid");
 
   const simulated = await simulate(ctx, tx, funding);
+  if (pastMaxSeconds && (simulated.ok || simulated.reason !== "already_processed")) return pastMaxSeconds;
   if (!simulated.ok) return simulated;
   return { ok: true, type: elapsed.type, tx, ...facts };
 }
