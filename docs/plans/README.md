@@ -35,7 +35,7 @@ the earlier stages confirmed (spec §14) and the versions they pinned, instead o
 | 8 | Closes that protect the buyer: outage and admin, `WaiveMinimum` | 10, 30 | — | |
 | 9 | Account edge cases: `409 refund_account_closed`, a closed `receiver_token` recreated by a close, frozen accounts | 21, 27, 28 | — | |
 | 10 | Resilience: several gate instances, gate restarts, client restarts, lost settlement replies | 11, 23, 29, 33 | — | |
-| 11 | Allowance funding | 12 | 3 | |
+| 11 | Allowance funding | 12 | 3 | [11-allowance-funding.md](11-allowance-funding.md) |
 | 12 | Long horizon: moving the network's time forward | 31 | — | |
 
 Stages 0 to 2 come first, in that order. From stage 3 on, the order may change. Each plan names
