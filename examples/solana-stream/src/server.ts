@@ -12,7 +12,8 @@ export interface StreamConfig {
   /**
    * The origin buyers reach the stream at, such as `https://stream.example.com` behind a proxy that ends TLS: the gate's
    * origin, which session tokens name as their `aud` (spec §7.2) and which starts the `wsUrl` and `resource.url` it
-   * answers with. Only its origin is kept. Default: the address the server listens on.
+   * answers with. An http or https URL, of which only the origin is kept; any other value throws before the server
+   * listens. Default: the address the server listens on.
    */
   readonly origin?: string;
   /** The node's WebSocket endpoint (spec §8, §12.4). */
@@ -26,11 +27,21 @@ export interface RunningStream {
   stop(): Promise<void>;
 }
 
+/** The origin of an http or https URL. The message does not quote the value, which could carry credentials. */
+function httpOrigin(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new TypeError("The stream's origin must be an http or https URL, such as https://stream.example.com");
+  }
+  return url.origin;
+}
+
 /** The example resource with its gate mounted as middleware (spec §7.6, §8). */
 export async function startStream(config: StreamConfig): Promise<RunningStream> {
   const host = config.host ?? "127.0.0.1";
-  // Parsed before the server listens: an origin that does not parse throws here, with nothing to stop.
-  const publicOrigin = config.origin === undefined ? undefined : new URL(config.origin).origin;
+  // Checked before the server listens, with nothing to stop: an origin that does not parse, or that is not http or
+  // https, throws here. A host and a port without a scheme parses, but its origin is "null", which no token names.
+  const publicOrigin = config.origin === undefined ? undefined : httpOrigin(config.origin);
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);

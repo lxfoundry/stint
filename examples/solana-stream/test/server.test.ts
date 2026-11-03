@@ -80,10 +80,16 @@ describe("the origin the stream announces to its gate", () => {
     expect(await offeredAt(stream)).toBe(`${stream.url}/sessions`);
   });
 
-  it("refuses an origin that does not parse, before it listens", async () => {
-    const started = startStream({ rpcWsUrl: NO_NODE, origin: "not a url", gate: await gateConfig() });
-    // Before the change, the stream starts: it is stopped, so that the failing run leaves nothing listening.
+  it.each([
+    ["does not parse", "not a url", /Invalid URL/],
+    // A host and a port without a scheme parses, with the host as its protocol and "null" as its origin.
+    ["has no scheme", "stream.example.com:8080", /http or https/],
+    ["is not http or https", "ftp://stream.example.com", /http or https/],
+    ["has no origin", "file:///srv/stream", /http or https/],
+  ])("refuses an origin that %s, before it listens", async (_case, origin, message) => {
+    const started = startStream({ rpcWsUrl: NO_NODE, origin, gate: await gateConfig() });
+    // Without the check, the stream starts: it is stopped, so that the failing run leaves nothing listening.
     started.then((leaked) => leaked.stop(), () => undefined);
-    await expect(started).rejects.toThrow(/Invalid URL/);
+    await expect(started).rejects.toThrow(message);
   });
 });
