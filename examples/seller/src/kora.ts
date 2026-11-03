@@ -159,7 +159,9 @@ async function freePort(): Promise<number> {
  * Runs Kora in a fresh working directory: Kora reads a `.env` from its working directory, so a clean one keeps anything
  * else out. Its key reaches it only through its environment. Kora 2.0.5 has no bind option: it listens on every
  * interface at `port`, and refuses any request without `apiKey` but `GET /liveness`; where only declared ports are
- * public, as on Fly.io, nothing outside the machine reaches it. Ready once `GET /liveness` answers.
+ * public, as on Fly.io, nothing outside the machine reaches it. Ready once `GET /liveness` answers. If this process
+ * calls `process.exit()` while Kora runs, Kora is killed with it; a process that a signal ends cannot do that, so it
+ * must handle the signals it expects and call `stop()`.
  */
 export async function startKora(options: KoraOptions): Promise<KoraProcess> {
   const directory = mkdtempSync(join(options.workDir ?? tmpdir(), "stint-kora-"));
@@ -196,12 +198,17 @@ export async function startKora(options: KoraOptions): Promise<KoraProcess> {
     child.stderr.on("data", keep);
     // Kora quotes the RPC URL in its errors, and the URL can carry a key.
     const shown = () => redactUrls(readableTail(output, truncated));
+    // A process that ends without stopping Kora, on `process.exit()` as on a stop that hangs or a start that is cut short,
+    // would leave it running with the fee payer's key in its environment. `exit` listeners run synchronously: the kill is.
+    const killWithProcess = () => void child.kill("SIGKILL");
+    process.once("exit", killWithProcess);
+    const unhook = () => void process.removeListener("exit", killWithProcess);
     let exited = false;
     let spawnError: Error | undefined;
     const exit = new Promise<number | null>((resolve) => {
-      child.once("exit", (code) => ((exited = true), resolve(code)));
+      child.once("exit", (code) => (unhook(), (exited = true), resolve(code)));
       // A binary that cannot be started emits "error" and never "exit".
-      child.once("error", (error) => ((spawnError = error), (exited = true), resolve(null)));
+      child.once("error", (error) => (unhook(), (spawnError = error), (exited = true), resolve(null)));
     });
     const url = `http://127.0.0.1:${port}`;
     stop = async () => {

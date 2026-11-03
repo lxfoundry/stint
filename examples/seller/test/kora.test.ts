@@ -114,6 +114,33 @@ describe("starting Kora", () => {
       await kora.stop();
     }
   });
+
+  it("kills Kora if the process exits without stopping it, and takes that hook away once Kora has exited", async () => {
+    const before = process.listeners("exit");
+    const kora = await startKora(options(fakeKora("", true)));
+    try {
+      const hooks = process.listeners("exit").filter((listener) => !before.includes(listener));
+      expect(hooks).toHaveLength(1);
+      // What `process.exit()` runs, synchronously, with the process about to end.
+      hooks[0]!(0);
+      expect(await kora.exit).toBeNull();
+      expect(process.listeners("exit")).toEqual(before);
+    } finally {
+      await kora.stop();
+    }
+  });
+
+  it("leaves no hook on the process after Kora is stopped, exited during its start or could not be started", async () => {
+    const before = process.listeners("exit");
+    const kora = await startKora(options(fakeKora("", true)));
+    expect(process.listeners("exit")).toHaveLength(before.length + 1);
+    await kora.stop();
+    expect(process.listeners("exit")).toEqual(before);
+    await expect(startKora(options("false"))).rejects.toThrow(/exited during startup/);
+    expect(process.listeners("exit")).toEqual(before);
+    await expect(startKora(options("/nonexistent/kora"))).rejects.toThrow(/Could not start Kora/);
+    expect(process.listeners("exit")).toEqual(before);
+  });
 });
 
 describe("Kora's log", () => {

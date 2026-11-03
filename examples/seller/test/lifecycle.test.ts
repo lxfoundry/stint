@@ -106,10 +106,16 @@ interface FakeKora {
   alive(): boolean;
 }
 
+/** What the stand-in prints when it dies: a line that quotes an RPC URL with a key, as Kora's errors do. */
+const KORA_LAST_WORDS = `Kora failed: GET https://rpc.example.invalid/v2/${KEY} was unreachable`;
+/** The same line as the seller logs it: every URL cut to its scheme and host. */
+const REDACTED_LAST_WORDS = "Kora failed: GET https://rpc.example.invalid was unreachable";
+
 /**
- * An executable standing in for Kora. It writes its process id to `pid`, serves `GET /liveness` and answers `getPayerSigner`
- * (it writes `asked` first, and waits while a `hold` file exists); on SIGINT it writes `stopped` and exits; it exits with
- * status 7 once a `die` file exists.
+ * An executable standing in for Kora. It writes its process id to `pid`; it listens, to serve `GET /liveness` and to answer
+ * `getPayerSigner`, only once no `slow` file exists (it writes `asked` first, and waits while a `hold` file exists); on SIGINT
+ * it writes `stopped` and exits. Once a `die` file exists, it prints a line that quotes an RPC URL with a key and exits with
+ * status 7, a moment later, so that the line is read before the exit is seen.
  */
 function fakeKora(scope: Scope): FakeKora {
   const directory = scope.directory("fake-kora-");
@@ -128,12 +134,19 @@ const server = createServer((request, response) => {
     response.end(JSON.stringify({ jsonrpc: "2.0", id: JSON.parse(body).id, result: { signer_address: ${JSON.stringify(PROGRAM)}, payment_address: ${JSON.stringify(PROGRAM)} } }));
   });
 });
-server.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0.1");
+const listen = () => existsSync(at("slow")) ? setTimeout(listen, 25) : server.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0.1");
+listen();
 process.on("SIGINT", () => {
   writeFileSync(at("stopped"), "");
   process.exit(0);
 });
-setInterval(() => existsSync(at("die")) && process.exit(7), 25);
+let dying = false;
+setInterval(() => {
+  if (dying || !existsSync(at("die"))) return;
+  dying = true;
+  console.log(${JSON.stringify(KORA_LAST_WORDS)});
+  setTimeout(() => process.exit(7), 100);
+}, 25);
 `;
   const binary = join(directory, "kora");
   writeFileSync(binary, `#!/usr/bin/env node\n${source}`, { mode: 0o755 });
@@ -144,7 +157,8 @@ setInterval(() => existsSync(at("die")) && process.exit(7), 25);
     if (id === undefined) return false;
     try {
       process.kill(id, 0);
-      return true;
+      // A process that has ended but is not yet reaped, as one whose parent has just ended is, is not running.
+      return !/^\d+ \(.*\) Z /.test(readFileSync(`/proc/${id}/stat`, "utf8"));
     } catch {
       return false;
     }
@@ -239,7 +253,7 @@ describe("a running seller", { timeout: SERVICE_TIMEOUT }, () => {
   );
 
   it(
-    "settles `failed`, and logs what Kora printed, when Kora exits on its own",
+    "settles `failed`, and logs what Kora printed with its URLs cut to their hosts, when Kora exits on its own",
     scoped(async (scope) => {
       const kora = fakeKora(scope);
       vi.stubEnv("KORA_BIN", kora.binary);
@@ -249,7 +263,11 @@ describe("a running seller", { timeout: SERVICE_TIMEOUT }, () => {
       try {
         kora.put("die");
         await expect(seller.failed).resolves.toBe("Kora exited (status 7)");
-        expect(entries).toContainEqual(expect.objectContaining({ event: "kora_exited", code: 7 }));
+        const exited = entries.filter((entry) => entry.event === "kora_exited");
+        expect(exited).toHaveLength(1);
+        expect(exited[0]).toMatchObject({ code: 7, output: `${REDACTED_LAST_WORDS}\n` });
+        expect(JSON.stringify(exited)).not.toContain(KEY);
+        expect(JSON.stringify(exited)).not.toContain("/v2/");
       } finally {
         await seller.stop();
       }
@@ -338,6 +356,12 @@ describe.concurrent("the entry point", () => {
       expect(await run.exited).toBe(1);
       expect(run.stderr()).toContain("Kora exited (status 7)");
       expect(run.stdout()).toContain('"event":"kora_exited"');
+      // What Kora printed is in the log, its URL cut to the host: the key and the path are in neither stream.
+      expect(run.stdout()).toContain(REDACTED_LAST_WORDS);
+      for (const text of [run.stdout(), run.stderr()]) {
+        expect(text).not.toContain(KEY);
+        expect(text).not.toContain("/v2/");
+      }
       expect(kora.alive()).toBe(false);
     }),
     TEST_TIMEOUT,
@@ -356,6 +380,42 @@ describe.concurrent("the entry point", () => {
       kora.put("die");
       expect(await run.exited).toBe(1);
       expect(run.stderr()).toContain("Kora exited (status 7)");
+    }),
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "ends Kora with the process when stopping hangs, so that a Kora still running is not left behind",
+    scoped(async (scope) => {
+      const kora = fakeKora(scope);
+      const rpc = await fakeRpc(scope);
+      const run = runEntryPoint(scope, rpc, kora);
+      await vi.waitFor(() => expect(run.stdout()).toContain(READY), { timeout: BOOT_TIMEOUT, interval: 100 });
+      rpc.hang("getProgramAccounts");
+      await vi.waitFor(() => expect(rpc.hung("getProgramAccounts")).toBeGreaterThan(0), { timeout: 30_000, interval: 100 });
+      // The stops run in order and the facilitator's waits for the sweep, so Kora's never runs: the process ends at its deadline.
+      expect(kora.alive()).toBe(true);
+      run.signal("SIGTERM");
+      expect(await run.exited).toBe(0);
+      expect(kora.has("stopped")).toBe(false);
+      expect(kora.alive()).toBe(false);
+    }),
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "ends Kora with the process when a signal arrives during a start that outlasts the deadline, before Kora is ready to be stopped",
+    scoped(async (scope) => {
+      const kora = fakeKora(scope);
+      // Kora runs but does not listen yet, so the seller has no way to stop it: it is not ready.
+      kora.put("slow");
+      const run = runEntryPoint(scope, await fakeRpc(scope), kora);
+      await vi.waitFor(() => expect(kora.alive()).toBe(true), { timeout: BOOT_TIMEOUT, interval: 100 });
+      run.signal("SIGTERM");
+      expect(await run.exited).toBe(0);
+      expect(run.stdout()).not.toContain(READY);
+      expect(kora.has("stopped")).toBe(false);
+      expect(kora.alive()).toBe(false);
     }),
     TEST_TIMEOUT,
   );
