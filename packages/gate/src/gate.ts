@@ -273,6 +273,15 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     sendPaymentRequired(response, `${config.origin}/sessions`, durations.map((seconds) => buildOpenOffer({ ...base, seconds })), error);
   }
 
+  /**
+   * The facilitator answered `already_processed` (spec §5.4): the chain has processed the payment's message and the
+   * facilitator holds no record of it, so the payment may have landed. That is not a refusal: `503`, never `402`, which
+   * would tell the client that nothing was charged (spec §7.1).
+   */
+  function mayHaveLanded(response: ServerResponse, body: Record<string, unknown> = {}, headers?: Record<string, string>): void {
+    sendJson(response, 503, { error: "already_processed", ...body }, headers);
+  }
+
   /** The session the payload's `stint.open` creates, read from the transaction itself. */
   function sessionOpenedBy(payload: PaymentPayload): Address | undefined {
     const elapsed = readElapsedPayload(payload);
@@ -588,7 +597,10 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     });
 
     const verified = await upstream(() => config.facilitator.verify(payload, requirements));
-    if (!verified.isValid) return paymentRequired(response, durations, verified.invalidReason ?? "invalid_payload");
+    if (!verified.isValid) {
+      if (verified.invalidReason === "already_processed") return mayHaveLanded(response, { session });
+      return paymentRequired(response, durations, verified.invalidReason ?? "invalid_payload");
+    }
     const settled = await upstream(() => config.facilitator.settle(payload, requirements));
     const paymentResponse = { [HEADERS.paymentResponse]: encodePaymentResponseHeader(settled) };
     log({ event: "open", session, success: settled.success, reason: settled.errorReason });
@@ -596,6 +608,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       if (settled.errorReason === "settlement_pending") {
         return sendJson(response, 202, { session, transaction: settled.transaction }, paymentResponse);
       }
+      if (settled.errorReason === "already_processed") return mayHaveLanded(response, { session }, paymentResponse);
       return paymentRequired(response, durations, settled.errorReason ?? "simulation_failed");
     }
 
@@ -690,13 +703,17 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     });
 
     const verified = await upstream(() => config.facilitator.verify(payload, requirements));
-    if (!verified.isValid) return refusal(verified.invalidReason ?? "invalid_payload");
+    if (!verified.isValid) {
+      if (verified.invalidReason === "already_processed") return mayHaveLanded(response);
+      return refusal(verified.invalidReason ?? "invalid_payload");
+    }
     const settled = await upstream(() => config.facilitator.settle(payload, requirements));
     const paymentResponse = { [HEADERS.paymentResponse]: encodePaymentResponseHeader(settled) };
     log({ event: "topUp", session, success: settled.success, reason: settled.errorReason });
     if (!settled.success) {
       // A pending top-up needs nothing more here: if it lands, its later end is found as one this gate did not settle is.
       if (settled.errorReason === "settlement_pending") return sendJson(response, 202, { transaction: settled.transaction }, paymentResponse);
+      if (settled.errorReason === "already_processed") return mayHaveLanded(response, {}, paymentResponse);
       return refusal(settled.errorReason ?? "simulation_failed");
     }
     const until = paidUntil({ ...stored, deposited: stored.deposited + BigInt(requirements.amount) });

@@ -93,6 +93,23 @@ describe("the gate's top-up route (spec §7.1)", () => {
     expect(await topUpOffers("1".repeat(44) as Address)).toMatchObject({ status: 404, body: { error: "unknown_session" } });
   });
 
+  it("answers 503, not 402, when the top-up's verification or settlement answers already_processed, and moves no timer", async () => {
+    const { session } = await open();
+
+    h.verifyAnswer = { isValid: false, invalidReason: "already_processed" };
+    expect(await sendTopUp(session, await prepareTopUp(session))).toMatchObject({ status: 503, body: { error: "already_processed" } });
+    expect(ofType("topUp")).toEqual([]);
+
+    h.verifyAnswer = { isValid: true };
+    h.settleAnswer = () => ({ success: false, errorReason: "already_processed", transaction: "", network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" });
+    const unsettled = await sendTopUp(session, await prepareTopUp(session));
+    expect(unsettled.status).toBe(503);
+    expect(unsettled.body).toEqual({ error: "already_processed" });
+    expect(unsettled.paymentResponse).not.toBeNull();
+    // The end timer is still the one the open armed.
+    expect(pendingDue(END_DUE)).toBeDefined();
+  });
+
   it("takes the payment: verifies and settles it, answers 200 with the new paid_until, and moves the end timer there", async () => {
     const { session } = await open();
     const payload = await prepareTopUp(session, 10);
