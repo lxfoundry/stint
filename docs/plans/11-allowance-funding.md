@@ -1056,8 +1056,8 @@ authority only", to:
 Run: `pnpm --filter @lxfoundry/stint-x402 test checks`
 Expected: FAIL.
 - The two accepting tests get `unexpected_instruction`: today's layout allows only `TransferChecked`.
-- All eight account-replacement refusals get `unexpected_instruction` instead of their reason, and so does the
-  refusal of another refund owner.
+- "refuses a pull of another amount", all eight account-replacement refusals and the refusal of another refund owner
+  get `unexpected_instruction` instead of their reason: 13 failures in all, with the item below.
 - The updated top-up assertion lacks `vault`.
 - "refuses a pull with a tenth account, and a fixed-delegation pull in its place" passes already. Today's layout
   refuses any pull. It guards that the new reader keeps refusing those two.
@@ -1380,6 +1380,19 @@ describe("vaultReceipt (spec §5.4, §10.2)", () => {
     expect(vaultReceipt(tx, parsed, vault)).toBe(29_999n);
   });
 
+  it("throws on a mint or a burn that names the vault", async () => {
+    const { tx, source, vault } = await allowanceOpen();
+    const mint = [
+      {
+        index: 1,
+        instructions: [
+          { program: "spl-token", programId: TOKEN_PROGRAM_ADDRESS, parsed: { type: "mintTo", info: { mint: MINT, account: vault, mintAuthority: source, amount: "1" } } },
+        ],
+      },
+    ];
+    expect(() => vaultReceipt(tx, mint, vault)).toThrow(/other than by a transfer/);
+  });
+
   it("throws on inner instructions it cannot read", async () => {
     const { tx, vault } = await allowanceOpen();
     expect(() => vaultReceipt(tx, "nope", vault)).toThrow();
@@ -1482,8 +1495,27 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const asIndex = (value: unknown) => (typeof value === "number" || typeof value === "bigint" ? Number(value) : undefined);
 
-/** A token transfer's source, destination and amount; undefined for any other token instruction. */
-type Movement = { readonly source: string; readonly destination: string; readonly amount: bigint } | undefined;
+/**
+ * A token transfer's source, destination and amount; the accounts of a token instruction that changes a balance other
+ * than by a transfer (a mint, a burn); undefined for any other token instruction.
+ */
+type Movement =
+  | { readonly source: string; readonly destination: string; readonly amount: bigint }
+  | { readonly unsummed: readonly string[] }
+  | undefined;
+
+/** Token instructions that change a balance other than by a transfer, which a sum of transfers cannot account for. */
+const UNSUMMED: ReadonlySet<TokenInstruction> = new Set([
+  TokenInstruction.MintTo,
+  TokenInstruction.MintToChecked,
+  TokenInstruction.Burn,
+  TokenInstruction.BurnChecked,
+]);
+const UNSUMMED_PARSED: ReadonlySet<string> = new Set(["mintTo", "mintToChecked", "burn", "burnChecked"]);
+
+/** Every string anywhere in a parsed instruction's `info`: a superset of the addresses it names. */
+const stringsIn = (value: unknown): string[] =>
+  typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(stringsIn) : isRecord(value) ? Object.values(value).flatMap(stringsIn) : [];
 
 function compiledMovement(accounts: readonly Address[], data: ReadonlyUint8Array): Movement {
   const ix = {
@@ -1505,14 +1537,14 @@ function compiledMovement(accounts: readonly Address[], data: ReadonlyUint8Array
     const t = parseTransferCheckedInstruction(ix);
     return { source: t.accounts.source.address, destination: t.accounts.destination.address, amount: t.data.amount };
   }
-  return undefined;
+  return UNSUMMED.has(type) ? { unsummed: accounts } : undefined;
 }
 
 function parsedMovement(parsed: unknown): Movement {
   if (!isRecord(parsed) || !isRecord(parsed.info)) throw new Error("The node returned an unreadable parsed token instruction");
   const { type, info } = parsed;
   const amount = type === "transfer" ? info.amount : type === "transferChecked" && isRecord(info.tokenAmount) ? info.tokenAmount.amount : undefined;
-  if (amount === undefined) return undefined;
+  if (amount === undefined) return typeof type === "string" && UNSUMMED_PARSED.has(type) ? { unsummed: stringsIn(info) } : undefined;
   if (typeof info.source !== "string" || typeof info.destination !== "string" || typeof amount !== "string") {
     throw new Error("The node returned an unreadable token transfer");
   }
@@ -1523,7 +1555,8 @@ function parsedMovement(parsed: unknown): Movement {
  * What the simulated transaction would move into `vault` (spec §5.4, §10.2): its SPL Token transfers into the vault, less
  * those out of it, its own and those its programs invoke. A pull from an allowance moves its tokens in an inner
  * instruction, which the static checks cannot see. Inner account indices refer to the static keys: there are no lookup
- * tables (spec §3.5). Throws on an inner instruction it cannot read, as the payer check does.
+ * tables (spec §3.5). Throws on an inner instruction it cannot read, as the payer check does, and on a mint or a burn
+ * that names the vault, whose effect a sum of transfers cannot tell.
  */
 export function vaultReceipt(tx: InspectedTransaction, innerInstructions: unknown, vault: Address): bigint {
   if (!Array.isArray(innerInstructions)) throw new Error("The node's simulation returned no inner instructions");
@@ -1554,6 +1587,10 @@ export function vaultReceipt(tx: InspectedTransaction, innerInstructions: unknow
   let received = 0n;
   for (const movement of movements) {
     if (!movement) continue;
+    if ("unsummed" in movement) {
+      if (movement.unsummed.includes(vault)) throw new Error("a token instruction would change the vault's balance other than by a transfer");
+      continue;
+    }
     if (movement.destination === vault) received += movement.amount;
     if (movement.source === vault) received -= movement.amount;
   }
@@ -1586,7 +1623,13 @@ Add `"@lxfoundry/stint-subscriptions-client": "workspace:*"` to `apps/facilitato
      ```ts
      const payers = checkPayerFunding(executedInstructions(tx, value.innerInstructions), ctx.keys, funding);
      if (!payers.ok || receipt === undefined) return payers;
-     const received = vaultReceipt(tx, value.innerInstructions, receipt.vault);
+     let received: bigint;
+     try {
+       received = vaultReceipt(tx, value.innerInstructions, receipt.vault);
+     } catch (error) {
+       // What the vault would receive cannot be told: refused, never assumed.
+       return refuse("invalid_amount", `what the vault would receive cannot be told: ${error instanceof Error ? error.message : String(error)}`);
+     }
      if (received !== receipt.amount) return refuse("invalid_amount", `the vault would receive ${received}, not ${receipt.amount}`);
      return payers;
      ```
@@ -1727,6 +1770,8 @@ async function chain(input: {
   readonly now: bigint;
   readonly expiryTs?: bigint;
   readonly granted?: boolean;
+  /** False: the owner's account has no delegate, as after an SPL Token revoke. */
+  readonly delegate?: boolean;
 }): Promise<Rpc<SolanaRpcApi>> {
   const accounts = await allowanceAccounts({ owner: input.owner, agent: input.agent, mint: MINT, nonce: 0n });
   const map = new Map<Address, { owner: Address; data: Uint8Array }>();
@@ -1747,10 +1792,10 @@ async function chain(input: {
     mint: MINT,
     owner: input.owner,
     amount: input.balance,
-    delegate: some(accounts.subscriptionAuthority),
+    delegate: input.delegate === false ? none() : some(accounts.subscriptionAuthority),
     state: AccountState.Initialized,
     isNative: none(),
-    delegatedAmount: 2n ** 64n - 1n,
+    delegatedAmount: input.delegate === false ? 0n : 2n ** 64n - 1n,
     closeAuthority: none(),
   });
   map.set(accounts.ownerToken, { owner: TOKEN_PROGRAM_ADDRESS, data: Uint8Array.from(token) });
@@ -1818,6 +1863,8 @@ describe("allowance funding in the client (spec §10.2, §10.3)", () => {
     expect(allowanceShortfall(await read({ balance: 10_000n }), 30_000n)).toMatch(/holds 10000/);
     expect(allowanceShortfall(await read({ expiryTs: 1_040n }), 30_000n)).toMatch(/expired/);
     expect(allowanceShortfall(await read({ pulled: 30_000n }), 30_000n)).toMatch(/30000 of 50000 pulled, 20000 left/);
+    expect(allowanceShortfall(await read({}), 60_000n)).toMatch(/larger than the allowance's cap per period/);
+    expect(allowanceShortfall(await read({ delegate: false }), 30_000n)).toMatch(/delegate/);
   });
 
   it("reports the allowance through stint_allowance", async () => {
@@ -1847,13 +1894,14 @@ If `getSysvarClockEncoder`'s branded field types accept plain `bigint`s, drop th
 
 Run: `pnpm --filter @lxfoundry/stint-client test allowance`
 Expected: FAIL. The `allowance` option is ignored (the pull is a `TransferChecked`), and `readAllowance`,
-`allowanceShortfall` and `stint_allowance` do not exist.
+`allowanceShortfall` and `stint_allowance` do not exist. "with a node, pays when the allowance covers the payment"
+passes already: it guards that the check lets a payment it covers through.
 
 - [ ] **Step 3: Implement `packages/client/src/allowance.ts`**
 
 ```ts
 import { fetchMaybeToken } from "@solana-program/token";
-import type { Address, Rpc, SolanaRpcApi } from "@solana/kit";
+import { isSome, type Address, type Rpc, type SolanaRpcApi } from "@solana/kit";
 import { fetchSysvarClock } from "@solana/sysvars";
 import {
   allowanceAccounts,
@@ -1871,6 +1919,11 @@ export interface AllowanceReport {
   readonly period?: PeriodState;
   /** The owner's balance of the mint, in base units. */
   readonly ownerBalance: bigint;
+  /**
+   * What the owner's account lets the Subscription Authority move: its SPL Token delegated amount, or 0 when the account
+   * has another delegate or none (S8: one delegate per token account).
+   */
+  readonly delegatedAmount: bigint;
 }
 
 /** Reads the delegation, the owner's balance and the chain's clock, at `confirmed`. */
@@ -1891,6 +1944,8 @@ export async function readAllowance(
     delegation: accounts.delegation,
     ...(delegation.exists ? { period: periodState(delegation.data, BigInt(clock.unixTimestamp)) } : {}),
     ownerBalance: token.exists ? token.data.amount : 0n,
+    delegatedAmount:
+      token.exists && isSome(token.data.delegate) && token.data.delegate.value === accounts.subscriptionAuthority ? token.data.delegatedAmount : 0n,
   };
 }
 
@@ -1901,9 +1956,13 @@ export function allowanceShortfall(report: AllowanceReport, amount: bigint): str
   if (period.status === "expired") return "the allowance has expired";
   if (period.status === "notStarted") return "the allowance has not started yet";
   if (period.available < amount) {
+    if (amount > period.perPeriod) return `the payment, ${amount}, is larger than the allowance's cap per period, ${period.perPeriod}`;
     return `the allowance for this period is used up: ${period.pulled} of ${period.perPeriod} pulled, ${period.available} left, ${amount} needed; the period ends at ${period.periodEnd}`;
   }
   if (report.ownerBalance < amount) return `the owner's account holds ${report.ownerBalance}, less than the ${amount} needed`;
+  if (report.delegatedAmount < amount) {
+    return "the owner's account no longer lets the allowance program move its tokens: its SPL Token delegate was changed or revoked";
+  }
   return undefined;
 }
 ```
@@ -2081,7 +2140,7 @@ git commit -m "Let the session client pay from an allowance, check it before sig
 - Create: `packages/client/src/allowance-command.ts`, `packages/client/src/cli.ts`,
   `packages/client/test/allowance-command.test.ts`
 - Modify: `packages/client/package.json` (script), `package.json` (root script), `packages/mcp/src/config.ts`,
-  `packages/mcp/src/cli.ts`, `packages/mcp/test/config.test.ts`
+  `packages/mcp/src/cli.ts`, `packages/mcp/test/config.test.ts`, `examples/agent/src/cli.ts`
 
 **Interfaces:**
 - Consumes: Task 1's `grantInstructions`, `revokeInstructions`, `allowanceAccounts` and
@@ -2096,10 +2155,13 @@ git commit -m "Let the session client pay from an allowance, check it before sig
 The command, as an owner runs it (amounts in base units, the period in seconds, the expiry an ISO 8601 date):
 
 ```
-pnpm stint allowance grant  --keypair <owner keypair file> --agent <address> --per-period <amount> --period <seconds> --expires <date> --rpc <url> [--nonce <n>]
-pnpm stint allowance revoke --keypair <owner keypair file> --agent <address> --rpc <url> [--nonce <n>] [--close-authority]
-pnpm stint allowance status --owner <address> --agent <address> --rpc <url> [--nonce <n>]
+pnpm stint allowance grant  --keypair <owner keypair file> --agent <address> --per-period <amount> --period <seconds> --expires <date> [--nonce <n>]
+pnpm stint allowance revoke --keypair <owner keypair file> --agent <address> [--nonce <n>] [--close-authority]
+pnpm stint allowance status --owner <address> --agent <address> [--nonce <n>]
 ```
+
+The node is `STINT_RPC_URL`, an http or https URL, as for the MCP server. It is read from the environment because an RPC
+URL may carry an API key. On a command line, pnpm would echo it, and the command never prints it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2141,7 +2203,7 @@ describe("stint allowance (spec §10.1)", () => {
     const agent = (await generateKeyPairSigner()).address;
     const h = harness();
     const code = await runAllowanceCommand(
-      ["grant", "--keypair", "/k/owner.json", "--agent", agent, "--per-period", "300000", "--period", "3600", "--expires", "2030-01-01T00:00:00Z", "--rpc", "http://node"],
+      ["grant", "--keypair", "/k/owner.json", "--agent", agent, "--per-period", "300000", "--period", "3600", "--expires", "2030-01-01T00:00:00Z"],
       h.deps(owner.json),
     );
     expect(code).toBe(0);
@@ -2158,7 +2220,7 @@ describe("stint allowance (spec §10.1)", () => {
     const owner = await ownerFile();
     const h = harness("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d");
     const code = await runAllowanceCommand(
-      ["grant", "--keypair", "/k/owner.json", "--agent", owner.address, "--per-period", "1", "--period", "60", "--expires", "2030-01-01T00:00:00Z", "--rpc", "http://node"],
+      ["grant", "--keypair", "/k/owner.json", "--agent", owner.address, "--per-period", "1", "--period", "60", "--expires", "2030-01-01T00:00:00Z"],
       h.deps(owner.json),
     );
     expect(code).not.toBe(0);
@@ -2170,7 +2232,7 @@ describe("stint allowance (spec §10.1)", () => {
     const owner = await ownerFile();
     const h = harness();
     const code = await runAllowanceCommand(
-      ["grant", "--keypair", "/k/owner.json", "--agent", "nope", "--per-period", "1", "--period", "0", "--expires", "2000-01-01T00:00:00Z", "--rpc", "http://node"],
+      ["grant", "--keypair", "/k/owner.json", "--agent", "nope", "--per-period", "1", "--period", "0", "--expires", "2000-01-01T00:00:00Z"],
       h.deps(owner.json),
     );
     expect(code).not.toBe(0);
@@ -2181,12 +2243,32 @@ describe("stint allowance (spec §10.1)", () => {
     expect(out).toMatch(/--expires/);
   });
 
+  it("prints no URL from a node's error", async () => {
+    const owner = await ownerFile();
+    const printed: string[] = [];
+    const failing = {
+      getGenesisHash: () => ({
+        send: async () => {
+          throw new Error("request to https://node.example/?api-key=SECRET failed");
+        },
+      }),
+    } as unknown as Rpc<SolanaRpcApi>;
+    const code = await runAllowanceCommand(["status", "--owner", owner.address, "--agent", owner.address], {
+      rpc: failing,
+      readKeyFile: () => owner.json,
+      send: async () => "signature",
+      print: (line) => printed.push(line),
+    });
+    expect(code).toBe(1);
+    expect(printed.join("\n")).not.toContain("SECRET");
+  });
+
   it("revokes the delegation, and closes the authority only when asked", async () => {
     const owner = await ownerFile();
     const agent = (await generateKeyPairSigner()).address;
     const h = harness();
-    await runAllowanceCommand(["revoke", "--keypair", "/k/owner.json", "--agent", agent, "--rpc", "http://node"], h.deps(owner.json));
-    await runAllowanceCommand(["revoke", "--keypair", "/k/owner.json", "--agent", agent, "--rpc", "http://node", "--close-authority"], h.deps(owner.json));
+    await runAllowanceCommand(["revoke", "--keypair", "/k/owner.json", "--agent", agent], h.deps(owner.json));
+    await runAllowanceCommand(["revoke", "--keypair", "/k/owner.json", "--agent", agent, "--close-authority"], h.deps(owner.json));
     expect(h.sent.map((ixs) => ixs.map((ix) => identifySubscriptionsInstruction(ix as never)))).toEqual([
       [SubscriptionsInstruction.RevokeDelegation],
       [SubscriptionsInstruction.RevokeDelegation, SubscriptionsInstruction.CloseSubscriptionAuthority],
@@ -2245,7 +2327,7 @@ import {
   grantInstructions,
   revokeInstructions,
 } from "@lxfoundry/stint-subscriptions-client";
-import { USDC_DEVNET } from "@lxfoundry/stint-x402";
+import { USDC_DEVNET, redactUrls } from "@lxfoundry/stint-x402";
 import { readAllowance } from "./allowance.js";
 
 /** Devnet's genesis hash: the command sends nothing to any other network. */
@@ -2260,9 +2342,10 @@ export interface CommandDeps {
 }
 
 const USAGE = [
-  "stint allowance grant  --keypair <owner keypair file> --agent <address> --per-period <base units> --period <seconds> --expires <ISO 8601 date> --rpc <url> [--nonce <n>]",
-  "stint allowance revoke --keypair <owner keypair file> --agent <address> --rpc <url> [--nonce <n>] [--close-authority]",
-  "stint allowance status --owner <address> --agent <address> --rpc <url> [--nonce <n>]",
+  "stint allowance grant  --keypair <owner keypair file> --agent <address> --per-period <base units> --period <seconds> --expires <ISO 8601 date> [--nonce <n>]",
+  "stint allowance revoke --keypair <owner keypair file> --agent <address> [--nonce <n>] [--close-authority]",
+  "stint allowance status --owner <address> --agent <address> [--nonce <n>]",
+  "The node is STINT_RPC_URL, an http or https URL.",
   "Give the keypair file's absolute path: the command runs in packages/client. The owner's USDC account must exist.",
 ].join("\n");
 
@@ -2299,7 +2382,6 @@ export async function runAllowanceCommand(argv: readonly string[], deps: Command
         period: { type: "string" },
         expires: { type: "string" },
         nonce: { type: "string" },
-        rpc: { type: "string" },
         "close-authority": { type: "boolean" },
       },
       strict: true,
@@ -2387,7 +2469,8 @@ export async function runAllowanceCommand(argv: readonly string[], deps: Command
     deps.print(`transaction ${signature}`);
     return 0;
   } catch (error) {
-    deps.print(error instanceof Error ? error.message : String(error));
+    // A node's error can quote its URL, which may carry an API key: every URL is reduced to its scheme and host.
+    deps.print(redactUrls(error instanceof Error ? error.message : String(error)));
     return 1;
   }
 }
@@ -2445,10 +2528,17 @@ if (command !== "allowance") {
   console.error("Usage: stint allowance grant | revoke | status …");
   process.exit(2);
 }
-const rpcIndex = rest.indexOf("--rpc");
-const rpcUrl = rpcIndex >= 0 ? rest[rpcIndex + 1] : undefined;
-if (!rpcUrl) {
-  console.error("--rpc <url> is required");
+// From the environment, not the command line: an RPC URL may carry an API key, and pnpm echoes the command line.
+const rpcUrl = process.env.STINT_RPC_URL?.trim() ?? "";
+let isHttp = false;
+try {
+  isHttp = /^https?:$/.test(new URL(rpcUrl).protocol);
+} catch {
+  isHttp = false;
+}
+if (!isHttp) {
+  // The value is not quoted, for the same reason.
+  console.error("STINT_RPC_URL must be set to an http or https URL: the node the command reads from and sends through");
   process.exit(2);
 }
 const rpc = createSolanaRpc(rpcUrl);
@@ -2509,6 +2599,10 @@ In `packages/mcp/src/cli.ts`, create the client with them:
 and import `createSolanaRpc` from `@solana/kit`. A node also enables the client's own close checks (spec §9.3), as with
 any other client given `rpc`.
 
+`examples/agent/src/cli.ts` loads the MCP server's configuration (`loadConfig`) and creates its client with
+`createStintClient({ signer, policy })`. Create it with the same two spreads, and import `createSolanaRpc` there too, so
+that the agent honours the variables its README says it shares with the MCP server.
+
 - [ ] **Step 5: Run the tests**
 
 Run: `pnpm --filter @lxfoundry/stint-client test && pnpm --filter @lxfoundry/stint-mcp test && pnpm typecheck`
@@ -2517,7 +2611,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add packages/client packages/mcp package.json pnpm-lock.yaml
+git add packages/client packages/mcp examples/agent package.json pnpm-lock.yaml
 git commit -m "Add the stint allowance command, and the MCP server's allowance and node settings"
 ```
 
@@ -2723,8 +2817,8 @@ facilitator's API, and no chain control".
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `pnpm --filter @lxfoundry/stint-e2e test allowance local-network local-target devnet-target`
-Expected: FAIL. `../src/fixtures/allowance.js` and `../src/devnet/allowances.js` do not exist, and the capability sets
-lack `"allowance"`.
+Expected: FAIL. `@lxfoundry/stint-subscriptions-client` is not yet a dependency of `e2e`, and
+`../src/fixtures/allowance.js` and `../src/devnet/allowances.js` do not exist. The capability sets lack `"allowance"`.
 
 - [ ] **Step 3: Implement the fixture: `e2e/src/fixtures/allowance.ts`**
 
@@ -2737,8 +2831,17 @@ Add `"@lxfoundry/stint-subscriptions-client": "workspace:*"` to the dependencies
   readonly allowance?: AllowanceControl;
 ```
 
-In `e2e/src/fixtures/programs.ts`, replace the local constant with the client's:
-`export { SUBSCRIPTIONS_PROGRAM_ADDRESS } from "@lxfoundry/stint-subscriptions-client";`. Keep the doc comment.
+In `e2e/src/fixtures/programs.ts`, replace the local constant with the client's. `deploySubscriptionsProgram` in the
+same file uses the name, so import it and export it again, keeping the doc comment above the export:
+
+```ts
+import { SUBSCRIPTIONS_PROGRAM_ADDRESS } from "@lxfoundry/stint-subscriptions-client";
+
+/** The Subscriptions & Allowances program, at its devnet address (spec section 10). */
+export { SUBSCRIPTIONS_PROGRAM_ADDRESS };
+```
+
+Drop the file's import of `address` from `@solana/kit` if nothing else uses it.
 
 ```ts
 import { fetchSysvarClock } from "@solana/sysvars";
@@ -2953,7 +3056,8 @@ git commit -m "Grant allowances in the harness on both targets, and revoke them 
 **Files:**
 - Create: `conformance/src/scenarios/12-allowance-funding.ts`
 - Modify: `conformance/src/catalogue.ts` (scenario 12's line), `conformance/src/helpers.ts` (`refusalOf`),
-  `conformance/test/catalogue.test.ts`, `e2e/test/local-target.test.ts`, `e2e/test/devnet-target.test.ts`
+  `conformance/test/helpers.test.ts`, `conformance/test/catalogue.test.ts`, `e2e/test/local-target.test.ts`,
+  `e2e/test/devnet-target.test.ts`
 
 **Interfaces:**
 - Consumes: `ScenarioContext.allowance` (Task 7), `ClientOptions.allowance` and `rpc` (Task 5); the conformance
@@ -2968,7 +3072,10 @@ It reuses stage 3's helpers:
 - `refusalOf(attempt)` (`conformance/src/helpers.ts`), which returns `{ status, reason, body }`.
 
 Extend `refusalOf` to return the message too. Add `readonly message: string` to its result type, and set it from the
-`StintError` it catches (`message: error.message`). Its other callers ignore the new member.
+`StintError` it catches (`message: error.message`). Its other callers ignore the new member. Stage 3's
+`conformance/test/helpers.test.ts` asserts the whole result, with
+`toEqual({ status: 400, reason: "invalid_duration", body })`. Add `message: "refused"` to that expectation: it is the
+message of the `StintError` that test throws.
 
 `conformance/src/scenarios/12-allowance-funding.ts`:
 
@@ -3003,10 +3110,12 @@ export async function allowanceFunding(context: ScenarioContext): Promise<void> 
   const rate = BigInt(offer.extra.rate);
   const first = sessionSeconds(context.target, 20);
   const extra = sessionSeconds(context.target, 10);
-  const third = sessionSeconds(context.target, 10);
-  // The cap covers the open and the top-up with 5 s to spare: a third payment, of at least 10 s, goes over it.
+  // The cap covers the open and the top-up with 5 s to spare. The third payment is larger than what is left even after
+  // the open alone (`extra + 5` s), so a node that answers from behind still shows it over the cap.
+  const third = extra + 10;
   const perPeriod = rate * BigInt(first + extra + 5);
-  const grant = await allowance.grant({ usdc: rate * BigInt(first + extra + 40), perPeriod, periodSeconds: 3_600 });
+  const funded = rate * BigInt(first + extra + 40);
+  const grant = await allowance.grant({ usdc: funded, perPeriod, periodSeconds: 3_600 });
   try {
     const owner = grant.owner.signer.address;
     const usdcOf = async (account: Address): Promise<bigint> => {
@@ -3027,7 +3136,8 @@ export async function allowanceFunding(context: ScenarioContext): Promise<void> 
         (amount) => amount === expected,
       );
     const client = createStintClient({ signer: grant.agent, policy: POLICY, allowance: { owner, nonce: grant.nonce } });
-    const ownerStart = await usdcOf(grant.owner.usdcAccount);
+    const ownerStart = funded;
+    expectEqual(await ownerBalance(ownerStart), ownerStart, "the owner holds what it was funded with");
 
     // Pulled from the owner. A connection holds the session from the open to the close: the gate closes a session that has
     // had none for its idle close, and the reads below take seconds on devnet.
@@ -3069,7 +3179,7 @@ export async function allowanceFunding(context: ScenarioContext): Promise<void> 
       expectEqual(refused?.status, 402, "a payment over the cap is refused with 402");
       expectEqual(refused?.reason, "simulation_failed", "a payment over the cap is refused as simulation_failed");
       expectTrue(/allowance/.test(refused?.message ?? ""), "the refusal says that an allowance may be the cause");
-      expectEqual(await usdcOf(grant.owner.usdcAccount), afterClose, "the refused payment takes nothing from the owner");
+      expectEqual(await ownerBalance(afterClose), afterClose, "the refused payment takes nothing from the owner");
       expectEqual(client.remainingBudget(), budget, "the refused payment locks nothing");
       expectEqual(await pulled(held), held, "the refused pull is not counted");
 
@@ -3092,8 +3202,13 @@ export async function allowanceFunding(context: ScenarioContext): Promise<void> 
 - `session.cost` counts everything the session holds through this client, the opening deposit and each top-up (spec
   §9.4). The scenario keeps the deposit apart (`deposit`), and compares the owner's balance and the period's count with
   `session.cost` after the top-up.
-- The cap is `rate × (first + extra + 5)`, and the third payment costs `rate × third`, with `third ≥ 10`, so it is
-  refused whatever the target's `sessionSeconds` adds.
+- The cap is `rate × (first + extra + 5)`. The third payment costs `rate × (extra + 10)`: more than the 5 s left after the
+  top-up, and more than the `extra + 5` s left after the open alone. So it is refused whatever the target's
+  `sessionSeconds` adds, and by the client with a node even if that node answers from behind. On `local` the cap is
+  35 s of the rate and the third payment 20 s; on devnet, 55 s and 30 s.
+- **Reads:** every read after a payment retries until it shows the expected value (`ownerBalance`, `pulled`,
+  `readUntil`). The checking client's own read before signing is single. The third payment's size is what keeps that
+  read safe.
 - **The idle close:** the connection is opened right after the open and held until after the close. The gate arms its
   idle close (10 s) at the open, and on devnet the reads between the open and the top-up take longer than that.
 
@@ -3132,15 +3247,14 @@ git commit -m "Add scenario 12, allowance funding, and make it required"
 ### Task 9: The spec, the README, and a devnet run
 
 **Files:**
-- Modify: `docs/specs/stint-system.md`, `README.md`, `packages/mcp/README.md` (if it lists the
-  environment variables), `.env.example` (if it lists the MCP server's variables)
+- Modify: `docs/specs/stint-system.md`, `README.md`, `.env.example` (if it lists the MCP server's variables)
 
 - [ ] **Step 1: Amend the spec**
 
 `docs/specs/stint-system.md`:
 - **§3.3:** add `packages/subscriptions-client/  generated client of the Subscriptions & Allowances program (Codama, from its vendored IDL)`.
-- **§9.1:** in the "Optional" table, the row "Allowance funding (section 10)" becomes "Period caps enforced on-chain;
-  with `rpc`, the client checks the allowance before signing".
+- **§9.1:** in the "Optional" table, the "Enables" cell of the row "Allowance funding (section 10)" becomes "Period
+  caps enforced on-chain; with `rpc`, the client checks the allowance before signing".
 - **§9.4:** `createStintClient({ signer, policy, store?, rpc?, allowance? })`, and a line after the block: "`allowance:
   { owner, nonce? }` funds every payment from that owner's allowance (section 10); `stint.funding` says which, and
   `stint.allowance()` reads it with `rpc`."
@@ -3169,27 +3283,37 @@ git commit -m "Add scenario 12, allowance funding, and make it required"
 - **§10.3:**
   - Reword the reporting sentence to: "The client reports, per period, the cap, what has been pulled (a refund does
     not lower it), what is left, and when the period ends (`stint_allowance`)."
-  - Add: "A refusal by the program names the cause in the facilitator's message (the period's cap used up, the
-    delegation expired or not started); its reason stays `simulation_failed`."
+  - Add: "A refusal by the program names the cause in the message of the facilitator's `/verify` (the period's cap
+    used up, the delegation expired or not started). Its reason stays `simulation_failed`, which is all a gate passes on
+    to the client, so a client in allowance mode says what that reason can mean."
 - **§12.2 "Allowance":** "The `local` and `devnet` targets have it: the harness grants an allowance from a new owner
   to a new agent key, and revokes it after." In the targets table above it, the Capabilities cell of `local` becomes
   "Chain control, stack control, facilitator API, allowance", and that of `devnet` "Stack control, facilitator API,
-  allowance".
-- **§12.6:** where the devnet clean-up is described ("closes every session that the seed's keys have open …"), add:
+  allowance". The bullet's last sentence, about `external`, becomes: "On `external`, `stint-conformance` assumes it only
+  when given `--allowance`; scenario 12 also needs the harness to grant an allowance (`ScenarioContext.allowance`),
+  with an owner key it can fund."
+- **§12.6:** where the devnet clean-up is described ("closes every session still open, of the USDC mint, that one of
+  its keys opened …"), add:
   "It also revokes the delegations those keys granted and closes their Subscription Authorities, whose rent returns to
   them before their balances go back to the funding key."
 - **§12.3:** the Subscriptions program's client comes from its vendored IDL; question 6 is answered with a real pull.
-- **§14:** question 3 is answered. "Yes: `transferRecurring` and `stint.open` (and `stint.top_up`) share one
-  transaction through Kora, whose allowlist must include the Subscriptions program (section 6.2); the instruction and its
-  accounts are in section 10.2." Mark question 6 answered with a real pull.
+- **§14:** the table stays as it is. Like questions 1, 2, 4, 5 and 7, questions 3 and 6 are answered where the answers
+  apply. Section 10.2 names the instruction and its accounts, and says that a pull shares a transaction with
+  `stint.open` or `stint.top_up` through Kora. Sections 12.2 and 12.3 say the targets run it.
 
 Keep every other sentence as it is. Do not cite any document outside this repository.
 
 - [ ] **Step 2: The README**
 
-In `README.md`, add a section "Allowance funding": what it is (an owner's budget for an agent, enforced on-chain by the
-Solana Foundation's Subscriptions & Allowances program), the three `pnpm stint allowance` commands with an example, the
-MCP server's three variables, and the facts an owner needs:
+In `README.md`, add a section "Allowance funding" with:
+- what it is: an owner's budget for an agent, enforced on-chain by the Solana Foundation's Subscriptions & Allowances
+  program;
+- the three `pnpm stint allowance` commands with an example, with `STINT_RPC_URL` set and the keypair given by its
+  absolute path;
+- the facts an owner needs, listed below.
+
+Add `STINT_ALLOWANCE_OWNER`, `STINT_ALLOWANCE_NONCE` and `STINT_RPC_URL` to the README's table of the MCP server's
+variables, the one with `STINT_KEYPAIR_PATH`. The facts an owner needs:
 - the owner pays about 0.004 SOL once;
 - a dedicated owner wallet is recommended (one delegate per token account);
 - refunds come back to the owner but do not restore the period's allowance;
@@ -3199,8 +3323,7 @@ Update the README's scenario count. In its devnet paragraph ("A run checks that 
 up: it closes every session that the seed's keys have open and returns what they hold to the funding key"), add after
 "open": ", revokes the allowances they granted,".
 
-If `packages/mcp/README.md` or `.env.example` lists the MCP server's variables, add the three new ones, with empty
-values in `.env.example`.
+If `.env.example` lists the MCP server's variables, add the three new ones, with empty values.
 
 - [ ] **Step 3: Run everything**
 
@@ -3210,20 +3333,20 @@ Expected: PASS; the `local` report has scenario 12 required and passing.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add docs README.md packages/mcp .env.example
+git add docs README.md .env.example
 git commit -m "Document allowance funding: the instruction, the checks, the command and the reporting"
 ```
 
 - [ ] **Step 5: Devnet (the operator, with the devnet seed)**
 
-The program is unchanged, so it is not upgraded. Check it:
+The program is unchanged, so the deployed one stands and is not upgraded. Check that nothing under `programs/`
+changed:
 
 ```bash
-scripts/verify-deployment.sh
+git diff --stat main -- programs/
 ```
 
-Expected: the deployed bytes match the verifiable build of this branch, as they did before the stage. If they do not,
-stop: a program change has slipped in.
+Expected: no output. If there is any, stop: a program change has slipped in.
 
 Then run `pnpm e2e:devnet` twice. Expected, both times:
 - every required scenario passes, scenario 12 included;
@@ -3236,13 +3359,21 @@ the PR's description and in the README's devnet line.
 Then try the command once by hand, on devnet, with a throwaway owner keypair that holds devnet SOL and USDC:
 
 ```bash
-pnpm stint allowance grant --keypair ~/owner.json --agent <an agent address> --per-period 300000 --period 3600 --expires 2030-01-01T00:00:00Z --rpc https://api.devnet.solana.com
-pnpm stint allowance status --owner <the owner's address> --agent <the agent address> --rpc https://api.devnet.solana.com
-pnpm stint allowance revoke --keypair ~/owner.json --agent <the agent address> --rpc https://api.devnet.solana.com --close-authority
+export STINT_RPC_URL=https://api.devnet.solana.com
+pnpm stint allowance grant --keypair "$HOME/owner.json" --agent <an agent address> --per-period 300000 --period 3600 --expires 2030-01-01T00:00:00Z
+pnpm stint allowance status --owner <the owner's address> --agent <the agent address>
+pnpm stint allowance revoke --keypair "$HOME/owner.json" --agent <the agent address> --close-authority
 ```
 
 Expected: the grant prints the delegation and its transaction; the status shows `active: 0 of 300000 pulled this
 period`; the revoke prints its transaction, and a second `status` shows `no such allowance`.
+
+- [ ] **Step 6: Commit the devnet record**
+
+```bash
+git add README.md
+git commit -m "Record the devnet runs with allowance funding"
+```
 
 ## Done when
 
@@ -3250,5 +3381,5 @@ period`; the revoke prints its transaction, and a second `status` shows `no such
 - [ ] `pnpm typecheck`, `pnpm test` and CI are green on the branch.
 - [ ] `pnpm e2e:devnet` passes twice with scenario 12, leaving no session or delegation, the funding key's USDC
       unchanged, and the deployed program unchanged.
-- [ ] The spec (sections 3.3, 5.4, 9.1, 9.4 to 9.6, 10, 12.2, 12.3, 14) and the README describe what was built.
+- [ ] The spec (sections 3.3, 5.4, 9.1, 9.4 to 9.6, 10, 12.2, 12.3, 12.6) and the README describe what was built.
 - [ ] The PR is reviewed and merged.
