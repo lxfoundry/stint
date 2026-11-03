@@ -98,6 +98,8 @@ export async function startTestGate(buyer: Address, onAttach: (socket: WebSocket
   const feePayer = (await generateKeyPairSigner()).address;
   const rentPayer = (await generateKeyPairSigner()).address;
   const payments: PaymentPayload[] = [];
+  /** The top-up transactions the fake facilitator has credited on the fake chain. */
+  const credited = new Set<string>();
   const escaped: unknown[] = [];
   const now = Date.now();
   const stored: SessionArgs = {
@@ -139,7 +141,14 @@ export async function startTestGate(buyer: Address, onAttach: (socket: WebSocket
       verify: async () => testGate.verifyAnswer,
       settle: async (payload) => {
         payments.push(payload);
-        if (readElapsedPayload(payload)?.type === "close") return testGate.closeSettlement;
+        const elapsed = readElapsedPayload(payload);
+        if (elapsed?.type === "close") return testGate.closeSettlement;
+        // A top-up that settles is credited on the fake chain, as the program credits it, once per transaction: the gate
+        // takes the new end from the session it reads once the settlement succeeds.
+        if (elapsed?.type === "topUp" && !credited.has(elapsed.transaction)) {
+          credited.add(elapsed.transaction);
+          stored.deposited = BigInt(stored.deposited) + BigInt(payload.accepted.amount);
+        }
         return { success: true, transaction: "sig", network: NETWORK };
       },
     },
