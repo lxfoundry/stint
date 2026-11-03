@@ -219,6 +219,19 @@ function timeLimitMs(name: string, value: number | undefined, fallback: number):
 /** Whether a request was given up at its time limit (`AbortSignal.timeout`), rather than refused. */
 const timedOut = (error: unknown) => error instanceof Error && error.name === "TimeoutError";
 
+/**
+ * The `code`s of the causes `fetch` fails with when it cannot connect: a connection refused, a name not resolved, a host
+ * or a network not reachable, or no connection within the transport's own time limit.
+ */
+const CONNECT_FAILURES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+
+/**
+ * Whether a request failed before it was sent: `fetch` could not connect. Any other failure, such as a connection that
+ * drops once the request is written (`other side closed`), may have delivered it.
+ */
+const neverSent = (error: unknown): boolean =>
+  error instanceof Error && CONNECT_FAILURES.has(String((error.cause as { code?: unknown } | null | undefined)?.code));
+
 /** The receipt of a close whose answer reports it: the gate's `200`, or the facilitator's successful sponsored close. */
 function receiptFrom(body: unknown, via: CloseVia): CloseReceipt {
   const answer = body as { paid?: string; refunded?: string; transaction: string };
@@ -382,7 +395,8 @@ export function createStintClient(options: ClientOptions): StintClient {
      * Step 1: the gate's close. `200` is the receipt, and a `202` is waited for. Any other answer moves the chain on, as
      * does a gate that cannot be reached or does not answer within `closeRequestTimeoutMs`: a `404` (it does not track the
      * session, as after a restart), a `5xx`, a `401` (a token it refuses, say from a skewed clock), and a refusal of the
-     * close itself, such as `409`, which the later steps judge for themselves.
+     * close itself, such as `409`, which the later steps judge for themselves. A connection that is refused means the close
+     * was never sent; one that drops once it was sent, like no answer, leaves a close that may still land.
      */
     async function closeThroughGate(): Promise<CloseStep> {
       const authorization = `Bearer ${await token("close")}`;
@@ -400,7 +414,9 @@ export function createStintClient(options: ClientOptions): StintClient {
         if (timedOut(error)) {
           return { kind: "next", reason: `the gate did not answer its close within ${closeRequestTimeoutMs} ms, and that close may still land`, unanswered: true };
         }
-        return { kind: "next", reason: `the gate cannot be reached (${describeError(error)})` };
+        if (neverSent(error)) return { kind: "next", reason: `the gate cannot be reached (${describeError(error)})` };
+        const reason = `the connection to the gate dropped after its close was sent, and that close may still land (${describeError(error)})`;
+        return { kind: "next", reason, unanswered: true };
       }
       if (status === 200) return { kind: "closed", receipt: receiptFrom(body, "gate") };
       if (status === 202) return awaitGateClose(body);
@@ -440,7 +456,8 @@ export function createStintClient(options: ClientOptions): StintClient {
      * client builds the close from them, signs it as the session's authority, and posts it. A refusal with
      * `unknown_session` means the session is closed too: another close, such as the gate's pending one, landed between the
      * `GET` and the `POST`. Any other failure moves the chain on: the facilitator cannot be reached or does not answer in
-     * time, answers something else, or does not close it.
+     * time, answers something else, or does not close it. A `POST` with no answer, or whose connection drops once it was
+     * sent, leaves a close that may still land.
      */
     async function closeThroughFacilitator(): Promise<CloseStep> {
       const closeUrl = offer.extra.closeUrl;
@@ -466,8 +483,12 @@ export function createStintClient(options: ClientOptions): StintClient {
           // The time limit runs on while the answer is read: an answer started and never finished is no answer.
           answer = (await readBody(posted)) as SponsoredCloseResponse;
         } catch (error) {
-          if (!timedOut(error)) throw error;
-          const reason = `the facilitator did not answer its close within ${closeRequestTimeoutMs} ms, and that close may still land`;
+          if (timedOut(error)) {
+            const reason = `the facilitator did not answer its close within ${closeRequestTimeoutMs} ms, and that close may still land`;
+            return { kind: "next", reason, unanswered: true };
+          }
+          if (neverSent(error)) throw error;
+          const reason = `the connection to the facilitator dropped after its close was sent, and that close may still land (${describeError(error)})`;
           return { kind: "next", reason, unanswered: true };
         }
         if (posted.status === 200 && answer.success) return { kind: "closed", receipt: receiptFrom(answer, "sponsored") };

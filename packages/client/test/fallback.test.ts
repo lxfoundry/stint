@@ -254,6 +254,47 @@ describe("the close fallback chain (spec §9.3)", () => {
     await expect(session.close()).rejects.toThrow(/the facilitator did not answer its close within 300 ms, and that close may still land/);
   });
 
+  it("says the gate's close may still land when the connection drops after the close was sent", async () => {
+    const session = await openSession();
+    gate.gateDrops = true;
+    gate.sponsoredAnswer = { success: false, errorReason: "simulation_failed", errorMessage: "custom program error: 0x1772", transaction: "" };
+
+    await expect(session.close()).rejects.toThrow(
+      /the connection to the gate dropped after its close was sent, and that close may still land[\s\S]*simulation_failed[\s\S]*unless that close lands or a later close succeeds/,
+    );
+    expect(gate.sponsored).toHaveLength(1);
+  });
+
+  it("says a sponsored close may still land when the connection drops after POST closeUrl was sent", async () => {
+    const session = await openSession();
+    gate.gateDown = true;
+    gate.sponsoredDrops = true;
+
+    await expect(session.close()).rejects.toThrow(
+      /the gate cannot be reached[\s\S]*the connection to the facilitator dropped after its close was sent, and that close may still land[\s\S]*unless that close lands or a later close succeeds/,
+    );
+    expect(gate.sponsored).toHaveLength(1);
+  });
+
+  it("reads a refused connection as a host that cannot be reached, and passes nothing on: the close was never sent", async () => {
+    const session = await openSession();
+    gate.gateDown = true;
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", (input: string | URL | Request, init?: RequestInit) => {
+      // The facilitator goes down between GET closeUrl and POST closeUrl: the close is refused.
+      if (String(input) === gate.closeUrl && init?.method === "POST") gate.facilitatorDown = true;
+      return realFetch(input, init);
+    });
+
+    const error = await session.close().catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toMatch(/the gate cannot be reached \(fetch failed: connect ECONNREFUSED/);
+    expect((error as Error).message).toMatch(/the facilitator's sponsored close failed \(fetch failed: connect ECONNREFUSED/);
+    expect((error as Error).message).not.toContain("may still land");
+    expect((error as Error).message).toMatch(/unless a later close succeeds$/);
+    expect(gate.sponsored).toEqual([]);
+  });
+
   it("gives up a read of the gate's status that never answers, and moves on once closeWaitSeconds have gone by", async () => {
     const session = await openSession({ closeWaitSeconds: 0.5 });
     gate.closeSettlement = PENDING;
