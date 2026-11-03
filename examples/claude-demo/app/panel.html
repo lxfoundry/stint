@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stint demo</title>
+<style>
+  :root {
+    --ink: #111318; --paper: #f4f5f2; --signal: #2ed18b; --deep: #0b6b45; --slate: #5e636c; --mist: #a9aeb6;
+    --bg: var(--color-background-primary, var(--paper));
+    --fg: var(--color-text-primary, var(--ink));
+    --muted: var(--color-text-secondary, var(--slate));
+    --accent-text: var(--deep);
+    --used: var(--ink);
+    --line: var(--color-border-primary, color-mix(in srgb, var(--mist) 45%, var(--paper)));
+    --radius: var(--border-radius-md, 8px);
+    --sans: var(--font-sans, system-ui, sans-serif);
+    --mono: var(--font-mono, ui-monospace, monospace);
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--color-background-primary, var(--ink)); --fg: var(--color-text-primary, var(--paper));
+      --muted: var(--color-text-secondary, var(--mist)); --accent-text: var(--signal); --used: var(--signal);
+      --line: var(--color-border-primary, color-mix(in srgb, var(--slate) 45%, var(--ink)));
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--color-background-primary, var(--ink)); --fg: var(--color-text-primary, var(--paper));
+    --muted: var(--color-text-secondary, var(--mist)); --accent-text: var(--signal); --used: var(--signal);
+    --line: var(--color-border-primary, color-mix(in srgb, var(--slate) 45%, var(--ink)));
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); }
+  section { padding: 12px 0; border-top: 1px solid var(--line); }
+  section:first-of-type { border-top: 0; padding-top: 0; }
+  h1 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
+  .label, .reason, #notice, #offline { color: var(--muted); font-size: 12px; }
+  code, .mono { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+  button { font: inherit; border-radius: var(--radius); padding: 6px 12px; cursor: pointer; border: 1px solid var(--line); background: transparent; color: var(--fg); }
+  button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+  button.link { border: 0; padding: 0; background: none; color: var(--accent-text); text-decoration: underline; text-align: left; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  #headline { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
+  #track { height: 16px; margin: 8px 0; }
+  #paid { height: 16px; width: 0; border: 2px solid var(--used); border-radius: 999px; overflow: hidden; transition: width 0.3s; }
+  #used { height: 100%; width: 0; background: var(--used); }
+  #track[data-state="closed"] #paid { border-color: var(--signal); }
+  ol, ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  #rows li { display: grid; gap: 2px; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius); }
+  #rows li[data-kind="error"] { border-style: dashed; }
+  #rows li[data-kind="settled"] strong { color: var(--accent-text); }
+  #error { font-weight: 600; margin: 4px 0; overflow-wrap: anywhere; }
+  #notice, #offline { overflow-wrap: anywhere; user-select: text; }
+  p { margin: 4px 0; }
+</style>
+</head>
+<body>
+<section>
+  <h1>Agent wallet <span class="label">on Solana devnet</span></h1>
+  <div class="row"><code id="address"></code><button id="copy" type="button">Copy</button></div>
+  <div class="row"><span class="label">USDC</span><strong id="balance" class="mono"></strong><span id="needs" class="reason" hidden></span></div>
+  <div class="row" id="fund" hidden>
+    <button id="faucet" class="link" type="button">Get devnet USDC at Circle's faucet</button>
+    <span class="reason">choose Solana Devnet and paste the address, then Refresh</span>
+  </div>
+</section>
+<section>
+  <div id="headline"></div>
+  <div id="track"><div id="paid"><div id="used"></div></div></div>
+  <div class="row"><span id="time-left" class="mono"></span><span id="frames" class="label"></span></div>
+  <div class="row">
+    <button id="launch" class="primary" type="button" hidden>Launch</button>
+    <button id="refresh" type="button" hidden>Refresh</button>
+    <button id="top-up" class="primary" type="button" hidden>Top up +100 s</button>
+    <button id="close" class="primary" type="button" hidden>Close now</button>
+  </div>
+  <p id="top-up-reason" class="reason"></p>
+  <p id="error" role="alert"></p>
+  <p id="offline"></p>
+  <p id="notice"><span id="notice-text"></span> <code id="notice-url"></code></p>
+</section>
+<section id="exchange" hidden>
+  <h1>x402 exchange</h1>
+  <ol id="rows"></ol>
+</section>
+<section id="explorer" hidden>
+  <h1>On Solana Explorer</h1>
+  <ul id="links"></ul>
+</section>
+<!-- PANEL_SCRIPT -->
+</body>
+</html>
