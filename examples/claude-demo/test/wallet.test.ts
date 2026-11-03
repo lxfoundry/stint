@@ -1,0 +1,80 @@
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createKeyPairSignerFromBytes } from "@solana/kit";
+import { SOLANA_DEVNET, SOLANA_MAINNET } from "@lxfoundry/stint-x402";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { WALLET_FILE, WalletError, allowsDevnetOnly, loadOrCreateWallet } from "../src/wallet.js";
+
+// Under the package, in a git-ignored directory: `/tmp` can be emptied at any time.
+const scratch = fileURLToPath(new URL("../.cache/", import.meta.url));
+const DEVNET = { networks: [SOLANA_DEVNET] };
+
+/** Whether this file system keeps a file's mode: a Windows drive mounted in WSL does not. */
+function keepsModes(directory: string): boolean {
+  const probe = join(directory, "mode-probe");
+  writeFileSync(probe, "", { mode: 0o600 });
+  const kept = (statSync(probe).mode & 0o777) === 0o600;
+  rmSync(probe);
+  return kept;
+}
+
+describe("the agent's wallet", () => {
+  let home: string;
+  beforeEach(() => {
+    mkdirSync(scratch, { recursive: true });
+    home = mkdtempSync(join(scratch, "wallet-"));
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  it("creates its folder and a Solana CLI keypair file once, and loads it from then on", async () => {
+    const dir = join(home, "stint-demo");
+    const created = await loadOrCreateWallet(dir, DEVNET);
+    expect(created).toMatchObject({ created: true, path: join(dir, WALLET_FILE) });
+    const bytes = JSON.parse(readFileSync(created.path, "utf8")) as number[];
+    expect(bytes).toHaveLength(64);
+    expect((await createKeyPairSignerFromBytes(Uint8Array.from(bytes))).address).toBe(created.signer.address);
+    const loaded = await loadOrCreateWallet(dir, DEVNET);
+    expect(loaded).toMatchObject({ created: false, path: created.path });
+    expect(loaded.signer.address).toBe(created.signer.address);
+  });
+
+  // Not under the package: `/mnt/<drive>` (a Windows drive in WSL) reports every mode as 777, so this one runs in the
+  // home directory. It is skipped only where even the home directory does not keep modes.
+  it("writes the key file readable by its owner only", async (context) => {
+    const parent = join(homedir(), ".cache");
+    mkdirSync(parent, { recursive: true });
+    const folder = mkdtempSync(join(parent, "stint-claude-demo-test-"));
+    try {
+      if (!keepsModes(folder)) context.skip("the home directory does not keep file modes");
+      const created = await loadOrCreateWallet(join(folder, "stint-demo"), DEVNET);
+      expect(statSync(created.path).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
+  it("makes one key when two copies start at once", async () => {
+    const [first, second] = await Promise.all([loadOrCreateWallet(home, DEVNET), loadOrCreateWallet(home, DEVNET)]);
+    expect(first.signer.address).toBe(second.signer.address);
+    expect([first.created, second.created].sort()).toEqual([false, true]);
+  });
+
+  it("never overwrites a file that is not a key, and quotes none of it", async () => {
+    const path = join(home, WALLET_FILE);
+    writeFileSync(path, "[1, 2, 3] secret words");
+    const error = await loadOrCreateWallet(home, DEVNET).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(WalletError);
+    expect((error as Error).message).not.toMatch(/secret words/);
+    expect(readFileSync(path, "utf8")).toBe("[1, 2, 3] secret words");
+  });
+
+  it("makes no key for a policy that allows a network other than devnet", async () => {
+    expect(allowsDevnetOnly({})).toBe(true);
+    expect(allowsDevnetOnly({ networks: [SOLANA_DEVNET, SOLANA_MAINNET] })).toBe(false);
+    expect(allowsDevnetOnly({ networks: [] })).toBe(false);
+    await expect(loadOrCreateWallet(home, { networks: [SOLANA_MAINNET] })).rejects.toThrow(/none is made/);
+    expect(() => readFileSync(join(home, WALLET_FILE))).toThrow();
+  });
+});
