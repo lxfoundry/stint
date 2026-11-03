@@ -31,8 +31,9 @@ export interface GateChain {
    * The session at `confirmed` as it stands once the confirmed transaction `signature` has run (spec §7.3), from a node
    * at or past that transaction's slot: `stored` is undefined when the address then holds no Stint session. Undefined
    * while the node does not show the transaction confirmed yet, or has not reached its slot. One look: the gate repeats
-   * it within `readRetry`. Optional: a gate whose chain cannot read after a transaction adds a top-up's amount to the
-   * deposit it read before the payment.
+   * it within `readRetry`. Optional: a gate whose chain cannot read after a transaction reads the session with
+   * `readSession` once a top-up has settled, a read that can lag the transaction and so find an earlier end, never a
+   * later one.
    */
   readSessionAfter?(session: Address, signature: string): Promise<{ readonly stored: Session | undefined } | undefined>;
   closedEvent(signature: string): Promise<ClosedEvent | undefined>;

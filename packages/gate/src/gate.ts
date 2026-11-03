@@ -658,9 +658,10 @@ export function createGate<U>(config: GateConfig<U>): Gate {
    * is later (`paidLonger`), and the `200` answers the later of it and the end the gate knows. If the read finds the
    * account gone, or holding another session, the answer is `404` and no timer moves; if the node still does not show the
    * transaction after the re-reads, it is `502`, and the subscription, or the end timer's re-read, finds the later end.
-   * A chain without `readSessionAfter` adds the amount to the deposit read before the payment instead: right for a payment
-   * settled for the first time, since the program credits at least that (spec §4.3), but it credits a payment settled
-   * again after it landed twice, and the gate then answers, and serves, one top-up's worth past what the chain holds.
+   * A chain without `readSessionAfter` reads the session with `readSession` once the settlement has succeeded instead,
+   * and the end comes from that read, with the same `404`: a node that does not show the transaction yet can only find an
+   * earlier end, which credits too little and never too much, and the subscription, or the end timer's re-read, finds
+   * the later one.
    */
   async function topUp(request: IncomingMessage, response: ServerResponse, url: URL, session: Address): Promise<void> {
     const tracked = sessions.get(session);
@@ -735,21 +736,24 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       if (settled.errorReason === "already_processed") return mayHaveLanded(response, {}, paymentResponse);
       return refusal(settled.errorReason ?? "simulation_failed");
     }
-    let until: bigint;
+    let after: Session | undefined;
     const readSessionAfter = config.chain.readSessionAfter?.bind(config.chain);
     if (readSessionAfter) {
-      const after = await readUntilFound(() => upstream(() => readSessionAfter(session, settled.transaction)), readRetry);
+      const read = await readUntilFound(() => upstream(() => readSessionAfter(session, settled.transaction)), readRetry);
       // What the top-up did to the account is not known yet: the subscription, or the end timer's re-read, finds the
       // later end, as for a top-up this gate did not settle.
-      if (!after) throw new UpstreamError(new Error(`the chain does not show the top-up's transaction ${settled.transaction} yet`));
-      // Closed after the top-up landed, by whichever party: answered as an open whose account is gone is, and nothing
-      // more. The session ends as it would have without this top-up: by the gate's own close, if that is what closed
-      // it, or else through the subscription or the end timer.
-      if (!sameSession(tracked, after.stored)) return sendJson(response, 404, { error: "unknown_session" });
-      until = paidUntil(after.stored);
+      if (!read) throw new UpstreamError(new Error(`the chain does not show the top-up's transaction ${settled.transaction} yet`));
+      after = read.stored;
     } else {
-      until = paidUntil({ ...stored, deposited: stored.deposited + BigInt(requirements.amount) });
+      // Read once the settlement has succeeded, from a node that may not show its transaction yet: such a read can only
+      // lag, so it can only find an earlier end, and the subscription, or the end timer's re-read, finds the later one.
+      after = await upstream(() => config.chain.readSession(session));
     }
+    // Closed after the top-up landed, by whichever party: answered as an open whose account is gone is, and nothing
+    // more. The session ends as it would have without this top-up: by the gate's own close, if that is what closed
+    // it, or else through the subscription or the end timer.
+    if (!sameSession(tracked, after)) return sendJson(response, 404, { error: "unknown_session" });
+    const until = paidUntil(after);
     paidLonger(tracked, until);
     // The session may already run later than `until`: the subscription, or the end timer, found a later end meanwhile.
     sendJson(response, 200, { paidUntil: Number(until > tracked.paidUntil ? until : tracked.paidUntil) }, paymentResponse);

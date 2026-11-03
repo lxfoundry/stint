@@ -383,19 +383,52 @@ describe("the gate's top-up route (spec §7.1)", () => {
     expect(h.calls.teardown).toEqual([]);
   });
 
-  it("without a read after the settlement, adds the amount to the deposit read before the payment, and answers the later end it knows", async () => {
+  it("without a read after the settlement, takes the new end from a read of the session once the top-up settles", async () => {
     delete h.chain.readSessionAfter;
-    const { session } = await openConnected();
+    const { session } = await open();
     const releaseTopUp = hold("settleTopUp");
     const paying = sendTopUp(session, await prepareTopUp(session, 10), 10);
     await expect.poll(() => ofType("topUp")).toHaveLength(1);
-    h.sessions.set(session, { ...h.sessions.get(session)!, deposited: 70_000n }); // 40 s more, topped up on-chain meanwhile
-    h.timers.fire(pendingDue(END_DUE)); // the end timer's re-read finds it: the session runs on to +70 s
-    await expect.poll(() => h.timers.pending.map((timer) => timer.dueMs)).toEqual([NOW_MS + 70_000]);
+    h.sessions.set(session, { ...h.sessions.get(session)!, deposited: 50_000n }); // 20 s more, topped up on-chain meanwhile
+    const reads = h.reads.session;
 
     releaseTopUp();
 
-    expect((await paying).body).toEqual({ paidUntil: NOW_MS / 1000 + 70 });
-    expect(h.timers.pending.map((timer) => timer.dueMs)).toEqual([NOW_MS + 70_000]);
+    // The session's 30 s, the 20 s from elsewhere, and this top-up's 10 s.
+    expect(await paying).toMatchObject({ status: 200, body: { paidUntil: NOW_MS / 1000 + 60 } });
+    expect(h.reads.session).toBe(reads + 1);
+    expect(h.calls.readAfter).toEqual([]);
+    expect(pendingDue(NOW_MS + 60_000)).toBeDefined();
+    expect(h.timers.pending.filter((timer) => timer.dueMs === END_DUE || timer.dueMs === EXTENDED_DUE)).toEqual([]);
+  });
+
+  it("without a read after the settlement, credits a top-up sent again after it landed nothing more", async () => {
+    delete h.chain.readSessionAfter;
+    const { session } = await open();
+    const payload = await prepareTopUp(session, 10);
+    expect((await sendTopUp(session, payload, 10)).body).toEqual({ paidUntil: EXTENDED_DUE / 1000 });
+
+    // Sent again: the facilitator answers success from its record, and the chain credits nothing more.
+    const again = await sendTopUp(session, payload, 10);
+
+    expect(again).toMatchObject({ status: 200, body: { paidUntil: EXTENDED_DUE / 1000 } });
+    expect(ofType("topUp")).toEqual([payload, payload]);
+    expect(pendingDue(EXTENDED_DUE)).toBeDefined();
+    expect(h.timers.pending.filter((timer) => timer.dueMs > EXTENDED_DUE)).toEqual([]);
+  });
+
+  it("without a read after the settlement, answers 404, moves no timer and ends nothing itself, when the account is gone once the top-up settles", async () => {
+    delete h.chain.readSessionAfter;
+    const { session } = await open();
+    const releaseTopUp = hold("settleTopUp");
+    const paying = sendTopUp(session, await prepareTopUp(session, 10), 10);
+    await expect.poll(() => ofType("topUp")).toHaveLength(1);
+    h.sessions.delete(session); // closed by another party after the top-up landed
+
+    releaseTopUp();
+
+    expect(await paying).toMatchObject({ status: 404, body: { error: "unknown_session" } });
+    expect(pendingDue(END_DUE)).toBeDefined();
+    expect(h.calls.teardown).toEqual([]);
   });
 });
