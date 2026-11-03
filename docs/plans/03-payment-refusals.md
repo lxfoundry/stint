@@ -17,7 +17,8 @@ pass on `local` and become `required`, and pass on devnet.
 canonical encoding, so that one message has one hash, and states which fields of the requirements a retry must repeat.
 The facilitator gains a settlement store behind an interface (an in-memory one in this repository), a pruner that drops
 a record once its transaction's blockhash has expired, and a settlement object that owns `/verify` and `/settle`; the
-submission of a transaction now tells a node's refusal from a lost answer. The gate maps `already_processed` to `503`, and
+submission of a transaction now tells a node's refusal from a failure to send that leaves open whether the node took
+the transaction. The gate maps `already_processed` to `503`, and
 its facilitator client and the facilitator's Kora client get time limits. The conformance library gains the facilitator's
 `/verify` in a scenario's context and helpers that build a payment by hand, so that a scenario can send what no client
 would.
@@ -55,8 +56,9 @@ facilitator API capability) and 12.7 (scenarios 5, 6, 13, 14, 17, 18, 19 and 32)
 
 Built: the canonical-message check and the retry key of the requirements (scheme package); the settlement store, its
 in-memory implementation and the record pruner; settlement records on `/verify` and `/settle`; a submission that tells a
-node's refusal (final, the record released) from a lost answer (`settlement_pending`, the record kept) and reads an
-`AlreadyProcessed` transaction by its ID; the lookup and resubmission of a recorded transaction whose outcome is unknown;
+node's refusal before forwarding (final, the record released) from any other failure to send (the outcome waited for,
+then `settlement_pending` while still unknown, the record kept) and reads an `AlreadyProcessed` transaction by its ID;
+the lookup, in the node's transaction history too, and the resubmission of a recorded transaction whose outcome is unknown;
 `already_processed` from a simulation of a message the chain has processed; the gate's `503` for `already_processed`; time
 limits on the gate's facilitator client and the facilitator's Kora client; the facilitator API in a scenario's context;
 scenarios 5, 6, 13, 14, 17, 18, 19 and 32.
@@ -68,8 +70,8 @@ Not built, and not to be built here:
 - **Settlement records for the sponsored close** (`POST /close`, spec section 6.1). It keeps the in-flight sharing of part
   1 of stage 7: one sponsored close of a session is settled at a time, and a duplicate gets that close's answer. A retry
   after it has landed is refused at verification (`unknown_session`, the session account being gone), which the client
-  already reads as a closed session. Its submission gains the same distinction between a node's refusal and a lost answer
-  as `/settle`'s (Task 3).
+  already reads as a closed session; spec section 6.1 says so (Task 4). Its submission gains the same distinction between a
+  node's refusal and any other failure to send as `/settle`'s (Task 3).
 - **The gate's watch of a payment that may still land** (spec section 7.1: after a `202` to an open, and after
   `already_processed`), and the client's polling after paying (spec section 9.3). A `202` or a `503` leaves the client's
   budget locked, as today, and a session that lands then is not served until the gate adopts it. Both come with scenario
@@ -120,9 +122,10 @@ Three small pieces of the scheme package that the settlement records rest on.
   - `retryRequirementsKey(requirements: unknown): string`: the canonical JSON of `requirements` without
     `maxTimeoutSeconds`, `extra.recentBlockhash` and `extra.lastValidBlockHeight`, keys sorted at every level; for a value
     that is not an object, its canonical JSON (`"null"` for `undefined`);
-  - `readConfirmation(rpc: Rpc<SolanaRpcApi>, signature: string): Promise<boolean>`: true when the signature's status is
-    `confirmed` or `finalized`; throws `TransactionFailedError` when it carries an error, and the RPC's error when the read
-    fails.
+  - `readConfirmation(rpc: Rpc<SolanaRpcApi>, signature: string, options?: { readonly searchTransactionHistory?: boolean
+    }): Promise<boolean>`: true when the signature's status is `confirmed` or `finalized`; throws `TransactionFailedError`
+    when it carries an error, and the RPC's error when the read fails. With `searchTransactionHistory`, the node also
+    looks in its transaction history, not only in its recent statuses.
 
 - [ ] **Step 1: Write the failing test of the canonical message**
 
@@ -161,8 +164,8 @@ passes.
 
 - [ ] **Step 2: Refuse a message that is not in its canonical encoding**
 
-In `packages/x402/src/inspect.ts`, add `getCompiledTransactionMessageEncoder` to the import from `@solana/kit` (in
-alphabetical order, after `assertIsTransactionWithinSizeLimit`), and in `inspectTransaction`, replace:
+In `packages/x402/src/inspect.ts`, add `getCompiledTransactionMessageEncoder` to the import from `@solana/kit`, after
+`getCompiledTransactionMessageDecoder`, and in `inspectTransaction`, replace:
 
 ```ts
     const compiled = getCompiledTransactionMessageDecoder().decode(transaction.messageBytes);
@@ -277,6 +280,19 @@ describe("readConfirmation", () => {
     const failed = node({ confirmationStatus: "confirmed", err: { InstructionError: [0, { Custom: 1 }] } });
     await expect(readConfirmation(failed, SIGNATURE)).rejects.toBeInstanceOf(TransactionFailedError);
   });
+
+  it("asks the node to search its transaction history when told to, and only then", async () => {
+    const configs: unknown[] = [];
+    const rpc = {
+      getSignatureStatuses: (_: unknown, config?: unknown) => {
+        configs.push(config);
+        return { send: async () => ({ value: [null] }) };
+      },
+    } as unknown as Rpc<SolanaRpcApi>;
+    await readConfirmation(rpc, SIGNATURE);
+    await readConfirmation(rpc, SIGNATURE, { searchTransactionHistory: true });
+    expect(configs).toEqual([undefined, { searchTransactionHistory: true }]);
+  });
 });
 ```
 
@@ -290,10 +306,17 @@ In `packages/x402/src/chain.ts`, add above `waitForConfirmation`:
 ```ts
 /**
  * Whether a transaction is confirmed, from its signature status: true at `confirmed` or `finalized`. Throws
- * `TransactionFailedError` if it landed with an error, and the RPC's error if the read fails.
+ * `TransactionFailedError` if it landed with an error, and the RPC's error if the read fails. A node keeps recent
+ * statuses only for a while after the transaction's blockhash; with `searchTransactionHistory`, it also looks in its
+ * transaction history, for a transaction that may have landed longer ago.
  */
-export async function readConfirmation(rpc: Rpc<SolanaRpcApi>, signature: string): Promise<boolean> {
-  const { value } = await rpc.getSignatureStatuses([toSignature(signature)]).send();
+export async function readConfirmation(
+  rpc: Rpc<SolanaRpcApi>,
+  signature: string,
+  options: { readonly searchTransactionHistory?: boolean } = {},
+): Promise<boolean> {
+  const config = options.searchTransactionHistory ? { searchTransactionHistory: true } : undefined;
+  const { value } = await rpc.getSignatureStatuses([toSignature(signature)], config).send();
   const status = value[0];
   if (status?.err) throw new TransactionFailedError(signature, status.err);
   return status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized";
@@ -519,7 +542,10 @@ export interface SettlementRecord {
 
 /**
  * Where settlement records live (spec §6.5). Each method is atomic. A store that survives restarts and is shared by the
- * facilitator's instances implements this interface; this repository provides only `createMemoryStore`.
+ * facilitator's instances implements this interface; this repository provides only `createMemoryStore`, whose claims
+ * end with the process that made them. A shared store must also release a claim whose instance stopped before it
+ * recorded a transaction: the pruner keeps such claims, and another instance answers their payload
+ * `settlement_pending` without a transaction until then.
  */
 export interface SettlementStore {
   /**
@@ -585,11 +611,13 @@ export function createRecordPruner(
     for (const messageHash of expiredSince.keys()) if (!held.has(messageHash)) expiredSince.delete(messageHash);
     let dropped = 0;
     for (const record of records) {
-      if (!record.signed) continue;
+      const signed = record.signed;
+      if (!signed) continue;
       const since = expiredSince.get(record.messageHash);
       if (since === undefined) {
+        const lifetime = blockhash(signed.blockhash);
         try {
-          const { value: valid } = await ctx.rpc.isBlockhashValid(blockhash(record.signed.blockhash), { commitment: "confirmed" }).send();
+          const { value: valid } = await ctx.rpc.isBlockhashValid(lifetime, { commitment: "confirmed" }).send();
           if (!valid) expiredSince.set(record.messageHash, clock());
         } catch {
           // Asked again at the next pass.
@@ -625,29 +653,43 @@ git commit -m "Add the settlement store, its in-memory implementation and the re
 ### Task 3: How a submission ends, a recorded transaction looked up, and Kora's time limit
 
 Today a failure of `sendTransaction` is answered `simulation_failed` whatever it was. Spec section 5.5 needs three cases
-told apart: the node refused the transaction (a JSON-RPC error: it did not take it, so the payload may come again); the
-request got no answer (the node may have taken it: `settlement_pending`, the record kept); the node reports the message
-already processed (S16: it has it, and its outcome is read by its ID). A recorded transaction whose outcome is unknown is
-looked up by its ID before anything is sent again. The sponsored close's submission goes through the same function, so
-it gains the same distinction. Two smaller pieces: a simulation that reports the message already processed is answered
+told apart:
+- the node refused the transaction with one of the errors a node returns before it forwards one (a failed preflight, a
+  signature that does not verify, an unsupported version, an unhealthy node, invalid parameters, and the like): it did
+  not take it, so the payload may come again;
+- the node reports the message already processed (S16): it has it, and its outcome is read by its ID;
+- anything else, a request with no answer or another error (a proxy or a load balancer can answer one after it has
+  forwarded the transaction): the node may have taken it, so its outcome is waited for as for a transaction it took, and
+  is `settlement_pending` while still unknown, with the record kept.
+
+A recorded transaction whose outcome is unknown is looked up by its ID, in the node's transaction history as well as its
+recent statuses, before anything is sent again. The sponsored close's submission goes through the same function, so it
+gains the same distinction. Two smaller pieces: a simulation that reports the message already processed is answered
 `already_processed` (spec section 5.4), and a request to Kora that gets no answer is given up, so that a settlement
 waiting on its signature cannot hold its claim for ever.
 
+Two test fakes of the facilitator stand for a node's refusal with a plain `Error`, which the new submission reads, rightly,
+as a lost answer: Step 1 makes them throw what `@solana/kit` throws for a refusal at preflight.
+
 **Files:**
 - Modify: `apps/facilitator/src/settle.ts`, `apps/facilitator/src/verify.ts`, `apps/facilitator/src/kora.ts`
-- Test: `apps/facilitator/test/settle.test.ts`, `apps/facilitator/test/verify.test.ts`, `apps/facilitator/test/kora.test.ts`
+- Test: `apps/facilitator/test/settle.test.ts`, `apps/facilitator/test/verify.test.ts`, `apps/facilitator/test/kora.test.ts`,
+  `apps/facilitator/test/close.test.ts`, `apps/facilitator/test/sweeper.test.ts`
 
 **Interfaces:**
 - Consumes: `readConfirmation` (Task 1), `waitForConfirmation`, `TransactionFailedError`, `fetchClosedEvent`,
-  `readUntilFound` (`@lxfoundry/stint-x402`); `isSolanaError`, `SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED`
-  (`@solana/kit`).
+  `readUntilFound` (`@lxfoundry/stint-x402`); `isSolanaError`, `SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED` and
+  the JSON-RPC error codes of `@solana/kit`.
 - Produces, in `apps/facilitator/src/settle.ts`:
   - `type Submission = { readonly kind: "settled" | "pending" | "refused"; readonly response: SettleResponse }`, as a union
     of the three kinds: `settled` is final (confirmed, landed with an error, or no longer able to land), `pending` leaves
     the outcome unknown, `refused` is a transaction the node would not take at its first submission;
   - `sendAndConfirm(ctx: Pick<FacilitatorContext, "rpc" | "network" | "confirmTimeoutMs" | "readRetry">, signed:
-    SignedSettlement, options?: { readonly resent?: boolean }): Promise<Submission>`;
-  - `resolveRecorded(ctx: <the same Pick>, signed: SignedSettlement): Promise<Submission>`: never `refused`;
+    SignedSettlement, options?: { readonly resent?: boolean }): Promise<Submission>`: `refused` only for one of the
+    errors a node returns before forwarding, at a first submission; after any other failure to send, it waits for the
+    outcome as for a transaction sent;
+  - `resolveRecorded(ctx: <the same Pick>, signed: SignedSettlement): Promise<Submission>`: never `refused`; its lookups
+    search the node's transaction history;
   - `submitSettlement(ctx, signed): Promise<SettleResponse>`, unchanged in signature: `sendAndConfirm`'s response;
   - `SignedSettlement` unchanged.
 - Produces, in `apps/facilitator/src/kora.ts`: `const DEFAULT_KORA_TIMEOUT_MS = 15_000` and
@@ -655,7 +697,49 @@ waiting on its signature cannot hold its claim for ever.
   `timeoutMs` rejects with `Error("Kora <method>: no answer within <timeoutMs> ms")`.
 - `verifyPayment` answers `{ ok: false, reason: "already_processed" }` when the simulation's `err` is `"AlreadyProcessed"`.
 
-- [ ] **Step 1: Write the failing tests of the submission**
+- [ ] **Step 1: Make the test fakes refuse as a node refuses**
+
+In `apps/facilitator/test/close.test.ts` and in `apps/facilitator/test/sweeper.test.ts`, add
+`SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM`, `SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE` and
+`SolanaError` at the top of the import from `@solana/kit`, and after the last import, add:
+
+```ts
+/** A refusal by the node at preflight, as `@solana/kit` reports it: the program's error is its cause. */
+const preflightRefusal = () =>
+  new SolanaError(SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE, {
+    cause: new SolanaError(SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM, { code: 6004, index: 0 }),
+  } as never);
+```
+
+In `apps/facilitator/test/close.test.ts`, in the fake node's `sendTransaction`, replace:
+
+```ts
+        if (node.failSend) throw new Error("preflight refused");
+```
+
+with:
+
+```ts
+        if (node.failSend) throw preflightRefusal();
+```
+
+In `apps/facilitator/test/sweeper.test.ts`, in the fake node's `sendTransaction`, replace:
+
+```ts
+          throw new Error("Transaction simulation failed: custom program error 0x1774");
+```
+
+with:
+
+```ts
+          throw preflightRefusal();
+```
+
+Run: `pnpm --filter @lxfoundry/stint-facilitator test close.test.ts sweeper.test.ts`
+Expected: PASS: today's submission answers any failure to send as `simulation_failed`, so these tests do not change
+their outcome. After Step 3 they pass only with this form of the refusal.
+
+- [ ] **Step 2: Write the failing tests of the submission**
 
 In `apps/facilitator/test/settle.test.ts`:
 
@@ -663,6 +747,7 @@ Replace the import from `@solana/kit` with:
 
 ```ts
 import {
+  SOLANA_ERROR__JSON_RPC__INTERNAL_ERROR,
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE,
   SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED,
   SOLANA_ERROR__TRANSACTION_ERROR__BLOCKHASH_NOT_FOUND,
@@ -695,9 +780,10 @@ interface Script {
 
 function fakeRpc(script: Script): {
   rpc: Rpc<SolanaRpcApi>;
-  reads: { statuses: number; transactions: number; valid: number; sent: number };
+  /** How many reads of each kind were made, and for each status read whether it searched the transaction history. */
+  reads: { statuses: number; transactions: number; valid: number; sent: number; history: boolean[] };
 } {
-  const reads = { statuses: 0, transactions: 0, valid: 0, sent: 0 };
+  const reads = { statuses: 0, transactions: 0, valid: 0, sent: 0, history: [] as boolean[] };
   const next = <T>(list: (() => T)[], index: number) => list[Math.min(index, list.length - 1)]!();
   const call = (answer: () => unknown) => ({ send: async () => answer() });
   const rpc = {
@@ -706,7 +792,10 @@ function fakeRpc(script: Script): {
         reads.sent++;
         return (script.send ?? (() => SIGNATURE))();
       }),
-    getSignatureStatuses: () => call(() => ({ value: [next(script.statuses, reads.statuses++)] })),
+    getSignatureStatuses: (_: unknown, config?: { searchTransactionHistory?: boolean }) => {
+      reads.history.push(config?.searchTransactionHistory === true);
+      return call(() => ({ value: [next(script.statuses, reads.statuses++)] }));
+    },
     isBlockhashValid: () => call(() => ({ value: script.valid ? next(script.valid, reads.valid++) : true })),
     getTransaction: () => call(() => next(script.transactions, reads.transactions++)),
   };
@@ -737,19 +826,32 @@ describe("sendAndConfirm (spec §5.5)", () => {
     payer = (await generateKeyPairSigner()).address;
   });
 
-  it("leaves the outcome open, without waiting, when sending gets no answer: the node may have taken it", async () => {
-    const { rpc, reads } = fakeRpc({
-      send: () => {
-        throw new TypeError("fetch failed");
-      },
-      statuses: [confirmed],
-      transactions: [() => null],
+  it("waits for the outcome when sending gets no answer, since the node may have taken the transaction", async () => {
+    const lost = () => {
+      throw new TypeError("fetch failed");
+    };
+    // It had taken it, and it lands.
+    expect(await sendAndConfirm(ctx(fakeRpc({ send: lost, statuses: [confirmed], transactions: [() => null] }).rpc), signed())).toMatchObject({
+      kind: "settled",
+      response: { success: true, amount: "30000" },
     });
-    expect(await sendAndConfirm(ctx(rpc), signed())).toMatchObject({
+    // It had not, and the blockhash expires: it can no longer land.
+    const neverTaken = fakeRpc({ send: lost, statuses: [notLanded], transactions: [() => null], valid: [() => false] });
+    expect(await sendAndConfirm(ctx(neverTaken.rpc), signed())).toMatchObject({ kind: "settled", response: { errorReason: "blockhash_expired" } });
+    // Neither shows before the wait ends: still unknown, with the send's error.
+    const undecided = fakeRpc({ send: lost, statuses: [notLanded], transactions: [() => null] });
+    expect(await sendAndConfirm(ctx(undecided.rpc), signed())).toMatchObject({
       kind: "pending",
-      response: { success: false, errorReason: "settlement_pending", transaction: SIGNATURE, payer },
+      response: { success: false, errorReason: "settlement_pending", errorMessage: "fetch failed", transaction: SIGNATURE, payer },
     });
-    expect(reads.statuses).toBe(0);
+  });
+
+  it("does not take a JSON-RPC error other than those a node returns before forwarding for a refusal", async () => {
+    const internal = () => {
+      throw new SolanaError(SOLANA_ERROR__JSON_RPC__INTERNAL_ERROR, { __serverMessage: "internal error" } as never);
+    };
+    const { rpc } = fakeRpc({ send: internal, statuses: [notLanded], transactions: [() => null] });
+    expect(await sendAndConfirm(ctx(rpc), signed())).toMatchObject({ kind: "pending", response: { errorReason: "settlement_pending" } });
   });
 
   it("is a refusal when the node refuses the first submission, and leaves the outcome open when it refuses one sent again", async () => {
@@ -791,10 +893,12 @@ describe("resolveRecorded (spec §5.5: a recorded transaction whose outcome is n
     payer = (await generateKeyPairSigner()).address;
   });
 
-  it("answers a transaction that has landed, without sending it again", async () => {
+  it("answers a transaction that has landed, without sending it again, from the node's transaction history", async () => {
     const { rpc, reads } = fakeRpc({ statuses: [confirmed], transactions: [() => null] });
     expect(await resolveRecorded(ctx(rpc), signed())).toMatchObject({ kind: "settled", response: { success: true, amount: "30000" } });
     expect(reads.sent).toBe(0);
+    // A record outlives the node's recent statuses of its transaction: the lookup searches the history too.
+    expect(reads.history).toEqual([true]);
   });
 
   it("sends again a transaction that has not landed while its blockhash is still valid", async () => {
@@ -809,10 +913,11 @@ describe("resolveRecorded (spec §5.5: a recorded transaction whose outcome is n
     expect(reads).toMatchObject({ statuses: 2, sent: 0 });
   });
 
-  it("answers the transaction that shows at the last look, after its blockhash expired", async () => {
+  it("answers the transaction that shows at the last look, after its blockhash expired, from the history too", async () => {
     const { rpc, reads } = fakeRpc({ statuses: [notLanded, confirmed], transactions: [() => null], valid: [() => false] });
     expect(await resolveRecorded(ctx(rpc), signed())).toMatchObject({ kind: "settled", response: { success: true } });
     expect(reads.sent).toBe(0);
+    expect(reads.history).toEqual([true, true]);
   });
 
   it("answers simulation_failed for a transaction that landed with an error", async () => {
@@ -838,12 +943,37 @@ describe("resolveRecorded (spec §5.5: a recorded transaction whose outcome is n
 Run: `pnpm --filter @lxfoundry/stint-facilitator test settle.test.ts`
 Expected: FAIL: `sendAndConfirm` and `resolveRecorded` are not exported. The six tests of `submitSettlement` are unchanged.
 
-- [ ] **Step 2: Write the submission**
+- [ ] **Step 3: Write the submission**
 
-In `apps/facilitator/src/settle.ts`, add to the import from `@solana/kit`, in alphabetical order:
-`SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED`, `blockhash` and `isSolanaError`. Add `readConfirmation` to the
-import from `@lxfoundry/stint-x402`. Then replace everything from `/** A verified transaction, signed by every party,
-ready to submit. */` to the end of the file with:
+In `apps/facilitator/src/settle.ts`, replace the import from `@solana/kit` with:
+
+```ts
+import {
+  SOLANA_ERROR__JSON_RPC__INVALID_PARAMS,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_MIN_CONTEXT_SLOT_NOT_REACHED,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_PRECOMPILE_VERIFICATION_FAILURE,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_SIGNATURE_LEN_MISMATCH,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_SIGNATURE_VERIFICATION_FAILURE,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_UNSUPPORTED_TRANSACTION_VERSION,
+  SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED,
+  blockhash,
+  getBase64EncodedWireTransaction,
+  getBase64Encoder,
+  getSignatureFromTransaction,
+  getTransactionDecoder,
+  isSolanaError,
+  partiallySignTransaction,
+  type Address,
+  type Base64EncodedWireTransaction,
+  type Signature,
+  type Transaction,
+} from "@solana/kit";
+```
+
+Add `readConfirmation` to the import from `@lxfoundry/stint-x402`. Then replace everything from `/** A verified
+transaction, signed by every party, ready to submit. */` to the end of the file with:
 
 ```ts
 /** A verified transaction, signed by every party, ready to submit. */
@@ -873,11 +1003,27 @@ export type Submission =
 type SubmitContext = Pick<FacilitatorContext, "rpc" | "network" | "confirmTimeoutMs" | "readRetry">;
 
 /**
- * A refusal by the node itself: a JSON-RPC error, which `@solana/kit` reports with the error's own code, negative in
- * JSON-RPC. Any other failure of the request (no answer in time, a connection that drops, an HTTP error) leaves open
- * whether the node took the transaction.
+ * The errors a node answers `sendTransaction` with before it forwards the transaction, which `@solana/kit` reports with
+ * the JSON-RPC error's own code: a failed preflight, a signature that does not verify or has the wrong length, a
+ * precompile that fails, an unsupported version, a context slot not reached, an unhealthy node, invalid parameters.
  */
-const refusedByNode = (error: unknown): boolean => isSolanaError(error) && error.context.__code < 0;
+const REFUSED_BEFORE_FORWARDING: ReadonlySet<number> = new Set([
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_SIGNATURE_VERIFICATION_FAILURE,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_SIGNATURE_LEN_MISMATCH,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_PRECOMPILE_VERIFICATION_FAILURE,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_UNSUPPORTED_TRANSACTION_VERSION,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_MIN_CONTEXT_SLOT_NOT_REACHED,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY,
+  SOLANA_ERROR__JSON_RPC__INVALID_PARAMS,
+]);
+
+/**
+ * A refusal by the node itself, which did not take the transaction. Any other failure of the request leaves open whether
+ * it did: no answer in time, a connection that drops, an HTTP error, or another JSON-RPC error, which a proxy or a load
+ * balancer can answer after it has forwarded the transaction.
+ */
+const refusedByNode = (error: unknown): boolean => isSolanaError(error) && REFUSED_BEFORE_FORWARDING.has(error.context.__code);
 
 /** The node has processed this very message (S16), as the cause of a preflight failure or the error itself. */
 function alreadyProcessed(error: unknown): boolean {
@@ -917,30 +1063,37 @@ async function confirmedResponse(ctx: SubmitContext, signed: SignedSettlement): 
 }
 
 /**
- * Submits and waits for `confirmed` (spec §5.5). A node that refuses the transaction at its first submission did not
- * take it: `refused`. One that reports the message already processed has it, from an earlier submission or from whoever
- * sent these same bytes, and its outcome is read by its ID. Any other failure to submit leaves the outcome unknown, and so
- * does a refusal of a transaction sent again (`resent`), since its first submission may still land. Once the node has
- * taken it, only a status carrying an error, or a blockhash that expired before it landed, is a final failure. A
- * confirmed transaction is always a success, even when its `Closed` event cannot be read yet.
+ * Submits and waits for `confirmed` (spec §5.5). A node that refuses the transaction before forwarding it, at its first
+ * submission, did not take it: `refused`. A refusal of a transaction sent again (`resent`) leaves the outcome unknown,
+ * since its first submission may still land. A node that reports the message already processed has it, from an earlier
+ * submission or from whoever sent these same bytes, and its outcome is read by its ID. After any other failure to send,
+ * the node may have taken the transaction, so its outcome is waited for as for one it took. Only a status carrying an
+ * error, or a blockhash that expired before the transaction landed, is a final failure; a wait that ends first leaves
+ * the outcome unknown. A confirmed transaction is always a success, even when its `Closed` event cannot be read yet.
  */
 export async function sendAndConfirm(
   ctx: SubmitContext,
   signed: SignedSettlement,
   options: { readonly resent?: boolean } = {},
 ): Promise<Submission> {
+  let sendError: string | undefined;
   try {
     await ctx.rpc.sendTransaction(signed.wire as Base64EncodedWireTransaction, { encoding: "base64", preflightCommitment: "confirmed" }).send();
   } catch (error) {
+    // Already processed (S16): its outcome is read by its ID, below.
     if (!alreadyProcessed(error)) {
-      if (refusedByNode(error) && !options.resent) return { kind: "refused", response: failure(ctx, signed, "simulation_failed", message(error)) };
-      return { kind: "pending", response: failure(ctx, signed, "settlement_pending", message(error)) };
+      if (refusedByNode(error)) {
+        if (options.resent) return { kind: "pending", response: failure(ctx, signed, "settlement_pending", message(error)) };
+        return { kind: "refused", response: failure(ctx, signed, "simulation_failed", message(error)) };
+      }
+      // The node may have taken it: its outcome is waited for, below, as for one it took.
+      sendError = message(error);
     }
   }
 
   try {
     const outcome = await waitForConfirmation(ctx.rpc, signed.signature, signed.blockhash, ctx.confirmTimeoutMs);
-    if (outcome === "pending") return { kind: "pending", response: failure(ctx, signed, "settlement_pending") };
+    if (outcome === "pending") return { kind: "pending", response: failure(ctx, signed, "settlement_pending", sendError) };
     if (outcome === "expired") return { kind: "settled", response: failure(ctx, signed, "blockhash_expired") };
   } catch (error) {
     if (error instanceof TransactionFailedError) return { kind: "settled", response: failure(ctx, signed, "simulation_failed", message(error)) };
@@ -951,16 +1104,18 @@ export async function sendAndConfirm(
 
 /**
  * A recorded transaction whose outcome is not known (spec §5.5, "How a retry is answered"). It is looked up by its ID
- * first. One that has not landed is submitted again while its blockhash is still valid, which S16 makes safe; once the
- * blockhash has expired, one last look decides, since a transaction that landed just before the expiry can show just
- * after (spec §7.1). A lookup that cannot be read leaves the outcome unknown.
+ * first, in the node's transaction history as well as its recent statuses: a record outlives its blockhash by a margin,
+ * and a node keeps recent statuses only for a while. One that has not landed is submitted again while its blockhash is
+ * still valid, which S16 makes safe; once the blockhash has expired, one last look decides, since a transaction that
+ * landed just before the expiry can show just after (spec §7.1). A lookup that cannot be read leaves the outcome unknown.
  */
 export async function resolveRecorded(ctx: SubmitContext, signed: SignedSettlement): Promise<Submission> {
+  const landed = () => readConfirmation(ctx.rpc, signed.signature, { searchTransactionHistory: true });
   try {
-    if (await readConfirmation(ctx.rpc, signed.signature)) return { kind: "settled", response: await confirmedResponse(ctx, signed) };
+    if (await landed()) return { kind: "settled", response: await confirmedResponse(ctx, signed) };
     const { value: valid } = await ctx.rpc.isBlockhashValid(blockhash(signed.blockhash), { commitment: "confirmed" }).send();
     if (!valid) {
-      if (await readConfirmation(ctx.rpc, signed.signature)) return { kind: "settled", response: await confirmedResponse(ctx, signed) };
+      if (await landed()) return { kind: "settled", response: await confirmedResponse(ctx, signed) };
       return { kind: "settled", response: failure(ctx, signed, "blockhash_expired") };
     }
   } catch (error) {
@@ -976,16 +1131,19 @@ export async function submitSettlement(ctx: SubmitContext, signed: SignedSettlem
 }
 ```
 
-Run: `pnpm --filter @lxfoundry/stint-facilitator test settle.test.ts`
-Expected: PASS, the six earlier tests included.
+Run: `pnpm --filter @lxfoundry/stint-facilitator test`
+Expected: PASS: the six earlier tests of `settle.test.ts` included, and `close.test.ts` and `sweeper.test.ts` with the
+refusals of Step 1. With their old plain `Error`, five of their tests would now fail: that error reads as a lost
+answer, and their fake node then reports the transaction confirmed.
 
-- [ ] **Step 3: Write the failing test of `already_processed` in a simulation**
+- [ ] **Step 4: Write the failing test of `already_processed` in a simulation**
 
 In `apps/facilitator/test/verify.test.ts`, in `describe("an open", …)`, after the test "refuses a transaction whose
 simulation fails, with the node's error", add:
 
 ```ts
     it("answers already_processed, which is not final, when the simulation reports this very message processed", async () => {
+      await resetNode();
       node.simulation = { err: "AlreadyProcessed" };
       expect(await verifyPayment(ctx, await openPayload(), offer)).toMatchObject({ ok: false, reason: "already_processed" });
     });
@@ -994,7 +1152,7 @@ simulation fails, with the node's error", add:
 Run: `pnpm --filter @lxfoundry/stint-facilitator test verify.test.ts`
 Expected: FAIL: the reason is `simulation_failed`.
 
-- [ ] **Step 4: Map it**
+- [ ] **Step 5: Map it**
 
 In `apps/facilitator/src/verify.ts`, in `simulate`, replace:
 
@@ -1014,7 +1172,7 @@ with:
 Run: `pnpm --filter @lxfoundry/stint-facilitator test verify.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Write the failing test of Kora's time limit**
+- [ ] **Step 6: Write the failing test of Kora's time limit**
 
 In `apps/facilitator/test/kora.test.ts`, append inside `describe("createKoraClient errors", …)`:
 
@@ -1030,9 +1188,10 @@ In `apps/facilitator/test/kora.test.ts`, append inside `describe("createKoraClie
 ```
 
 Run: `pnpm --filter @lxfoundry/stint-facilitator test kora.test.ts`
-Expected: FAIL: the test times out (vitest's 5 s): the request is never given up.
+Expected: FAIL at once, with "Cannot read properties of undefined (reading 'addEventListener')": today's client passes
+`fetch` no `signal`, so nothing could ever give the request up.
 
-- [ ] **Step 6: Give Kora's requests a time limit**
+- [ ] **Step 7: Give Kora's requests a time limit**
 
 In `apps/facilitator/src/kora.ts`, above the comment that starts `// Kora quotes the RPC URL it called in its errors`,
 add:
@@ -1075,10 +1234,10 @@ The rest of `call` (from `if (!response.ok && …`) is unchanged.
 Run: `pnpm --filter @lxfoundry/stint-facilitator test && pnpm --filter @lxfoundry/stint-facilitator typecheck`
 Expected: PASS, no type error.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add apps/facilitator/src/settle.ts apps/facilitator/src/verify.ts apps/facilitator/src/kora.ts apps/facilitator/test/settle.test.ts apps/facilitator/test/verify.test.ts apps/facilitator/test/kora.test.ts
+git add apps/facilitator/src/settle.ts apps/facilitator/src/verify.ts apps/facilitator/src/kora.ts apps/facilitator/test/settle.test.ts apps/facilitator/test/verify.test.ts apps/facilitator/test/kora.test.ts apps/facilitator/test/close.test.ts apps/facilitator/test/sweeper.test.ts
 git commit -m "Tell a node's refusal from a lost answer at submission, look recorded transactions up, and bound Kora's requests"
 ```
 
@@ -1102,7 +1261,8 @@ payload is verified as any other is.
 **Files:**
 - Modify: `apps/facilitator/src/settle.ts`, `apps/facilitator/src/server.ts`, `apps/facilitator/src/index.ts`
 - Create: `apps/facilitator/test/settlement.test.ts`
-- Modify: `docs/specs/stint-system.md` (sections 5.5 and 13)
+- Modify: `apps/facilitator/test/server.test.ts`, `apps/facilitator/test/sweeper-server.test.ts`
+- Modify: `docs/specs/stint-system.md` (sections 5.4, 5.5, 6.1 and 13)
 
 **Interfaces:**
 - Consumes: `SettlementStore`, `SettlementRecord`, `createMemoryStore`, `createRecordPruner`,
@@ -1661,9 +1821,98 @@ export function createSettlement(ctx: FacilitatorContext, store: SettlementStore
 ```
 
 Run: `pnpm --filter @lxfoundry/stint-facilitator test settlement.test.ts`
-Expected: PASS. The server still imports `settlePayment`, so the package does not type-check until Step 3.
+Expected: PASS. The server still imports `settlePayment`, so the package does not type-check until Step 4.
 
-- [ ] **Step 3: Wire the settlement into the server**
+- [ ] **Step 3: Write the failing tests of the server's wiring**
+
+Two things that only the server does: it hands the store the API key's SHA-256, never the key, and it runs the record
+pruner on an interval that its `stop` clears. The sweeper's tests count the timers set at the sweeper's default of 30 s,
+which is also the pruner's default, so their facilitators get a pruner interval of their own.
+
+In `apps/facilitator/test/server.test.ts`, replace `import { generateKeyPairSync } from "node:crypto";` with
+`import { createHash, generateKeyPairSync } from "node:crypto";`, `import { generateKeyPairSigner } from "@solana/kit";`
+with `import { address, generateKeyPairSigner } from "@solana/kit";`, and
+`import type { SupportedResponse } from "@lxfoundry/stint-x402";` with:
+
+```ts
+import { buildOpenOffer, buildOpenTransaction, type SupportedResponse } from "@lxfoundry/stint-x402";
+import { createMemoryStore, type SettlementRecord, type SettlementStore } from "../src/records.js";
+```
+
+and append inside `describe("facilitator HTTP interface (spec §6.1)", …)`:
+
+```ts
+  it("hands the settlement store the API key's SHA-256, never the key", async () => {
+    const claims: SettlementRecord[] = [];
+    const memory = createMemoryStore();
+    const store: SettlementStore = { ...memory, claim: async (record) => (claims.push(record), memory.claim(record)) };
+    const keyed = await startFacilitator({
+      rpcUrl: "http://127.0.0.1:9",
+      network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      kora: { url: kora.url, apiKey: "kora-key" },
+      rentPayerSecretKey: newSecretKey(),
+      apiKeys: ["seller-key"],
+      settlementStore: store,
+    });
+    try {
+      const offer = buildOpenOffer({
+        network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+        asset: address("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"),
+        payTo: (await generateKeyPairSigner()).address,
+        receiverAuthorizer: (await generateKeyPairSigner()).address,
+        terms: { rate: 1_000n, minSeconds: 5, maxSeconds: 120 },
+        seconds: 30,
+        facilitator: { feePayer, rentPayer: keyed.rentPayer, programId: STINT_PROGRAM_ADDRESS, closeUrl: keyed.closeUrl },
+        lifetime: { blockhash: "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N", lastValidBlockHeight: 1_234n },
+        maxTimeoutSeconds: 60,
+        idleCloseSeconds: 10,
+        closeOnOutage: true,
+      });
+      const built = await buildOpenTransaction({ requirements: offer, authority: await generateKeyPairSigner(), decimals: 6 });
+      const paymentPayload = { x402Version: 2, accepted: offer, payload: { type: "open", transaction: built.transaction, session: built.session } };
+      // The node cannot be reached, so the settlement fails once it has claimed the message.
+      const response = await fetch(`${keyed.url}/settle`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer seller-key" },
+        body: JSON.stringify({ x402Version: 2, paymentPayload, paymentRequirements: offer }),
+      });
+      expect(response.status).toBe(500);
+      expect(claims.map((claim) => claim.apiKey)).toEqual([createHash("sha256").update("seller-key", "utf8").digest("hex")]);
+      // Released when the settlement failed, before anything was submitted.
+      expect(await store.list()).toEqual([]);
+    } finally {
+      await keyed.stop();
+    }
+  });
+```
+
+In `apps/facilitator/test/sweeper-server.test.ts`, after `const MINT = …`, add:
+
+```ts
+/** The record pruner's interval in these tests: kept off the sweeper's default of 30 s, which a test counts timers at. */
+const PRUNE_INTERVAL_MS = 3_600_000;
+```
+
+in `launch`, after `sweeper,` in the object given to `startFacilitator`, add `recordPruneIntervalMs: PRUNE_INTERVAL_MS,`,
+and append inside the file's `describe`:
+
+```ts
+  it("starts the record pruner at its interval, and clears it when it stops", async () => {
+    const started = vi.spyOn(globalThis, "setInterval");
+    const cleared = vi.spyOn(globalThis, "clearInterval");
+    const facilitator = await launch((await node([])).url);
+    const index = started.mock.calls.findIndex((call) => call[1] === PRUNE_INTERVAL_MS);
+    expect(index).toBeGreaterThanOrEqual(0);
+    await facilitator.stop();
+    expect(cleared).toHaveBeenCalledWith(started.mock.results[index]!.value);
+  });
+```
+
+Run: `pnpm --filter @lxfoundry/stint-facilitator test server.test.ts sweeper-server.test.ts`
+Expected: FAIL: the two new tests (no claim reaches the store, which today's server does not take; no timer at
+`PRUNE_INTERVAL_MS`). The other tests pass.
+
+- [ ] **Step 4: Wire the settlement into the server**
 
 In `apps/facilitator/src/server.ts`, replace:
 
@@ -1768,9 +2017,10 @@ export { createMemoryStore, createRecordPruner, type RecordPruner, type Settleme
 ```
 
 Run: `pnpm --filter @lxfoundry/stint-facilitator test && pnpm typecheck`
-Expected: PASS, and no type error anywhere: nothing outside the facilitator imported `settlePayment`.
+Expected: PASS, the two tests of Step 3 included, and no type error anywhere: nothing outside the facilitator imported
+`settlePayment`.
 
-- [ ] **Step 4: State the release rule, the two refinements and the store in the spec**
+- [ ] **Step 5: State the retry rules, the release rule, the sponsored close and the store in the spec**
 
 In `docs/specs/stint-system.md`, section 5.4, replace:
 
@@ -1790,14 +2040,45 @@ been submitted, so its payload is verified as any other.
 In section 5.5, "How a retry is answered", replace:
 
 ```markdown
-  - `/settle` reports the recorded outcome, or `settlement_pending` while there is none yet. If
+- **How a retry is answered.** A payload whose message is claimed or recorded, and that comes with
+  the same API key and the same requirements, is answered from that record. "The same
+  requirements" leaves out the advisory fields that a fresh offer changes: `maxTimeoutSeconds`,
+  `extra.recentBlockhash` and `extra.lastValidBlockHeight`. Every field the transaction is
+  checked against must match. Nothing is verified, signed or
+  submitted again: the message is the one being, or already, settled.
 ```
 
 with:
 
 ```markdown
-  - `/settle` reports the recorded outcome, or `settlement_pending` while there is none yet. A duplicate that reaches
-    the instance settling its message, while that settlement runs, waits for it and gets its answer. If
+- **How a retry is answered.** A payload whose message is claimed or recorded, and that comes with
+  the same API key and the same requirements, is a retry. "The same requirements" leaves out the
+  advisory fields that a fresh offer changes: `maxTimeoutSeconds`, `extra.recentBlockhash` and
+  `extra.lastValidBlockHeight`. Every field the transaction is checked against must match. Once its
+  transaction is recorded, a retry is answered from that record: nothing is verified, signed or
+  submitted again, since the message is the one being, or already, settled. A message that is only
+  claimed, its transaction not recorded yet, has not been submitted: `/verify` verifies its payload
+  as any other, and a `/settle` of it is a duplicate in flight (below).
+```
+
+and replace:
+
+```markdown
+  - `/settle` reports the recorded outcome, or `settlement_pending` while there is none yet. If
+    the transaction was submitted but its outcome is not known, it first looks the transaction
+    up by its ID. If the transaction has not landed and its blockhash is still valid, it submits
+    the recorded transaction again, which S16 makes safe.
+```
+
+with:
+
+```markdown
+  - `/settle` reports the recorded outcome, or `settlement_pending` while there is none yet. A
+    duplicate that reaches the instance settling its message, while that settlement runs, waits for
+    it and gets its answer. If the transaction was submitted but its outcome is not known, it first
+    looks the transaction up by its ID, in the node's transaction history as well as its recent
+    statuses, since a record outlives them. If the transaction has not landed and its blockhash is
+    still valid, it submits the recorded transaction again, which S16 makes safe.
 ```
 
 In section 5.5, replace:
@@ -1810,10 +2091,24 @@ with:
 
 ```markdown
 If step 2, 3 or 4 refuses the payload, the claim is released. So is it when the node refuses the transaction at its
-first submission, with a JSON-RPC error such as a failed preflight: a node that refuses a transaction does not take it.
-A node that reports it already processed at submission has it (S16): its outcome is read by its ID. Any other failure
-to submit, such as a request with no answer, leaves the outcome unknown: the answer is `settlement_pending`, and the
-record is kept.
+first submission with an error that a node returns before it forwards a transaction (a failed preflight, a signature
+that does not verify, an unsupported version, an unhealthy node, invalid parameters): it did not take the transaction.
+A node that reports it already processed has it (S16): its outcome is read by its ID. After any other failure to
+submit, such as a request with no answer or another error, which a proxy can return after forwarding, the node may have
+taken the transaction: the facilitator waits for its outcome as for one it submitted, keeps the record, and answers
+`settlement_pending` while the outcome is unknown.
+```
+
+In section 6.1, in the row of `POST /close`, replace:
+
+```markdown
+Verified as in section 5.4 (sponsored row) and settled as in section 5.5.
+```
+
+with:
+
+```markdown
+Verified as in section 5.4 (sponsored row) and submitted as in section 5.5, steps 4 and 5, without a settlement record: once a close of the session has landed, its account is gone, so the same close sent again is refused at verification (`unknown_session`), which the client reads as a closed session (section 9.3).
 ```
 
 In section 13, after the line `- A shared hosted facilitator. The image makes it a deployment.`, add:
@@ -1823,10 +2118,10 @@ In section 13, after the line `- A shared hosted facilitator. The image makes it
   facilitator takes one through its interface; this repository has only the in-memory one, which a restart empties.
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add apps/facilitator/src/settle.ts apps/facilitator/src/server.ts apps/facilitator/src/index.ts apps/facilitator/test/settlement.test.ts docs/specs/stint-system.md
+git add apps/facilitator/src/settle.ts apps/facilitator/src/server.ts apps/facilitator/src/index.ts apps/facilitator/test/settlement.test.ts apps/facilitator/test/server.test.ts apps/facilitator/test/sweeper-server.test.ts docs/specs/stint-system.md
 git commit -m "Keep settlement records: answer retries from them, join duplicates in flight, and refuse other origins"
 ```
 
@@ -1886,19 +2181,25 @@ In `e2e/test/facilitator.test.ts`, inside `describe("facilitator on the local ne
     const buyer = await newBuyer(stack.network.rpc, stack.keys.mintAuthority.signer, 100_000n);
     const { offer, payload } = await openPayment(buyer);
     expect(await call("/settle", payload, offer)).toMatchObject({ success: true });
+    // The same transaction, echoing the other requirements it now comes with: only the record can tell it apart.
     const other = { ...offer, extra: { ...offer.extra, idleCloseSeconds: 11 } };
-    expect(await call("/settle", payload, other)).toMatchObject({ success: false, errorReason: "invalid_payment_requirements" });
-    expect(await call("/verify", payload, other)).toMatchObject({ isValid: false, invalidReason: "invalid_payment_requirements" });
+    const again = { ...payload, accepted: other };
+    expect(await call("/settle", again, other)).toMatchObject({ success: false, errorReason: "invalid_payment_requirements" });
+    expect(await call("/verify", again, other)).toMatchObject({ isValid: false, invalidReason: "invalid_payment_requirements" });
     expect(await usdcOf(buyer)).toBe("70000");
   });
 ```
 
 These sessions are left open; the stack's sweeper closes them once their paid time has run out, or the stack stops first.
+The other cases that spec section 12.1 lists for this layer are covered by unit tests only: a retry with another API key
+(the local stack has one API key; Task 4's `settlement.test.ts` and `server.test.ts`) and a record's expiry (it takes a
+blockhash's lifetime plus a minute; Task 2's `records.test.ts`).
 
 Run: `pnpm --filter @lxfoundry/stint-e2e test facilitator.test.ts`
 Expected: PASS, every test of the file. These run Task 4's records on the local network: on a tree without Task 4, the
-first test fails at its `/verify` (`simulation_failed`), and the second charges the buyer once and refuses the duplicate,
-or settles it as a second transaction that the chain refuses.
+first test fails at its `/verify` (`simulation_failed`), the second charges the buyer once and refuses the duplicate, or
+settles it as a second transaction that the chain refuses, and the third gets `simulation_failed` instead of
+`invalid_payment_requirements`, since the payload is verified as new.
 
 - [ ] **Step 2: Commit**
 
@@ -2594,8 +2895,9 @@ In `e2e/src/targets/local.ts`, add `import { createFacilitatorClient } from "@lx
 
 and in the object `context()` returns, after `direct,`, add `facilitator: facilitatorApi,`.
 
-In `e2e/src/targets/devnet.ts`, add the same import, and after the `catch` block that follows `services = await
-startServices({ … })`, add:
+In `e2e/src/targets/devnet.ts`, add `import { createFacilitatorClient } from "@lxfoundry/stint-gate";` after
+`import { associatedTokenAddress } from "@lxfoundry/stint-x402";`, and after the `catch` block that follows `services =
+await startServices({ … })`, add:
 
 ```ts
   // The facilitator keeps its address when it restarts, so one client serves every context.
@@ -2835,8 +3137,9 @@ Spec section 12.7: "The same payment sent twice → the same session reported tw
 answer changes nothing at the gate (its idle timer keeps running from the first)". The second payment is a retry: the
 facilitator answers it from its record (Task 4), and the gate, which tracks the session already, answers `201` with the
 session's state and touches no timer (spec section 7.3). Nobody connects, so the gate's idle timer closes the session
-`idleCloseSeconds` after the first answer; a timer started again by the second answer would close it later, and the
-scenario tells the two apart by when the close lands.
+`idleCloseSeconds` after the first answer. A timer started again by the second answer could not fire before
+`idleCloseSeconds` after the second payment was sent, so the scenario looks for the close only until then, on the wall
+clock alone: a gate that restarts the timer fails it every time, however the chain's clock runs.
 
 **Files:**
 - Create: `conformance/src/scenarios/14-same-payment-twice.ts`
@@ -2866,9 +3169,9 @@ const SECOND_BEFORE_IDLE_MS = 3_000;
 /**
  * Scenario 14 (spec §12.7): the same payment sent twice. Both answers report the one session, from the one transaction,
  * and the buyer is charged once. The second answer changes nothing at the gate (spec §7.3): nobody connects, so the idle
- * timer that the first open started closes the session `idleCloseSeconds` after the first answer. One started again by
- * the second answer would fire `idleCloseSeconds` after it, at the earliest `2 x idleCloseSeconds - 3 s` after the first,
- * and the close lands well before that.
+ * timer that the first open started closes the session `idleCloseSeconds` after the first answer, 3 s after the second
+ * payment. A timer started again by the second answer could not fire before `idleCloseSeconds` after that payment was
+ * sent: the close must be found before then.
  */
 export async function samePaymentTwice(context: ScenarioContext): Promise<void> {
   const { required, offer } = await openOffers(context.gateUrl);
@@ -2886,6 +3189,7 @@ export async function samePaymentTwice(context: ScenarioContext): Promise<void> 
   const stored = await readOpenedSession(context, payment.session);
 
   await sleep(Math.max(0, answeredAt + idleMs - SECOND_BEFORE_IDLE_MS - Date.now()));
+  const secondSentAt = Date.now();
   const second = await sendPayment(url, payment.header);
   expectEqual(second.status, 201, "the same payment sent again is answered as the first");
   expectEqual(second.body.session, payment.session, "the second answer reports the same session");
@@ -2894,12 +3198,18 @@ export async function samePaymentTwice(context: ScenarioContext): Promise<void> 
   expectEqual(second.paymentResponse?.transaction, first.paymentResponse.transaction, "both answers name the one transaction");
   expectEqual(await usdcBalance(context.rpc, buyer.usdcAccount), before - BigInt(offer.amount), "the buyer is charged once");
 
-  const found = await awaitClose(context.rpc, payment.session, context.readRetry, idleMs + 10_000, "the idle close is on-chain", closePollMs(context.target));
-  const laterTimerMs = answeredAt + 2 * idleMs - SECOND_BEFORE_IDLE_MS;
-  expectTrue(
-    Number(found.event.at) * 1_000 < laterTimerMs - 1_000,
-    "the session is closed by the idle timer of the first answer: the second started none",
+  // The earliest a timer started by the second answer could fire. A look that began before it and found the close after
+  // it is not enough: the close must be found by then.
+  const secondTimerMs = secondSentAt + idleMs;
+  const found = await awaitClose(
+    context.rpc,
+    payment.session,
+    context.readRetry,
+    Math.max(0, secondTimerMs - Date.now()),
+    "the session is closed by the idle timer of the first answer, before one started by the second could fire",
+    closePollMs(context.target),
   );
+  expectTrue(Date.now() < secondTimerMs, "the close is found before a timer started by the second answer could fire");
   await expectRefunded(context, { signature: found.signature, session: payment.session, stored, buyer });
 }
 ```
@@ -3338,7 +3648,7 @@ If a run fails:
 | Symptom | Likely cause | What to do |
 |---|---|---|
 | Scenario 14: "the same payment sent again is answered as the first: expected 201, got 503" | The facilitator answered `already_processed`: it lost its record of the first settlement, which happens only if it restarted between the two payments | Check the facilitator's log for a restart; rerun once |
-| Scenario 14: "the session is closed by the idle timer of the first answer" fails | The gate's idle close took more than `idleCloseSeconds - 4 s` to land after its timer fired, or devnet's clock ran ahead of the harness's | Record the close's `at` and the scenario's duration in the pull request and stop. Do not lower `SECOND_BEFORE_IDLE_MS` |
+| Scenario 14: "the session is closed by the idle timer of the first answer … not within" | The gate's idle close took more than about 7 s from its timer to the scenario's finding it: its settlement was slow, or the provider's list of the session's signatures lagged | Rerun once; if it repeats, record the scenario's duration in the pull request and stop. Do not lower `SECOND_BEFORE_IDLE_MS`, which would let a restarted timer pass |
 | Scenario 19: "no session account on-chain" fails | A transaction was submitted for a `/verify`, which must never happen | Stop: this is a defect of the facilitator, not of devnet |
 | Scenario 5, 6 or 13: `expected 402, got 502` | The gate's request to the facilitator failed (rate limits on the provider's endpoint) | Rerun once; if it repeats, record the error in the pull request and stop |
 
@@ -3351,7 +3661,7 @@ sentence that lists the scenarios passing on devnet (with stage 7 merged: `Scena
 In the section "Status", replace:
 
 ```markdown
-Thirteen of the 35 end-to-end
+which moves its end; a session whose paid time has run out cannot be extended. Thirteen of the 35 end-to-end
 scenarios of the [specification](docs/specs/stint-system.md) (section 12.7) pass on a local network and on devnet,
 and the run report lists the other 22 as pending. Not built yet: refusals of bad payments and
 settlement records, the facilitator's rate limits, and resilience across restarts.
@@ -3360,15 +3670,17 @@ settlement records, the facilitator's rate limits, and resilience across restart
 with:
 
 ```markdown
-The facilitator refuses a payment that does not match its offer with its reason before anything is signed, and keeps a
-record of each settlement, so that a payment sent twice is settled once and answered twice. Twenty-one of the 35
-end-to-end scenarios of the [specification](docs/specs/stint-system.md) (section 12.7) pass on a local network and on
-devnet, and the run report lists the other 14 as pending. Not built yet: a store
-for settlement records that survives a restart of the facilitator (it keeps them in memory), the gate's watch of a
-payment whose settlement is pending, the facilitator's rate limits, and resilience across restarts.
+which moves its end; a session whose paid time has run out cannot be extended. The facilitator refuses a payment that
+does not match its offer with its reason before anything is signed, and keeps a record of each settlement, so that a
+payment sent twice is settled once and answered twice. Twenty-one of the 35 end-to-end scenarios of the
+[specification](docs/specs/stint-system.md) (section 12.7) pass on a local network and on devnet, and the run report
+lists the other 14 as pending. Not built yet: a store for settlement records that survives a restart of the
+facilitator (it keeps them in memory), the gate's watch of a payment whose settlement is pending, the facilitator's
+rate limits, and resilience across restarts.
 ```
 
-(If the README's line breaks differ, replace the same sentences wherever they break.)
+(If the README's line breaks differ, replace the same sentences wherever they break, and rewrap the paragraph at the
+width of the lines around it.)
 
 ```bash
 git add README.md
@@ -3396,11 +3708,16 @@ git commit -m "Record the scenarios of payment refusals and settlement records t
 Each states a fact the code relies on:
 - §5.4, the retry sentence (Task 4): a recorded payload is answered from its record; one whose message is only claimed,
   with no transaction recorded yet, is verified as any other, since nothing has been submitted;
-- §5.5, "How a retry is answered" (Task 4): a duplicate that reaches the instance settling its message waits for that
-  settlement and gets its answer;
+- §5.5, "How a retry is answered" (Task 4): a retry is answered from its record once the transaction is recorded; a
+  message only claimed has not been submitted, so `/verify` verifies it and a `/settle` of it is a duplicate in flight,
+  which waits for that settlement and gets its answer; the lookup of a recorded transaction searches the node's
+  transaction history as well as its recent statuses;
 - §5.5, after "If step 2, 3 or 4 refuses the payload, the claim is released." (Task 4): the claim is released as well
-  when the node refuses the transaction at its first submission; a node that reports it already processed has it, and
-  its outcome is read by its ID; any other failure to submit is `settlement_pending`, with the record kept;
+  when the node refuses the transaction at its first submission with an error it returns before forwarding; a node that
+  reports it already processed has it, and its outcome is read by its ID; after any other failure to submit, the outcome
+  is waited for, the record is kept, and the answer is `settlement_pending` while the outcome is unknown;
+- §6.1, `POST /close` (Task 4): the sponsored close is submitted without a settlement record, since a close sent again
+  after one has landed is refused at verification (`unknown_session`);
 - §13 (Task 4): a store for settlement records that survives restarts and is shared by instances is not built; the
   facilitator takes one through its interface.
 
