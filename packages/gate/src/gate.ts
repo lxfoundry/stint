@@ -645,7 +645,11 @@ export function createGate<U>(config: GateConfig<U>): Gate {
    * `POST /sessions/:id/top-up` (spec §7.1): a 402 listing top-up offers, then the payment. Only a session this gate tracks
    * can be topped up. Once its end timer has fired, the session cannot be extended (spec §4.3): the answer is a 402 with
    * `session_expired` and offers for a new session, as a connect gets then. The durations that fit come from the chain,
-   * since a top-up made elsewhere may have moved the deposit (spec §5.2).
+   * since a top-up made elsewhere may have moved the deposit (spec §5.2). A request that carries a payment is refused
+   * `400` only for a duration outside 1 to `maxSeconds`, and the duration it accepts need not fit the deposit read now: a
+   * payment sent again after its transaction landed is answered from the facilitator's record, and is already in that
+   * deposit, and the facilitator refuses a new one that does not fit (`invalid_amount`). The offers, a refusal's
+   * included, are the durations that fit.
    *
    * Once the top-up settles, the new end is the `paid_until` of the session as it stands after the settlement's
    * transaction, read from a node that shows that transaction (`readSessionAfter`), and asked again within `readRetry`
@@ -667,28 +671,34 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     if (!sameSession(tracked, stored)) {
       return sendJson(response, 404, { error: "unknown_session" });
     }
+    const header = request.headers[HEADERS.paymentSignature.toLowerCase()];
+    // With a payment, the duration is checked here only against the bounds that hold whatever the deposit, those of an
+    // empty one: a payment sent again after its transaction landed is answered from the facilitator's record, and its
+    // deposit is already in the one read now. The facilitator refuses a new one that does not fit (`invalid_amount`).
+    const deposited = typeof header === "string" ? 0n : stored.deposited;
+    const fits = (deposit: bigint) => (seconds: number) => checkTopUpDuration(config.terms, deposit, seconds).ok;
     const requested = url.searchParams.get("seconds");
-    const durations =
-      requested === null ? menu.filter((seconds) => checkTopUpDuration(config.terms, stored.deposited, seconds).ok) : [Number(requested)];
+    const durations = requested === null ? menu.filter(fits(deposited)) : [Number(requested)];
     // When no duration of the menu fits, the 400 states the bounds, so that the buyer can ask for one that does.
     const checks =
       durations.length === 0
-        ? [checkTopUpDuration(config.terms, stored.deposited, 0)]
-        : durations.map((seconds) => checkTopUpDuration(config.terms, stored.deposited, seconds));
+        ? [checkTopUpDuration(config.terms, deposited, 0)]
+        : durations.map((seconds) => checkTopUpDuration(config.terms, deposited, seconds));
     for (const check of checks) {
       if (!check.ok) return sendJson(response, 400, { error: "invalid_duration", minSeconds: check.minSeconds, maxSeconds: check.maxSeconds });
     }
 
     const resource = `${config.origin}/sessions/${session}/top-up`;
+    // Whether a payment comes or not, the offers are the durations that fit the deposit read now: none, when a duration
+    // asked for with a payment no longer fits.
     const offers = async () => {
       const base = await offerBase();
-      return durations.map((seconds) => buildTopUpOffer({ ...base, seconds, session }));
+      return durations.filter(fits(stored.deposited)).map((seconds) => buildTopUpOffer({ ...base, seconds, session }));
     };
     // A refusal because the session has run out offers a new session; any other offers the top-up again.
     const refusal = async (reason: string) =>
       reason === "session_expired" ? paymentRequired(response, menu, reason) : sendPaymentRequired(response, resource, await offers(), reason);
 
-    const header = request.headers[HEADERS.paymentSignature.toLowerCase()];
     if (typeof header !== "string") return sendPaymentRequired(response, resource, await offers());
     let payload: PaymentPayload;
     try {

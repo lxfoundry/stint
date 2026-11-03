@@ -621,7 +621,8 @@ Network identifiers: devnet `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`, mainnet
   - for a top-up, 1…(`maxSeconds` − ⌈`deposited` ÷ `rate`⌉), the most that keeps
     `deposited + rate × seconds` within `rate × maxSeconds` (§5.4); `minSeconds` does not apply.
 - A duration outside these bounds is refused with `400 invalid_duration`, with the bounds stated
-  in the body.
+  in the body. A top-up request that carries its payment is the exception: the gate leaves the fit
+  to the deposit to the facilitator (section 7.1).
 - **A client cannot deposit more than the `amount` of the entry it accepts.** To pay more it asks
   for a longer duration, picks a longer entry, or tops up.
 
@@ -939,7 +940,7 @@ sessions it opens with itself. The API key and the limits per key bound that.
 | Endpoint | Purpose | Responses |
 |---|---|---|
 | `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `202 {session, transaction}` while the settlement is pending; `400 invalid_duration` |
-| `POST /sessions/:id/top-up?seconds=N` | Top up | `402` (offers for this session; once the end timer has fired, or when the facilitator answers `session_expired`, the reason `session_expired` with offers for a new session); `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration`; `404` for a session this gate does not track |
+| `POST /sessions/:id/top-up?seconds=N` | Top up | `402` (offers for this session; once the end timer has fired, or when the facilitator answers `session_expired`, the reason `session_expired` with offers for a new session); `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration` (for a request that carries a payment, only a duration outside 1…`maxSeconds`: a payment sent again after it landed is already in the deposit, and is answered from the facilitator's record, and the facilitator refuses a new one that does not fit with `invalid_amount`); `404` for a session this gate does not track |
 | `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`, or `200 {transaction}` when the close is confirmed but its `Closed` event cannot be read; `202 {transaction}` while the settlement is pending (the client polls the status until `404`, for at most `closeWaitSeconds`: section 9.3); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
 | `GET /sessions/:id` | Status from the chain, public like the chain. Body: `session`, `paidUntil`, `startedAt`, `deposited`, `claimed`, `rate`, `minSeconds`, `maxSeconds`, a fresh `blockhash` with its `lastValidBlockHeight`, and, as estimates at the gate's session clock (section 7.3), `timeLeft`, `earned` (section 4.2), `due` (what a close then charges in total) and `refundable` (`deposited - max(claimed, due)`). `u64` values are decimal strings. The chain's clock decides the amounts (section 4.2). It works for a session the gate does not track yet. It reads the chain on every call and is not authenticated: a deployment rate-limits it like any public route | `200`; `404` for an address that holds no session, or a session with other terms (section 4.6) |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |

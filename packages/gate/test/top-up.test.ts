@@ -82,6 +82,19 @@ describe("the gate's top-up route (spec §7.1)", () => {
     expect(ofType("topUp")).toEqual([]);
   });
 
+  it("with a payment, answers 400 invalid_duration, before verifying it, only for a duration outside 1 to maxSeconds", async () => {
+    const { session } = await open();
+    const payload = await prepareTopUp(session, 10);
+    const verifications = h.calls.verify.length;
+
+    // The bounds that hold whatever the deposit, not the 90 s that this session's deposit leaves.
+    for (const seconds of [0, 121, 2.5]) {
+      expect(await sendTopUp(session, payload, seconds)).toMatchObject({ status: 400, body: { error: "invalid_duration", minSeconds: 1, maxSeconds: 120 } });
+    }
+    expect(h.calls.verify).toHaveLength(verifications);
+    expect(ofType("topUp")).toEqual([]);
+  });
+
   it("answers 404 for a session it does not track, for one whose account is gone, and for an id that is not an address", async () => {
     const { session: untracked } = await prepareOpen(); // on the fake chain, but never opened through this gate
     expect(await topUpOffers(untracked)).toMatchObject({ status: 404, body: { error: "unknown_session" } });
@@ -170,6 +183,24 @@ describe("the gate's top-up route (spec §7.1)", () => {
     expect(status).toBe(402);
     expect(body.error).toBe("invalid_amount");
     expect(accepts(body).map((entry) => [entry.extra?.action, entry.extra?.seconds])).toEqual([["topUp", 10]]);
+    expect(ofType("topUp")).toEqual([]);
+    expect(pendingDue(END_DUE)).toBeDefined();
+  });
+
+  it("leaves the fit of a new payment to the facilitator, and answers its invalid_amount with the offers that fit the deposit", async () => {
+    const { session } = await open();
+    const payload = await prepareTopUp(session, 60);
+    h.sessions.set(session, { ...h.sessions.get(session)!, deposited: 80_000n }); // topped up elsewhere: 40 s of 120 left
+    h.verifyAnswer = { isValid: false, invalidReason: "invalid_amount" };
+
+    // From the menu: only 30 s still fits.
+    const fromMenu = await sendTopUp(session, payload, null);
+    expect(fromMenu).toMatchObject({ status: 402, body: { error: "invalid_amount" } });
+    expect(accepts(fromMenu.body).map((entry) => [entry.extra?.action, entry.extra?.seconds])).toEqual([["topUp", 30]]);
+    // Asked for by its duration: no offer for 60 s fits.
+    expect(await sendTopUp(session, payload, 60)).toMatchObject({ status: 402, body: { error: "invalid_amount", accepts: [] } });
+
+    expect(h.calls.verify.slice(-2)).toEqual([payload, payload]);
     expect(ofType("topUp")).toEqual([]);
     expect(pendingDue(END_DUE)).toBeDefined();
   });
@@ -275,6 +306,28 @@ describe("the gate's top-up route (spec §7.1)", () => {
     expect(pendingDue(EXTENDED_DUE)).toBeDefined();
     expect(h.timers.pending.filter((timer) => timer.dueMs > EXTENDED_DUE)).toEqual([]);
   });
+
+  it.each([
+    ["90 s, asked for by its duration, which fills maxSeconds", 90, 90],
+    ["60 s, from the menu", 60, null],
+  ] as const)(
+    "answers a top-up of %s, sent again after it landed, from the facilitator's record, though the deposit no longer leaves room for it",
+    async (_, seconds, asked) => {
+      const { session } = await open(); // paid for 30 s of 120
+      const payload = await prepareTopUp(session, seconds);
+      const untilMs = END_DUE + seconds * 1000;
+      expect((await sendTopUp(session, payload, asked)).body).toEqual({ paidUntil: untilMs / 1000 });
+
+      // Sent again: the deposit read now holds the first, and the facilitator answers success from its record.
+      const again = await sendTopUp(session, payload, asked);
+
+      expect(again).toMatchObject({ status: 200, body: { paidUntil: untilMs / 1000 } });
+      expect(ofType("topUp")).toEqual([payload, payload]);
+      expect(h.sessions.get(session)?.deposited).toBe(30_000n + BigInt(seconds) * 1_000n);
+      expect(pendingDue(untilMs)).toBeDefined();
+      expect(h.timers.pending.filter((timer) => timer.dueMs > untilMs)).toEqual([]);
+    },
+  );
 
   it("takes the new end from the session as the chain holds it once the top-up's transaction shows, a top-up made elsewhere included", async () => {
     const { session } = await open();

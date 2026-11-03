@@ -367,12 +367,13 @@ export function helpers(get: () => Harness) {
     return { x402Version: 2, resource: required.resource, accepted: offer, payload: { type: "topUp", transaction } };
   }
 
+  /** Sends `payload` to the top-up route of `session`, asking for `seconds`, or, when `seconds` is null, for no duration. */
   async function sendTopUp(
     session: Address,
     payload: PaymentPayload,
-    seconds = 10,
+    seconds: number | null = 10,
   ): Promise<{ status: number; body: Record<string, unknown>; paymentResponse: string | null }> {
-    const response = await fetch(topUpUrl(session, seconds), {
+    const response = await fetch(topUpUrl(session, seconds ?? undefined), {
       method: "POST",
       headers: { "PAYMENT-SIGNATURE": encodePaymentSignatureHeader(payload) },
     });
