@@ -655,8 +655,8 @@ git commit -m "Add the settlement store, its in-memory implementation and the re
 Today a failure of `sendTransaction` is answered `simulation_failed` whatever it was. Spec section 5.5 needs three cases
 told apart:
 - the node refused the transaction with one of the errors a node returns before it forwards one (a failed preflight, a
-  signature that does not verify, an unsupported version, an unhealthy node, invalid parameters, and the like): it did
-  not take it, so the payload may come again;
+  signature that does not verify, an unhealthy node, invalid parameters, and the like): it did not take it, so the
+  payload may come again;
 - the node reports the message already processed (S16): it has it, and its outcome is read by its ID;
 - anything else, a request with no answer or another error (a proxy or a load balancer can answer one after it has
   forwarded the transaction): the node may have taken it, so its outcome is waited for as for a transaction it took, and
@@ -835,9 +835,12 @@ describe("sendAndConfirm (spec §5.5)", () => {
       kind: "settled",
       response: { success: true, amount: "30000" },
     });
-    // It had not, and the blockhash expires: it can no longer land.
+    // It had not, and the blockhash expires: it can no longer land. The answer keeps why the send failed.
     const neverTaken = fakeRpc({ send: lost, statuses: [notLanded], transactions: [() => null], valid: [() => false] });
-    expect(await sendAndConfirm(ctx(neverTaken.rpc), signed())).toMatchObject({ kind: "settled", response: { errorReason: "blockhash_expired" } });
+    expect(await sendAndConfirm(ctx(neverTaken.rpc), signed())).toMatchObject({
+      kind: "settled",
+      response: { errorReason: "blockhash_expired", errorMessage: "fetch failed" },
+    });
     // Neither shows before the wait ends: still unknown, with the send's error.
     const undecided = fakeRpc({ send: lost, statuses: [notLanded], transactions: [() => null] });
     expect(await sendAndConfirm(ctx(undecided.rpc), signed())).toMatchObject({
@@ -1094,7 +1097,7 @@ export async function sendAndConfirm(
   try {
     const outcome = await waitForConfirmation(ctx.rpc, signed.signature, signed.blockhash, ctx.confirmTimeoutMs);
     if (outcome === "pending") return { kind: "pending", response: failure(ctx, signed, "settlement_pending", sendError) };
-    if (outcome === "expired") return { kind: "settled", response: failure(ctx, signed, "blockhash_expired") };
+    if (outcome === "expired") return { kind: "settled", response: failure(ctx, signed, "blockhash_expired", sendError) };
   } catch (error) {
     if (error instanceof TransactionFailedError) return { kind: "settled", response: failure(ctx, signed, "simulation_failed", message(error)) };
     return { kind: "pending", response: failure(ctx, signed, "settlement_pending", message(error)) };
@@ -1821,7 +1824,7 @@ export function createSettlement(ctx: FacilitatorContext, store: SettlementStore
 ```
 
 Run: `pnpm --filter @lxfoundry/stint-facilitator test settlement.test.ts`
-Expected: PASS. The server still imports `settlePayment`, so the package does not type-check until Step 4.
+Expected: PASS. `server.ts` and `index.ts` still import `settlePayment`, so the package does not type-check until Step 4.
 
 - [ ] **Step 3: Write the failing tests of the server's wiring**
 
@@ -1949,8 +1952,8 @@ In `startFacilitator`, after `const sponsoredClose = createSponsoredCloser(ctx);
   let pruning: ReturnType<typeof setInterval> | undefined;
 ```
 
-In `handle`, replace the block from `const key = request.headers.authorization?.replace(/^Bearer /, "");` to
-`return sendJson(response, 200, settled);` with:
+In `handle`, replace the block from `const key = request.headers.authorization?.replace(/^Bearer /, "");` to the first
+`return sendJson(response, 200, settled);` after it (the second one, further down, answers `POST /close`) with:
 
 ```ts
       const key = request.headers.authorization?.replace(/^Bearer /, "");
@@ -2022,7 +2025,21 @@ Expected: PASS, the two tests of Step 3 included, and no type error anywhere: no
 
 - [ ] **Step 5: State the retry rules, the release rule, the sponsored close and the store in the spec**
 
-In `docs/specs/stint-system.md`, section 5.4, replace:
+In `docs/specs/stint-system.md`, section 5.5, in the list that describes the response, replace:
+
+```markdown
+- `settlement_pending` is a non-final `errorReason`, accompanied by a non-empty `transaction`.
+```
+
+with:
+
+```markdown
+- `settlement_pending` is a non-final `errorReason`, accompanied by a non-empty `transaction`. The one exception needs
+  a store shared by instances: an instance that finds the message claimed by another, which has not recorded its
+  transaction yet, has no transaction to give, and answers with an empty one.
+```
+
+In section 5.4, replace:
 
 ```markdown
 **A payload whose message this facilitator has claimed or recorded** (a retry: see Idempotency in
@@ -2092,7 +2109,7 @@ with:
 ```markdown
 If step 2, 3 or 4 refuses the payload, the claim is released. So is it when the node refuses the transaction at its
 first submission with an error that a node returns before it forwards a transaction (a failed preflight, a signature
-that does not verify, an unsupported version, an unhealthy node, invalid parameters): it did not take the transaction.
+that does not verify, an unhealthy node, invalid parameters): it did not take the transaction.
 A node that reports it already processed has it (S16): its outcome is read by its ID. After any other failure to
 submit, such as a request with no answer or another error, which a proxy can return after forwarding, the node may have
 taken the transaction: the facilitator waits for its outcome as for one it submitted, keeps the record, and answers
@@ -2192,14 +2209,16 @@ In `e2e/test/facilitator.test.ts`, inside `describe("facilitator on the local ne
 
 These sessions are left open; the stack's sweeper closes them once their paid time has run out, or the stack stops first.
 The other cases that spec section 12.1 lists for this layer are covered by unit tests only: a retry with another API key
-(the local stack has one API key; Task 4's `settlement.test.ts` and `server.test.ts`) and a record's expiry (it takes a
-blockhash's lifetime plus a minute; Task 2's `records.test.ts`).
+(the local stack has one API key; Task 4's `settlement.test.ts`, while its `server.test.ts` checks that the store
+receives the key's digest) and a record's expiry (it takes a blockhash's lifetime plus a minute; Task 2's
+`records.test.ts`).
 
 Run: `pnpm --filter @lxfoundry/stint-e2e test facilitator.test.ts`
-Expected: PASS, every test of the file. These run Task 4's records on the local network: on a tree without Task 4, the
-first test fails at its `/verify` (`simulation_failed`), the second charges the buyer once and refuses the duplicate, or
-settles it as a second transaction that the chain refuses, and the third gets `simulation_failed` instead of
-`invalid_payment_requirements`, since the payload is verified as new.
+Expected: PASS, every test of the file. These run Task 4's records on the local network. On a tree without Task 4, the
+first test fails at its `/verify` (`simulation_failed`), and the third gets `simulation_failed` instead of
+`invalid_payment_requirements`, since the payload is verified as new. The second passes there too: the chain itself takes
+two identical sends as one transaction (S16). That two settlements in flight share one verification, one signature and
+one submission is shown by Task 4's `settlement.test.ts`.
 
 - [ ] **Step 2: Commit**
 
@@ -3139,14 +3158,17 @@ facilitator answers it from its record (Task 4), and the gate, which tracks the 
 session's state and touches no timer (spec section 7.3). Nobody connects, so the gate's idle timer closes the session
 `idleCloseSeconds` after the first answer. A timer started again by the second answer could not fire before
 `idleCloseSeconds` after the second payment was sent, so the scenario looks for the close only until then, on the wall
-clock alone: a gate that restarts the timer fails it every time, however the chain's clock runs.
+clock alone: a gate that restarts the timer fails it every time, however the chain's clock runs. The second payment is
+sent 2 s before the first timer fires, which leaves the first timer's close `idleCloseSeconds - 2 s` (8 s with the
+harness's 10 s) to be settled and found; the scenario looks every second, on any target, so that a network whose closes
+take seconds to settle still fits.
 
 **Files:**
 - Create: `conformance/src/scenarios/14-same-payment-twice.ts`
 - Modify: `conformance/src/catalogue.ts`, `conformance/test/catalogue.test.ts`, `e2e/test/local-target.test.ts`
 
 **Interfaces:**
-- Consumes: `openOffers`, `openPayment`, `openUrl`, `sendPayment` (Task 7); `usdcBalance`, `closePollMs` (helpers);
+- Consumes: `openOffers`, `openPayment`, `openUrl`, `sendPayment` (Task 7); `usdcBalance` (helpers);
   `readOpenedSession`, `expectRefunded` (`conformance/src/sessions.ts`); `awaitClose` (`conformance/src/closes.ts`);
   `expectEqual`, `expectTrue`, `sleep`.
 - Produces: `samePaymentTwice(context: ScenarioContext): Promise<void>`.
@@ -3158,18 +3180,25 @@ Create `conformance/src/scenarios/14-same-payment-twice.ts`:
 ```ts
 import { expectEqual, expectTrue, sleep } from "../assert.js";
 import { awaitClose } from "../closes.js";
-import { closePollMs, usdcBalance } from "../helpers.js";
+import { usdcBalance } from "../helpers.js";
 import { openOffers, openPayment, openUrl, sendPayment } from "../payments.js";
 import { expectRefunded, readOpenedSession } from "../sessions.js";
 import type { ScenarioContext } from "../types.js";
 
-/** How long before the first idle timer fires the second payment is sent. */
-const SECOND_BEFORE_IDLE_MS = 3_000;
+/**
+ * How long before the first idle timer fires the second payment is sent: long enough for the gate to answer it before
+ * that timer's close lands, short enough to leave that close most of `idleCloseSeconds` to be found. It does not change
+ * what the check catches: a timer started by the second answer cannot fire before `idleCloseSeconds` after it, whatever
+ * this is.
+ */
+const SECOND_BEFORE_IDLE_MS = 2_000;
+/** How often the scenario looks for the idle close: every second on any target, so that the close is found in its window. */
+const CLOSE_POLL_MS = 1_000;
 
 /**
  * Scenario 14 (spec §12.7): the same payment sent twice. Both answers report the one session, from the one transaction,
  * and the buyer is charged once. The second answer changes nothing at the gate (spec §7.3): nobody connects, so the idle
- * timer that the first open started closes the session `idleCloseSeconds` after the first answer, 3 s after the second
+ * timer that the first open started closes the session `idleCloseSeconds` after the first answer, 2 s after the second
  * payment. A timer started again by the second answer could not fire before `idleCloseSeconds` after that payment was
  * sent: the close must be found before then.
  */
@@ -3207,7 +3236,7 @@ export async function samePaymentTwice(context: ScenarioContext): Promise<void> 
     context.readRetry,
     Math.max(0, secondTimerMs - Date.now()),
     "the session is closed by the idle timer of the first answer, before one started by the second could fire",
-    closePollMs(context.target),
+    CLOSE_POLL_MS,
   );
   expectTrue(Date.now() < secondTimerMs, "the close is found before a timer started by the second answer could fire");
   await expectRefunded(context, { signature: found.signature, session: payment.session, stored, buyer });
@@ -3648,7 +3677,8 @@ If a run fails:
 | Symptom | Likely cause | What to do |
 |---|---|---|
 | Scenario 14: "the same payment sent again is answered as the first: expected 201, got 503" | The facilitator answered `already_processed`: it lost its record of the first settlement, which happens only if it restarted between the two payments | Check the facilitator's log for a restart; rerun once |
-| Scenario 14: "the session is closed by the idle timer of the first answer … not within" | The gate's idle close took more than about 7 s from its timer to the scenario's finding it: its settlement was slow, or the provider's list of the session's signatures lagged | Rerun once; if it repeats, record the scenario's duration in the pull request and stop. Do not lower `SECOND_BEFORE_IDLE_MS`, which would let a restarted timer pass |
+| Scenario 14: "the session is closed by the idle timer of the first answer, before one started by the second could fire: not within …", or "the close is found before a timer started by the second answer could fire: not so" | The gate's idle close took more than about 8 s, from its timer to the scenario's finding it: its settlement through the facilitator was slow, or the provider's list of the session's signatures lagged | Rerun once. If it repeats, lower `SECOND_BEFORE_IDLE_MS` in `conformance/src/scenarios/14-same-payment-twice.ts` to `1_000`, which widens the window by 1 s without weakening the check, as long as the gate answers the second payment within that second; record the change and both runs in the pull request |
+| Scenario 14: "the same payment sent again is answered as the first: expected 201, got 404" | The first timer's close had landed before the gate answered the second payment | Raise `SECOND_BEFORE_IDLE_MS` back to `3_000` and rerun; record it in the pull request |
 | Scenario 19: "no session account on-chain" fails | A transaction was submitted for a `/verify`, which must never happen | Stop: this is a defect of the facilitator, not of devnet |
 | Scenario 5, 6 or 13: `expected 402, got 502` | The gate's request to the facilitator failed (rate limits on the provider's endpoint) | Rerun once; if it repeats, record the error in the pull request and stop |
 
@@ -3706,6 +3736,8 @@ git commit -m "Record the scenarios of payment refusals and settlement records t
 ## Spec edits made by this stage
 
 Each states a fact the code relies on:
+- §5.5, the response's `settlement_pending` (Task 4): its transaction is empty in one case, which needs a store shared
+  by instances: a message claimed by another instance that has not recorded its transaction yet;
 - §5.4, the retry sentence (Task 4): a recorded payload is answered from its record; one whose message is only claimed,
   with no transaction recorded yet, is verified as any other, since nothing has been submitted;
 - §5.5, "How a retry is answered" (Task 4): a retry is answered from its record once the transaction is recorded; a
