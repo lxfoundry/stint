@@ -174,8 +174,8 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
     rentPayer: rentPayer.address,
     sweepOnce: () => sweeper.sweepOnce(),
     stop: async () => {
-      // The sweeper first: a close it has sent is waited for before the server goes.
       clearInterval(pruning);
+      // The sweeper first: a close it has sent is waited for before the server goes.
       await sweeper.stop();
       await new Promise<void>((resolve) => {
         server.closeAllConnections();
