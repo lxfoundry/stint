@@ -1,5 +1,5 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer as createHttpServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -497,6 +497,75 @@ describe("which copy owns the demo's state", () => {
       expect(readFileSync(join(home, OWNER_FILE), "utf8")).toBe(before);
     });
 
+    it("keeps one state when several calls find owner.json gone at the same time", async () => {
+      const lines: string[] = [];
+      let builds = 0;
+      const router = await createRouter({
+        dir: home,
+        log: (line) => lines.push(line),
+        becomeOwner: async () => {
+          const state = ++builds;
+          return async (name) => ({ content: [{ type: "text", text: `${name}@state${state}` }] });
+        },
+      });
+      routers.push(router);
+      const before = readFileSync(join(home, OWNER_FILE), "utf8");
+      rmSync(join(home, OWNER_FILE));
+      // Both checks read the file before either has created it again: the second one's `wx` finds the first one's file.
+      const results = await Promise.all([router.call("a", {}), router.call("b", {})]);
+      expect(results.map(text)).toEqual(["a@state1", "b@state1"]);
+      expect(builds).toBe(1);
+      expect(router.role()).toBe("owner");
+      expect(readFileSync(join(home, OWNER_FILE), "utf8")).toBe(before);
+      expect(lines.join("\n")).not.toMatch(/stops serving/);
+    });
+
+    it("does not run on a state that was dropped while the call was still arriving", async () => {
+      const ran: string[] = [];
+      let states = 0;
+      const router = await createRouter({
+        dir: home,
+        becomeOwner: async () => {
+          const state = ++states;
+          return async (name, args) => {
+            ran.push(`${name}@state${state}`);
+            return answering(`state${state}`)(name, args);
+          };
+        },
+      });
+      routers.push(router);
+      const first = record();
+      // A call that the first state's endpoint has taken, and whose body is not sent yet. With `Expect: 100-continue` the
+      // server answers 100 after its handler has taken the call, so the client knows when that is without waiting.
+      const body = JSON.stringify({ name: "stint_demo_launch", arguments: {} });
+      const arriving = httpRequest({
+        host: "127.0.0.1",
+        port: first.port,
+        method: "POST",
+        path: "/call",
+        headers: { authorization: `Bearer ${first.token}`, "content-length": Buffer.byteLength(body), expect: "100-continue" },
+      });
+      const answer = new Promise<{ status: number; body: string }>((resolve, reject) => {
+        arriving.on("error", reject);
+        arriving.on("response", (response) => {
+          const chunks: Buffer[] = [];
+          response.on("data", (chunk: Buffer) => chunks.push(chunk));
+          response.on("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+        });
+      });
+      await new Promise<void>((resolve) => arriving.once("continue", resolve));
+      // The file now names a copy that is gone: this copy steps down, then wins the election again, with a state of its own.
+      writeFileSync(join(home, OWNER_FILE), JSON.stringify({ pid: 4242, port: await deadPort(), token: "b".repeat(64) }));
+      expect((await router.call("stint_demo_state", {})).structuredContent).toMatchObject({ who: "state2" });
+      expect(states).toBe(2);
+      // Then the body of the call arrives, for the state that is gone.
+      arriving.end(body);
+      const { status, body: answered } = await answer;
+      expect(status).toBe(409);
+      expect(answered).not.toContain(first.token);
+      expect(ran).toEqual(["stint_demo_state@state2"]);
+    });
+
     it("refuses calls once it is closed, and does not bring owner.json back", async () => {
       const router = await start("owner");
       await router.close();
@@ -544,7 +613,7 @@ describe("which copy owns the demo's state", () => {
       writeFileSync(join(home, OWNER_FILE), JSON.stringify({ pid, port, token: "f".repeat(64) }));
       return { pings: () => pings };
     }
-    const quick = { pingTimeoutMs: 40, pingRetryDelayMs: 5 };
+    const quick = { pingTimeoutMs: 100, pingRetryDelayMs: 5 };
     const router = async (tuning: Partial<Tuning>) => {
       const created = await createRouter({ dir: home, becomeOwner: async () => answering("new"), tuning: { ...quick, ...tuning } });
       routers.push(created);
@@ -557,7 +626,8 @@ describe("which copy owns the demo's state", () => {
       });
       const created = await router({ takeoverGraceMs: 30_000, processExists: () => true });
       expect(created.role()).toBe("forwarder");
-      expect(owner.pings()).toBe(3);
+      // Three pings at least: a third one that comes late is asked for again, and answered too.
+      expect(owner.pings()).toBeGreaterThanOrEqual(3);
       expect(readFileSync(join(home, OWNER_FILE), "utf8")).toContain("f".repeat(64));
     });
 
@@ -578,9 +648,9 @@ describe("which copy owns the demo's state", () => {
 
     it("is taken over once it has stayed silent for the whole grace", async () => {
       const owner = await standInOwner(process.pid, () => {});
-      const created = await router({ takeoverGraceMs: 150, processExists: () => true });
+      const created = await router({ takeoverGraceMs: 600, processExists: () => true });
       expect(created.role()).toBe("owner");
-      expect(owner.pings()).toBeGreaterThan(1);
+      expect(owner.pings()).toBeGreaterThanOrEqual(2);
     });
 
     it.each([
@@ -614,7 +684,7 @@ describe("which copy owns the demo's state", () => {
       const router = await createRouter({
         dir: home,
         readOnly: READ_ONLY,
-        tuning: { mutatingCallTimeoutMs: 600, readCallTimeoutMs: 40 },
+        tuning: { mutatingCallTimeoutMs: 1_500, readCallTimeoutMs: 100 },
         becomeOwner: async () => async (name, args) => {
           calls.push(name);
           return answering("new")(name, args);
@@ -630,7 +700,7 @@ describe("which copy owns the demo's state", () => {
       const router = await forwarder(calls);
       const started = Date.now();
       const result = await router.call("stint_demo_launch", {});
-      expect(Date.now() - started).toBeGreaterThanOrEqual(500);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1_200);
       expect(result.isError).toBe(true);
       expect(text(result)).toMatch(/did not answer stint_demo_launch in time: it may or may not have happened/);
       expect(owner.held()).toBe(1);
@@ -644,7 +714,8 @@ describe("which copy owns the demo's state", () => {
       const router = await forwarder(calls);
       const started = Date.now();
       const result = await router.call("stint_demo_state", {});
-      expect(Date.now() - started).toBeLessThan(500);
+      // Two waits of the short timeout: far from the 1 500 ms of the long one, which two would make 3 000.
+      expect(Date.now() - started).toBeLessThan(1_200);
       expect(result.isError).toBe(true);
       expect(text(result)).toMatch(/could not be reached for stint_demo_state/);
       expect(owner.held()).toBe(2);

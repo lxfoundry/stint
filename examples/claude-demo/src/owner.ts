@@ -363,25 +363,40 @@ export async function createRouter(options: RouterOptions): Promise<Router> {
     }
   }
 
-  /** Whether this copy may run a call: `owner.json` still names it. If not, it steps down; if it is gone, it takes it back. */
-  async function stillOwner(): Promise<boolean> {
-    const mine = ours;
+  const names = (read: Read, term: OwnerRecord) => read.kind === "record" && read.record.pid === term.pid && read.record.token === term.token;
+
+  /**
+   * Whether this copy may run a call for the state of `term` (the record it created when it won the election that built
+   * that state): `owner.json` still names it. If not, it steps down; if it is gone, it takes it back. A call that took the
+   * state of an earlier term is refused once there is a later one, even if the later one's file is there.
+   */
+  async function stillOwner(term: OwnerRecord): Promise<boolean> {
     if (closed) throw new Error("This copy of the server has shut down");
-    if (role !== "owner" || !mine) return false;
+    if (role !== "owner" || ours !== term) return false;
     const seen = await readRecord(path, tuning);
-    if (role !== "owner" || ours !== mine) return false;
-    if (seen.kind === "record" && seen.record.pid === mine.pid && seen.record.token === mine.token) return true;
-    // Nobody has the file: the first to create it holds the state, and that may still be this copy.
-    if (seen.kind === "missing" && tryCreate(path, mine)) return true;
+    if (role !== "owner" || ours !== term) return false;
+    if (names(seen, term)) return true;
+    if (seen.kind === "missing") {
+      // Nobody has the file: the first to create it holds the state, and that may still be this copy.
+      if (tryCreate(path, term)) return true;
+      // Someone created it since it was read. If it is this copy (another call checked at the same time, and was first), nothing changed.
+      if (names(readOnce(path), term)) return true;
+    }
     stepDown();
     return false;
   }
 
   async function elect(): Promise<void> {
     for (let attempt = 1; attempt <= 2; attempt++) {
-      const mine = await startEndpoint({ handler: () => handler, fence: stillOwner, log });
+      // The endpoint serves the state of the term it was started for, and checks the file for that term only.
+      const term: { record?: OwnerRecord } = {};
+      const mine = await startEndpoint({
+        handler: () => (term.record && ours === term.record ? handler : undefined),
+        fence: () => (term.record ? stillOwner(term.record) : Promise.resolve(false)),
+        log,
+      });
       let created: boolean;
-      const record: OwnerRecord = { pid: process.pid, port: mine.port, token: mine.token };
+      const record: OwnerRecord = (term.record = { pid: process.pid, port: mine.port, token: mine.token });
       try {
         created = tryCreate(path, record);
       } catch (error) {
@@ -480,9 +495,10 @@ export async function createRouter(options: RouterOptions): Promise<Router> {
 
   /** Runs the call here, if this copy is the owner and `owner.json` still says so; `undefined` otherwise. */
   async function runHere(name: string, args: Record<string, unknown>): Promise<CallToolResult | undefined> {
-    if (role !== "owner" || !handler) return undefined;
+    const term = ours;
+    if (role !== "owner" || !term || !handler) return undefined;
     const run = await handler;
-    return (await stillOwner()) ? run(name, args) : undefined;
+    return (await stillOwner(term)) ? run(name, args) : undefined;
   }
 
   const unknownOutcome = (name: string, failure: ForwardError): CallToolResult => {
