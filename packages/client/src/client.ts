@@ -533,8 +533,10 @@ export function createStintClient(options: ClientOptions): StintClient {
           if (refusedByNode(error)) return { kind: "next", reason: `the client's own close failed (${describeError(error)})` };
           throw error;
         }
+        // The wait is given the time left, in place of its own default; `within` still ends it if a read hangs.
+        const left = Math.max(0, giveUpAt - Date.now());
         const confirmation =
-          (await within(waitForConfirmation(rpc, signature, lifetime.blockhash), giveUpAt - Date.now())) ?? `not confirmed within ${closeRequestTimeoutMs} ms`;
+          (await within(waitForConfirmation(rpc, signature, lifetime.blockhash, left), left)) ?? `not confirmed within ${closeRequestTimeoutMs} ms`;
         if (confirmation !== "confirmed") {
           const still = confirmation === "expired" ? {} : { pending: { transaction: signature, via: "unilateral" as const } };
           return { kind: "next", reason: `the client's own close ${signature} is ${confirmation}`, ...still };

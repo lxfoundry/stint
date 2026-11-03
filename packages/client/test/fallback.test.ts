@@ -13,6 +13,19 @@ import { StintError, createStintClient, type ClientOptions, type Policy, type St
 import { NETWORK, startTestGate, type TestGate } from "./gate.js";
 import { RENT_EXEMPT_LAMPORTS, fakeRpc, fakeSignature, signatureOf, type FakeNode } from "./rpc.js";
 
+/** The time limit each wait for a confirmation was given, its fourth argument: the scheme package's own function runs all the same. */
+const confirmationLimits = vi.hoisted((): (number | undefined)[] => []);
+vi.mock("@lxfoundry/stint-x402", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@lxfoundry/stint-x402")>();
+  return {
+    ...actual,
+    waitForConfirmation: (...args: Parameters<typeof actual.waitForConfirmation>) => {
+      confirmationLimits.push(args[3]);
+      return actual.waitForConfirmation(...args);
+    },
+  };
+});
+
 const policy: Policy = {
   maxRate: 1_000n,
   maxPerSession: 100_000n,
@@ -346,6 +359,19 @@ describe("the client's own close on the chain (spec §9.3, step 3)", () => {
     expect(parsed.data.kind).toBe(CloseKind.Standard);
     expect(parsed.accounts.session.address).toBe(session.id);
     expect(parsed.accounts.closer.address).toBe(buyer.address);
+  });
+
+  it("waits for its own close to confirm until closeRequestTimeoutMs from its send, past the scheme package's default of 30 s", async () => {
+    const node: FakeNode = { session: gate.stored, lamports: 1_000_000n, sent: [] };
+    const session = await strandedSession(node, { closeRequestTimeoutMs: 45_000 });
+    confirmationLimits.length = 0;
+
+    expect(await session.close()).toMatchObject({ via: "unilateral" });
+
+    // Waiting out 30 s is too long for a test: the time limit the wait was given is checked instead.
+    expect(confirmationLimits).toHaveLength(1);
+    expect(confirmationLimits[0]).toBeGreaterThan(44_000);
+    expect(confirmationLimits[0]).toBeLessThanOrEqual(45_000);
   });
 
   it("sends nothing, and says the session runs to the end of its paid time, when the signer holds no SOL", async () => {
