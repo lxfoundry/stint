@@ -273,6 +273,36 @@ importers:
         specifier: 2.4.0
         version: 2.4.0
 
+  examples/seller:
+    dependencies:
+      '@lxfoundry/stint-example-stream':
+        specifier: workspace:*
+        version: link:../solana-stream
+      '@lxfoundry/stint-facilitator':
+        specifier: workspace:*
+        version: link:../../apps/facilitator
+      '@lxfoundry/stint-gate':
+        specifier: workspace:*
+        version: link:../../packages/gate
+      '@lxfoundry/stint-program-client':
+        specifier: workspace:*
+        version: link:../../packages/program-client
+      '@lxfoundry/stint-x402':
+        specifier: workspace:*
+        version: link:../../packages/x402
+      '@solana-program/system':
+        specifier: 0.16.0
+        version: 0.16.0(@solana/kit@8.5.0(typescript@7.0.2))
+      '@solana-program/token':
+        specifier: 0.18.0
+        version: 0.18.0(@solana/kit@8.5.0(typescript@7.0.2))
+      '@solana/kit':
+        specifier: 8.5.0
+        version: 8.5.0(typescript@7.0.2)
+      '@solana/sysvars':
+        specifier: 8.5.0
+        version: 8.5.0(typescript@7.0.2)
+
   examples/solana-stream:
     dependencies:
       '@lxfoundry/stint-gate':
