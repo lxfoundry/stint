@@ -23,4 +23,13 @@ describe("createKoraClient errors", () => {
     expect((error as Error).message).toContain("rpc.example");
     expect((error as Error).message).not.toContain("SECRETKEY");
   });
+
+  it("gives up a request that gets no answer within its time limit", async () => {
+    vi.stubGlobal(
+      "fetch",
+      (_: unknown, init: RequestInit) => new Promise((_resolve, reject) => init.signal!.addEventListener("abort", () => reject(init.signal!.reason))),
+    );
+    const error = await createKoraClient("http://localhost:8080", "k", 20).getPayerSigner().catch((e: Error) => e);
+    expect((error as Error).message).toBe("Kora getPayerSigner: no answer within 20 ms");
+  });
 });

@@ -187,6 +187,9 @@ export async function simulate(ctx: FacilitatorContext, tx: InspectedTransaction
     // Only `top_up` raises it, from `paid_until` on (spec §4.3): the chain's clock had reached the end, though the
     // facilitator's had not.
     if (programError(tx, value.err) === STINT_ERROR__SESSION_EXPIRED) return refuse("session_expired", message);
+    // The chain has processed this very message (S16): the payment may have landed, and this facilitator holds no record
+    // of it, or it would not be verifying it (spec §5.5, "Already processed, with no record").
+    if (value.err === "AlreadyProcessed") return refuse("already_processed", message);
     return refuse("simulation_failed", message);
   }
   return checkPayerFunding(executedInstructions(tx, value.innerInstructions), ctx.keys, funding);

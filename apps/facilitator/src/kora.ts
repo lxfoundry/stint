@@ -11,18 +11,32 @@ export interface KoraClient {
   signTransaction(transaction: Base64EncodedWireTransaction): Promise<Base64EncodedWireTransaction>;
 }
 
+/**
+ * How long a request to Kora may go without an answer. A settlement waiting on Kora's signature holds its claim, and any
+ * duplicate joins it (spec §5.5), so the wait must end.
+ */
+export const DEFAULT_KORA_TIMEOUT_MS = 15_000;
+
 // Kora quotes the RPC URL it called in its errors, and that URL can carry an API key. The message goes on to the
 // buyer, so every URL in it is reduced to its scheme and host.
-export function createKoraClient(url: string, apiKey: string): KoraClient {
+export function createKoraClient(url: string, apiKey: string, timeoutMs = DEFAULT_KORA_TIMEOUT_MS): KoraClient {
   let id = 0;
 
   async function call<T>(method: string, params: Record<string, unknown>): Promise<T> {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": apiKey },
-      body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }),
-    });
-    const text = await response.text();
+    let response: Response;
+    let text: string;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": apiKey },
+        body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      text = await response.text();
+    } catch (error) {
+      if (error instanceof Error && error.name === "TimeoutError") throw new Error(`Kora ${method}: no answer within ${timeoutMs} ms`, { cause: error });
+      throw error;
+    }
     if (!response.ok && !text.trimStart().startsWith("{")) {
       throw new Error(redactUrls(`Kora ${method}: HTTP ${response.status} ${response.statusText} ${text}`.trim()));
     }

@@ -235,6 +235,12 @@ describe("verifyPayment (spec §5.4)", () => {
       expect(verified).toMatchObject({ ok: false, reason: "simulation_failed" });
       expect(verified.ok ? "" : verified.message).toContain("6000");
     });
+
+    it("answers already_processed, which is not final, when the simulation reports this very message processed", async () => {
+      await resetNode();
+      node.simulation = { err: "AlreadyProcessed" };
+      expect(await verifyPayment(ctx, await openPayload(), offer)).toMatchObject({ ok: false, reason: "already_processed" });
+    });
   });
 
   describe("a close", () => {

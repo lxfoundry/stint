@@ -1,4 +1,7 @@
 import {
+  SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE,
+  SolanaError,
   appendTransactionMessageInstructions,
   blockhash,
   createTransactionMessage,
@@ -26,6 +29,12 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCloseInfoSource, createSponsoredCloser, verifySponsoredClose } from "../src/close.js";
 import type { KoraClient } from "../src/kora.js";
 import type { FacilitatorContext } from "../src/verify.js";
+
+/** A refusal by the node at preflight, as `@solana/kit` reports it: the program's error is its cause. */
+const preflightRefusal = () =>
+  new SolanaError(SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE, {
+    cause: new SolanaError(SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM, { code: 6004, index: 0 }),
+  } as never);
 
 const NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
 const BLOCKHASH = "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N";
@@ -83,7 +92,7 @@ function fakeRpc(node: Node, closed: () => unknown): Rpc<SolanaRpcApi> {
       call(async () => {
         node.calls.send++;
         await node.holdSend;
-        if (node.failSend) throw new Error("preflight refused");
+        if (node.failSend) throw preflightRefusal();
         return "sent";
       }),
     getSignatureStatuses: () => call(() => ({ value: [{ confirmationStatus: "confirmed", err: null }] })),
