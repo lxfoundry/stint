@@ -10,10 +10,12 @@ import { mismatchedPayload } from "./scenarios/13-mismatched-payload.js";
 import { samePaymentTwice } from "./scenarios/14-same-payment-twice.js";
 import { sponsoredClose } from "./scenarios/15-sponsored-close.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
+import { topUpUnknownSession } from "./scenarios/17-top-up-unknown-session.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
 import { gateUnreachableAtClose } from "./scenarios/24-gate-unreachable-at-close.js";
 import { gateAndFacilitatorUnreachableAtClose } from "./scenarios/25-gate-and-facilitator-unreachable-at-close.js";
 import { expiredSessionNobodyCloses } from "./scenarios/26-expired-session-nobody-closes.js";
+import { durationsOutOfBounds } from "./scenarios/32-durations-out-of-bounds.js";
 import { topUpWhileClosingAtExpiry } from "./scenarios/34-top-up-while-closing.js";
 import type { Capability, IsolationGroup, Scenario } from "./types.js";
 
@@ -55,7 +57,7 @@ export const catalogue: readonly Scenario[] = [
   required(14, "The same payment sent twice", samePaymentTwice),
   required(15, "Sponsored close through closeUrl", sponsoredClose),
   required(16, "Close by an unrelated key after paid_until", closeAfterPaidUntil),
-  pending(17, "Top-up for an unknown session"),
+  required(17, "Top-up for an unknown session", topUpUnknownSession),
   pending(18, "Fee payer or rent payer in a forbidden position", ["facilitatorApi"]),
   pending(19, "/verify of a valid open", ["facilitatorApi"]),
   pending(20, "Session opened on-chain with the gate's terms but another mint"),
@@ -70,7 +72,7 @@ export const catalogue: readonly Scenario[] = [
   pending(29, "The buyer's process restarts with a session open"),
   pending(30, "The resource closes a session through the admin port", ["stack"]),
   pending(31, "Network time moved forward to the end of maxSeconds", ["chain", "stack"], "ownNetwork"),
-  pending(32, "Durations out of bounds"),
+  required(32, "Durations out of bounds", durationsOutOfBounds),
   pending(33, "A settlement reply lost after the transaction lands", ["stack"], "ownStack"),
   required(34, "A top-up lands while the gate is closing at expiry", topUpWhileClosingAtExpiry, ["stack"], "ownStack"),
   pending(35, "A session opened on-chain with the gate's terms is adopted"),
