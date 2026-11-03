@@ -7,6 +7,7 @@ import { failedPayment } from "./scenarios/06-failed-payment.js";
 import { unilateralClose } from "./scenarios/07-unilateral-close.js";
 import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
 import { mismatchedPayload } from "./scenarios/13-mismatched-payload.js";
+import { samePaymentTwice } from "./scenarios/14-same-payment-twice.js";
 import { sponsoredClose } from "./scenarios/15-sponsored-close.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
@@ -51,7 +52,7 @@ export const catalogue: readonly Scenario[] = [
   pending(11, "Two gate instances, reconnecting elsewhere", ["stack"], "ownStack"),
   pending(12, "Allowance funding", ["allowance"]),
   required(13, "Payment whose accepted differs by one byte; x402Version 1", mismatchedPayload),
-  pending(14, "The same payment sent twice"),
+  required(14, "The same payment sent twice", samePaymentTwice),
   required(15, "Sponsored close through closeUrl", sponsoredClose),
   required(16, "Close by an unrelated key after paid_until", closeAfterPaidUntil),
   pending(17, "Top-up for an unknown session"),
