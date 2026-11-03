@@ -81,6 +81,8 @@ export interface Harness {
     teardown: EndReason[];
     /** The session of each subscription the gate started. */
     watch: Address[];
+    /** The transaction of each read of a session after a settlement (`readSessionAfter`). */
+    readAfter: string[];
   };
   verifyAnswer: VerifyResponse;
   settleAnswer: (payload: PaymentPayload) => SettleResponse;
@@ -92,9 +94,12 @@ export interface Harness {
   hold: { provision?: Promise<void>; settleClose?: Promise<void>; settleTopUp?: Promise<void>; readSession?: Promise<void>; lastClose?: Promise<void> };
   /** Runs inside the fake facilitator's close, after `hold` and before `fail`: a test changes the chain here. */
   onSettleClose?: () => void;
-  /** How many reads the fake chain answers with nothing before the real answer, and the reads made. */
-  missing: { session: number; closedEvent: number };
-  reads: { session: number; closedEvent: number; lastClose: number };
+  /**
+   * How many reads the fake chain answers with nothing before the real answer, and the reads made. A read after a
+   * settlement that answers nothing is a node that does not show the settlement's transaction yet.
+   */
+  missing: { session: number; closedEvent: number; after: number };
+  reads: { session: number; closedEvent: number; lastClose: number; after: number };
   /** Rejections that escaped `handleRequest`: the gate must contain its own errors. */
   escaped: unknown[];
   /** The gate's session clock and its timers: the timers run only when a test fires them. */
@@ -108,6 +113,8 @@ export interface Harness {
   readonly watchers: Map<Address, { onChange: (stored: Session | undefined) => void; onError: (error: unknown) => void }>;
   /** The sessions whose subscription the gate has ended, in order. */
   readonly unwatched: Address[];
+  /** The fake chain the gate reads: a test removes one of its optional members to run the gate without it. */
+  readonly chain: GateChain;
 }
 
 export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" | "endRetrySeconds" | "readRetry"> = {}): Promise<Harness> {
@@ -126,15 +133,15 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
     server,
     buyer,
     authorizer,
-    calls: { verify: [], settle: [], provision: [], attach: [], teardown: [], watch: [] },
+    calls: { verify: [], settle: [], provision: [], attach: [], teardown: [], watch: [], readAfter: [] },
     verifyAnswer: { isValid: true },
     settleAnswer: () => ({ success: true, transaction: "sig", network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" }),
     sessions: new Map<Address, Session>(),
     closes: new Map<Address, ClosedEvent>(),
     fail: { supported: false, settleClose: false, closedEvent: false, provision: false, teardown: false, watch: false, lastClose: false },
     hold: {},
-    missing: { session: 0, closedEvent: 0 },
-    reads: { session: 0, closedEvent: 0, lastClose: 0 },
+    missing: { session: 0, closedEvent: 0, after: 0 },
+    reads: { session: 0, closedEvent: 0, lastClose: 0, after: 0 },
     escaped: [],
     clock,
     timers: new FakeTimers(clock),
@@ -144,6 +151,8 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
     unwatched: [],
   } as unknown as Harness;
 
+  /** The top-up transactions the fake facilitator has credited: the same message is processed once (S16). */
+  const credited = new Set<string>();
   const chain: GateChain = {
     latestBlockhash: async () => ({ blockhash: "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N", lastValidBlockHeight: 100n }),
     // A held read is counted when it starts and answers with the chain as it is when it is released.
@@ -151,6 +160,12 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
       const missing = harness.reads.session++ < harness.missing.session;
       await harness.hold.readSession;
       return missing ? undefined : harness.sessions.get(session);
+    },
+    // The fake facilitator credits the chain before its settlement answers, so the chain as it is includes it.
+    readSessionAfter: async (session, signature) => {
+      harness.calls.readAfter.push(signature);
+      if (harness.reads.after++ < harness.missing.after) return undefined;
+      return { stored: harness.sessions.get(session) };
     },
     closedEvent: async () => {
       if (harness.fail.closedEvent) throw new Error("rpc down");
@@ -204,7 +219,8 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
       verify: async (payload) => (harness.calls.verify.push(payload), harness.verifyAnswer),
       settle: async (payload) => {
         harness.calls.settle.push(payload);
-        const type = readElapsedPayload(payload)?.type;
+        const elapsed = readElapsedPayload(payload);
+        const type = elapsed?.type;
         if (type === "close") {
           await harness.hold.settleClose;
           harness.onSettleClose?.();
@@ -212,10 +228,14 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
         }
         if (type === "topUp") await harness.hold.settleTopUp;
         const answer = harness.settleAnswer(payload);
-        // A top-up that settles is credited on the fake chain, as the program credits it.
+        // A top-up that settles is credited on the fake chain, as the program credits it, once: the same transaction
+        // settled again is answered from the facilitator's record, and credits nothing more.
         const session = type === "topUp" && answer.success ? (readElapsedRequirements(payload.accepted)?.extra.session as Address | undefined) : undefined;
         const stored = session && harness.sessions.get(session);
-        if (session && stored) harness.sessions.set(session, { ...stored, deposited: stored.deposited + BigInt(payload.accepted.amount) });
+        if (session && stored && !credited.has(elapsed!.transaction)) {
+          credited.add(elapsed!.transaction);
+          harness.sessions.set(session, { ...stored, deposited: stored.deposited + BigInt(payload.accepted.amount) });
+        }
         return answer;
       },
     },
@@ -256,7 +276,7 @@ export async function startHarness(timings: Pick<GateConfig, "idleCloseSeconds" 
   server.on("upgrade", (req, socket, head) => {
     if (!gate.handleUpgrade(req, socket, head)) socket.destroy();
   });
-  return Object.assign(harness, { gate });
+  return Object.assign(harness, { gate, chain });
 }
 
 /** The requests and connections the tests make, against whichever harness `get` returns. */

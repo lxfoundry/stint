@@ -645,9 +645,18 @@ export function createGate<U>(config: GateConfig<U>): Gate {
    * `POST /sessions/:id/top-up` (spec §7.1): a 402 listing top-up offers, then the payment. Only a session this gate tracks
    * can be topped up. Once its end timer has fired, the session cannot be extended (spec §4.3): the answer is a 402 with
    * `session_expired` and offers for a new session, as a connect gets then. The durations that fit come from the chain,
-   * since a top-up made elsewhere may have moved the deposit (spec §5.2). Once the top-up settles, the end timer moves to
-   * the end of the deposit read before the payment plus the amount: the program credits at least that (spec §4.3), and
-   * if it credited more, the end timer finds the later end when it fires, as it finds any top-up this gate did not settle.
+   * since a top-up made elsewhere may have moved the deposit (spec §5.2).
+   *
+   * Once the top-up settles, the new end is the `paid_until` of the session as it stands after the settlement's
+   * transaction, read from a node that shows that transaction (`readSessionAfter`), and asked again within `readRetry`
+   * while it does not (spec §7.3). It is not the deposit read before the payment plus the amount: a payment settled again
+   * after it landed, answered from the facilitator's record, is already in that deposit. The end timer moves there if it
+   * is later (`paidLonger`), and the `200` answers the later of it and the end the gate knows. If the read finds the
+   * account gone, or holding another session, the answer is `404` and no timer moves; if the node still does not show the
+   * transaction after the re-reads, it is `502`, and the subscription, or the end timer's re-read, finds the later end.
+   * A chain without `readSessionAfter` adds the amount to the deposit read before the payment instead: right for a payment
+   * settled for the first time, since the program credits at least that (spec §4.3), but it credits a payment settled
+   * again after it landed twice, and the gate then answers, and serves, one top-up's worth past what the chain holds.
    */
   async function topUp(request: IncomingMessage, response: ServerResponse, url: URL, session: Address): Promise<void> {
     const tracked = sessions.get(session);
@@ -716,9 +725,23 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       if (settled.errorReason === "already_processed") return mayHaveLanded(response, {}, paymentResponse);
       return refusal(settled.errorReason ?? "simulation_failed");
     }
-    const until = paidUntil({ ...stored, deposited: stored.deposited + BigInt(requirements.amount) });
+    let until: bigint;
+    const readSessionAfter = config.chain.readSessionAfter?.bind(config.chain);
+    if (readSessionAfter) {
+      const after = await readUntilFound(() => upstream(() => readSessionAfter(session, settled.transaction)), readRetry);
+      // What the top-up did to the account is not known yet: the subscription, or the end timer's re-read, finds the
+      // later end, as for a top-up this gate did not settle.
+      if (!after) throw new UpstreamError(new Error(`the chain does not show the top-up's transaction ${settled.transaction} yet`));
+      // Closed after the top-up landed, by whichever party: answered as an open whose account is gone is, and nothing
+      // more. The session ends as it would have without this top-up: by the gate's own close, if that is what closed
+      // it, or else through the subscription or the end timer.
+      if (!sameSession(tracked, after.stored)) return sendJson(response, 404, { error: "unknown_session" });
+      until = paidUntil(after.stored);
+    } else {
+      until = paidUntil({ ...stored, deposited: stored.deposited + BigInt(requirements.amount) });
+    }
     paidLonger(tracked, until);
-    // The session may already run later than this top-up alone makes it: the end timer found one made elsewhere meanwhile.
+    // The session may already run later than `until`: the subscription, or the end timer, found a later end meanwhile.
     sendJson(response, 200, { paidUntil: Number(until > tracked.paidUntil ? until : tracked.paidUntil) }, paymentResponse);
   }
 

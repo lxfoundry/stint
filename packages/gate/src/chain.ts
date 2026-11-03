@@ -1,7 +1,10 @@
 import {
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_MIN_CONTEXT_SLOT_NOT_REACHED,
   containsBytes,
   fetchEncodedAccount,
+  isSolanaError,
   parseBase64RpcAccount,
+  signature as toSignature,
   type Address,
   type MaybeEncodedAccount,
   type Rpc,
@@ -24,6 +27,14 @@ export interface GateChain {
   latestBlockhash(): Promise<{ readonly blockhash: string; readonly lastValidBlockHeight: bigint }>;
   /** The session at `confirmed`, or undefined when the address holds no Stint session. */
   readSession(session: Address): Promise<Session | undefined>;
+  /**
+   * The session at `confirmed` as it stands once the confirmed transaction `signature` has run (spec §7.3), from a node
+   * at or past that transaction's slot: `stored` is undefined when the address then holds no Stint session. Undefined
+   * while the node does not show the transaction confirmed yet, or has not reached its slot. One look: the gate repeats
+   * it within `readRetry`. Optional: a gate whose chain cannot read after a transaction adds a top-up's amount to the
+   * deposit it read before the payment.
+   */
+  readSessionAfter?(session: Address, signature: string): Promise<{ readonly stored: Session | undefined } | undefined>;
   closedEvent(signature: string): Promise<ClosedEvent | undefined>;
   /**
    * The `Closed` event of the newest successful close of the session at `session` (spec §7.3, "Account closed by another
@@ -55,6 +66,20 @@ export function createRpcChain(rpc: Rpc<SolanaRpcApi>, subscriptions?: RpcSubscr
     latestBlockhash: async () => (await rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value,
     // Any address can be asked about: a wallet, or an account of another program, is not a session.
     readSession: async (session) => sessionIn(await fetchEncodedAccount(rpc, session, { commitment: "confirmed" })),
+    async readSessionAfter(session, signature) {
+      // In the node's transaction history too: a payment settled again can be answered from a record older than the
+      // node's recent statuses.
+      const { value } = await rpc.getSignatureStatuses([toSignature(signature)], { searchTransactionHistory: true }).send();
+      const status = value[0];
+      if (status?.confirmationStatus !== "confirmed" && status?.confirmationStatus !== "finalized") return undefined;
+      try {
+        const account = await fetchEncodedAccount(rpc, session, { commitment: "confirmed", minContextSlot: status.slot });
+        return { stored: sessionIn(account) };
+      } catch (error) {
+        if (isSolanaError(error, SOLANA_ERROR__JSON_RPC__SERVER_ERROR_MIN_CONTEXT_SLOT_NOT_REACHED)) return undefined;
+        throw error;
+      }
+    },
     closedEvent: (signature) => fetchClosedEvent(rpc, signature),
     lastClose: async (session, notCloses) => (await findClose(rpc, session, undefined, notCloses))?.event,
   };
