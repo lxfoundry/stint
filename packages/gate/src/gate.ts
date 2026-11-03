@@ -649,7 +649,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
    * `400` only for a duration outside 1 to `maxSeconds`, and the duration it accepts need not fit the deposit read now: a
    * payment sent again after its transaction landed is answered from the facilitator's record, and is already in that
    * deposit, and the facilitator refuses a new one that does not fit (`invalid_amount`). The offers, a refusal's
-   * included, are the durations that fit.
+   * included, are the durations that fit; a refusal with none to offer is a `400 invalid_duration` with the deposit's
+   * bounds, as the request for offers gets then.
    *
    * Once the top-up settles, the new end is the `paid_until` of the session as it stands after the settlement's
    * transaction, read from a node that shows that transaction (`readSessionAfter`), and asked again within `readRetry`
@@ -690,15 +691,23 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     }
 
     const resource = `${config.origin}/sessions/${session}/top-up`;
-    // Whether a payment comes or not, the offers are the durations that fit the deposit read now: none, when a duration
-    // asked for with a payment no longer fits.
+    // Whether a payment comes or not, the offers are the durations that fit the deposit read now.
+    const offered = durations.filter(fits(stored.deposited));
     const offers = async () => {
       const base = await offerBase();
-      return durations.filter(fits(stored.deposited)).map((seconds) => buildTopUpOffer({ ...base, seconds, session }));
+      return offered.map((seconds) => buildTopUpOffer({ ...base, seconds, session }));
     };
     // A refusal because the session has run out offers a new session; any other offers the top-up again.
-    const refusal = async (reason: string) =>
-      reason === "session_expired" ? paymentRequired(response, menu, reason) : sendPaymentRequired(response, resource, await offers(), reason);
+    const refusal = async (reason: string): Promise<void> => {
+      if (reason === "session_expired") return paymentRequired(response, menu, reason);
+      // Nothing fits the deposit read now, so nothing can be offered: answered as the request for offers is, with the
+      // deposit's bounds (0 s never fits, so the check states them). Nothing has settled.
+      const bounds = checkTopUpDuration(config.terms, stored.deposited, 0);
+      if (offered.length === 0 && !bounds.ok) {
+        return sendJson(response, 400, { error: "invalid_duration", minSeconds: bounds.minSeconds, maxSeconds: bounds.maxSeconds });
+      }
+      sendPaymentRequired(response, resource, await offers(), reason);
+    };
 
     if (typeof header !== "string") return sendPaymentRequired(response, resource, await offers());
     let payload: PaymentPayload;

@@ -194,13 +194,35 @@ describe("the gate's top-up route (spec §7.1)", () => {
     h.verifyAnswer = { isValid: false, invalidReason: "invalid_amount" };
 
     // From the menu: only 30 s still fits.
-    const fromMenu = await sendTopUp(session, payload, null);
-    expect(fromMenu).toMatchObject({ status: 402, body: { error: "invalid_amount" } });
-    expect(accepts(fromMenu.body).map((entry) => [entry.extra?.action, entry.extra?.seconds])).toEqual([["topUp", 30]]);
-    // Asked for by its duration: no offer for 60 s fits.
-    expect(await sendTopUp(session, payload, 60)).toMatchObject({ status: 402, body: { error: "invalid_amount", accepts: [] } });
+    const { status, body } = await sendTopUp(session, payload, null);
 
-    expect(h.calls.verify.slice(-2)).toEqual([payload, payload]);
+    expect(status).toBe(402);
+    expect(body.error).toBe("invalid_amount");
+    expect(accepts(body).map((entry) => [entry.extra?.action, entry.extra?.seconds])).toEqual([["topUp", 30]]);
+    expect(h.calls.verify.at(-1)).toEqual(payload);
+    expect(ofType("topUp")).toEqual([]);
+    expect(pendingDue(END_DUE)).toBeDefined();
+  });
+
+  it("answers a refused payment as the request for offers does when no duration fits the deposit: 400 invalid_duration, with its bounds", async () => {
+    const { session } = await open();
+    const sixty = await prepareTopUp(session, 60);
+    const thirty = await prepareTopUp(session, 30);
+    h.verifyAnswer = { isValid: false, invalidReason: "invalid_amount" };
+
+    // 40 s of 120 left: the facilitator refuses 60 s, asked for by its duration, and no offer for 60 s fits.
+    h.sessions.set(session, { ...h.sessions.get(session)!, deposited: 80_000n });
+    expect(await sendTopUp(session, sixty, 60)).toMatchObject({ status: 400, body: { error: "invalid_duration", minSeconds: 1, maxSeconds: 40 } });
+    expect(h.calls.verify.at(-1)).toEqual(sixty);
+
+    // Full: no duration of the menu fits, for a payment the facilitator refuses and for one that does not decode.
+    h.sessions.set(session, { ...h.sessions.get(session)!, deposited: 120_000n });
+    const full = { status: 400, body: { error: "invalid_duration", minSeconds: 1, maxSeconds: 0 } };
+    expect(await sendTopUp(session, thirty, null)).toMatchObject(full);
+    expect(h.calls.verify.at(-1)).toEqual(thirty);
+    const undecodable = await fetch(`${h.url}/sessions/${session}/top-up`, { method: "POST", headers: { "PAYMENT-SIGNATURE": "not-a-payload" } });
+    expect({ status: undecodable.status, body: await undecodable.json() }).toEqual(full);
+
     expect(ofType("topUp")).toEqual([]);
     expect(pendingDue(END_DUE)).toBeDefined();
   });
