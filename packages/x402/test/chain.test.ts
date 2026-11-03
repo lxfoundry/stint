@@ -6,9 +6,25 @@ import {
   getTransferInstruction,
 } from "@solana-program/token";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
-import { generateKeyPairSigner, getBase58Decoder, type Address, type Instruction, type TransactionSigner } from "@solana/kit";
+import {
+  generateKeyPairSigner,
+  getBase58Decoder,
+  type Address,
+  type Instruction,
+  type Rpc,
+  type SolanaRpcApi,
+  type TransactionSigner,
+} from "@solana/kit";
 import { beforeAll, describe, expect, it } from "vitest";
-import { fetchClosedEvent, lamportBalances, tokenBalanceChanges, tokenTransferChanges, type RecordedTransaction } from "../src/index.js";
+import {
+  TransactionFailedError,
+  fetchClosedEvent,
+  lamportBalances,
+  readConfirmation,
+  tokenBalanceChanges,
+  tokenTransferChanges,
+  type RecordedTransaction,
+} from "../src/index.js";
 
 const SYSTEM_PROGRAM = "11111111111111111111111111111111" as Address;
 
@@ -197,5 +213,36 @@ describe("readers of a confirmed transaction (spec §12.2)", () => {
     const { rpc, state } = laggingRpc(1);
     await expect(tokenBalanceChanges(rpc, signature)).rejects.toThrow(/not found/);
     expect(state.reads).toBe(1);
+  });
+});
+
+describe("readConfirmation", () => {
+  const SIGNATURE = getBase58Decoder().decode(new Uint8Array(64).fill(7));
+  const node = (status: unknown) =>
+    ({ getSignatureStatuses: () => ({ send: async () => ({ value: [status] }) }) }) as unknown as Rpc<SolanaRpcApi>;
+
+  it("is true at confirmed and finalized, false while the transaction has not landed or is only processed", async () => {
+    expect(await readConfirmation(node({ confirmationStatus: "confirmed", err: null }), SIGNATURE)).toBe(true);
+    expect(await readConfirmation(node({ confirmationStatus: "finalized", err: null }), SIGNATURE)).toBe(true);
+    expect(await readConfirmation(node({ confirmationStatus: "processed", err: null }), SIGNATURE)).toBe(false);
+    expect(await readConfirmation(node(null), SIGNATURE)).toBe(false);
+  });
+
+  it("throws TransactionFailedError for a transaction that landed with an error", async () => {
+    const failed = node({ confirmationStatus: "confirmed", err: { InstructionError: [0, { Custom: 1 }] } });
+    await expect(readConfirmation(failed, SIGNATURE)).rejects.toBeInstanceOf(TransactionFailedError);
+  });
+
+  it("asks the node to search its transaction history when told to, and only then", async () => {
+    const configs: unknown[] = [];
+    const rpc = {
+      getSignatureStatuses: (_: unknown, config?: unknown) => {
+        configs.push(config);
+        return { send: async () => ({ value: [null] }) };
+      },
+    } as unknown as Rpc<SolanaRpcApi>;
+    await readConfirmation(rpc, SIGNATURE);
+    await readConfirmation(rpc, SIGNATURE, { searchTransactionHistory: true });
+    expect(configs).toEqual([undefined, { searchTransactionHistory: true }]);
   });
 });

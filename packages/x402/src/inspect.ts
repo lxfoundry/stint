@@ -3,10 +3,12 @@ import {
   assertIsTransactionWithinSizeLimit,
   getBase64Encoder,
   getCompiledTransactionMessageDecoder,
+  getCompiledTransactionMessageEncoder,
   getInstructionsFromCompiledTransactionMessage,
   getTransactionDecoder,
   type Address,
   type Instruction,
+  type ReadonlyUint8Array,
   type Transaction,
 } from "@solana/kit";
 
@@ -27,6 +29,10 @@ export interface InspectedTransaction {
   readonly messageHash: string;
 }
 
+function sameBytes(a: ReadonlyUint8Array, b: ReadonlyUint8Array): boolean {
+  return a.length === b.length && a.every((byte, index) => byte === b[index]);
+}
+
 /** Decodes a base64 wire transaction. Only version 0 without lookup tables is accepted (spec §3.5). */
 export function inspectTransaction(wire: string): InspectedTransaction | undefined {
   try {
@@ -34,6 +40,10 @@ export function inspectTransaction(wire: string): InspectedTransaction | undefin
     assertIsTransactionWithinSizeLimit(transaction);
     const compiled = getCompiledTransactionMessageDecoder().decode(transaction.messageBytes);
     if (compiled.version !== 0) return undefined;
+    // The decoders take every byte after the signatures as the message and ignore what follows its end: bytes appended to
+    // a wire would give the same instructions another hash, and a retry would not be recognised (spec §5.5).
+    const canonical = getCompiledTransactionMessageEncoder().encode(compiled);
+    if (!sameBytes(canonical, transaction.messageBytes)) return undefined;
     if ((compiled.addressTableLookups?.length ?? 0) > 0) return undefined;
     const signers = compiled.staticAccounts.slice(0, compiled.header.numSignerAccounts);
     const signed = new Set(
