@@ -41,9 +41,17 @@ Codama 1.11.0 with `@codama/renderers-js` 2.8.0, Surfpool 1.6.1, Kora 2.0.5.
 - section 14, questions 3 and 6.
 
 **Base:** `main` once the payment refusals and settlement records stage (stage 3) has merged. Branch
-`feat/stage-11-allowance-funding` from it. Stage 3 changes `conformance/src/types.ts`, `e2e/src/targets/local.ts`,
-`e2e/src/targets/devnet.ts`, `packages/x402/src/inspect.ts` and `packages/x402/src/chain.ts`. The edits below to those
-files are small additions: place them next to stage 3's, and do not undo any of its lines.
+`feat/stage-11-allowance-funding` from it. Stage 3 changes several files this plan edits too:
+- `apps/facilitator/src/verify.ts` and its tests (`simulate` gains a line; `settlePayment` becomes `createSettlement`);
+- `conformance/src/types.ts`, `catalogue.ts`, `helpers.ts`, and a new `payments.ts`. It adds `refusalOf` and
+  `usdcBalance` to `helpers.ts` and `openOffers` to `payments.ts`, which scenario 12 reuses;
+- `conformance/test/catalogue.test.ts`;
+- `e2e/src/targets/local.ts`, `devnet.ts`, `e2e/test/local-target.test.ts` and `devnet-target.test.ts`;
+- `packages/x402/src/inspect.ts` and `chain.ts`;
+- the README.
+
+Line numbers below are those of `b686a72` and will have moved: find each edit by the text it names, place it next to
+stage 3's lines, and undo none of them.
 
 ## Global Constraints
 
@@ -165,7 +173,7 @@ simulation refused an open over the cap with `custom program error: 0x190`. The 
 | `packages/subscriptions-client/src/index.ts` (create) | Exports the generated client and `allowance.ts` |
 | `packages/x402/src/funding.ts` (create) | `FundingSource`, `refundOwnerOf`, `fundingInstruction` |
 | `packages/x402/src/transactions.ts` (modify) | The open and top-up builders take a funding source |
-| `packages/x402/src/allowance-checks.ts` (create) | `readFunding`: a `TransferChecked` or a pull, read the same way |
+| `packages/x402/src/funding-checks.ts` (create) | `readFunding`: a `TransferChecked` or a pull, read the same way |
 | `packages/x402/src/checks.ts` (modify) | The open and top-up layouts take either funding instruction; `checkFunding` checks a pull's owner and delegatee |
 | `apps/facilitator/src/receipt.ts` (create) | `vaultReceipt`: what the simulated transaction moves into the vault |
 | `apps/facilitator/src/verify.ts` (modify) | The receipt check after simulation; allowance errors named in refusals |
@@ -199,8 +207,9 @@ simulation refused an open over the cap with `custom program error: 0x190`. The 
     - `parseTransferRecurringInstruction(ix)` and `parseCreateRecurringDelegationInstruction(ix)`;
     - `getRecurringDelegationEncoder()` (tests) and `getCloseSubscriptionAuthorityInstruction(input)`;
     - `getTransferFixedInstructionAsync(input)` (used by a test only);
-    - `fetchMaybeRecurringDelegation(rpc, address, config?)`, `fetchMaybeSubscriptionAuthority(rpc, address, config?)`
-      and `getRecurringDelegationSize()`;
+    - `fetchMaybeRecurringDelegation(rpc, address, config?)` and `fetchMaybeSubscriptionAuthority(rpc, address, config?)`.
+      The IDL gives its accounts no size, so no `get…Size()` is generated: a delegation's size is
+      `getRecurringDelegationEncoder().fixedSize` (211 bytes);
     - `findSubscriptionAuthorityPda({ user, tokenMint })`, `findRecurringDelegationPda(...)`, `findEventAuthorityPda()`;
     - `SUBSCRIPTIONS_ERROR__AMOUNT_EXCEEDS_PERIOD_LIMIT` (0x190), `SUBSCRIPTIONS_ERROR__DELEGATION_EXPIRED` (0x80),
       `SUBSCRIPTIONS_ERROR__DELEGATION_NOT_STARTED` (0x197).
@@ -318,8 +327,18 @@ ls packages/subscriptions-client/src/generated
 ```
 
 Expected: `src/generated` holds `accounts`, `errors`, `events`, `instructions`, `pdas`, `programs`, `types` and
-`index.ts`. If the renderer rewrote `package.json` (the `git diff` shows lines), restore it with
-`git checkout packages/subscriptions-client/package.json`: the exact pins above stay.
+`index.ts`, and the `git diff` of `package.json` is empty: the renderer leaves an existing `package.json` alone.
+
+In `.github/workflows/ci.yml`, after the step "Check the generated client is current", add the same check for this
+client, so that it is never edited by hand:
+
+```yaml
+      - name: Check the generated Subscriptions client is current
+        run: |
+          pnpm --filter @lxfoundry/stint-subscriptions-client run generate
+          git diff --exit-code -- packages/subscriptions-client
+          test -z "$(git status --porcelain -- packages/subscriptions-client)"
+```
 
 Write `src/index.ts` now, so that the generated code can be imported:
 
@@ -694,12 +713,12 @@ optional `receiver`) and use those: the rent goes back to the recorded payer, th
 - [ ] **Step 6: Run the tests and the typecheck**
 
 Run: `pnpm --filter @lxfoundry/stint-subscriptions-client test && pnpm --filter @lxfoundry/stint-subscriptions-client run typecheck`
-Expected: PASS, 12 tests; no type error.
+Expected: PASS, 11 tests; no type error.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add packages/subscriptions-client pnpm-lock.yaml
+git add packages/subscriptions-client pnpm-lock.yaml .github/workflows/ci.yml
 git commit -m "Add a client for the Subscriptions & Allowances program, generated from its pinned IDL"
 ```
 
@@ -1036,9 +1055,12 @@ authority only", to:
 
 Run: `pnpm --filter @lxfoundry/stint-x402 test checks`
 Expected: FAIL.
-- The accepting tests get `unexpected_instruction`: today's layout allows only `TransferChecked`.
-- The refusals of accounts 1, 4, 5, 6, 7 and 8 get `unexpected_instruction` instead of their reason.
+- The two accepting tests get `unexpected_instruction`: today's layout allows only `TransferChecked`.
+- All eight account-replacement refusals get `unexpected_instruction` instead of their reason, and so does the
+  refusal of another refund owner.
 - The updated top-up assertion lacks `vault`.
+- "refuses a pull with a tenth account, and a fixed-delegation pull in its place" passes already. Today's layout
+  refuses any pull. It guards that the new reader keeps refusing those two.
 
 - [ ] **Step 3: Implement `packages/x402/src/funding-checks.ts`**
 
@@ -1610,7 +1632,8 @@ git commit -m "Check after simulation that the vault receives exactly the amount
 **Files:**
 - Create: `packages/client/src/allowance.ts`, `packages/client/test/allowance.test.ts`, `packages/client/test/accounts-rpc.ts`
 - Modify: `packages/client/package.json` (dependencies), `packages/client/src/client.ts`,
-  `packages/client/src/tools.ts`, `packages/client/src/index.ts`, `examples/agent/test/agent.test.ts`
+  `packages/client/src/tools.ts`, `packages/client/src/index.ts`, `packages/client/test/tools.test.ts`,
+  `packages/mcp/test/stdio.test.ts`, `examples/agent/test/agent.test.ts`
 
 **Interfaces:**
 - Consumes: Task 1's `allowanceAccounts`, `fetchMaybeRecurringDelegation`, `periodState` and `PeriodState`. Task 2's
@@ -1906,7 +1929,8 @@ and add `type AllowanceOutput` to the `./tools.js` export list there.
    * Funds every open and top-up from a recurring delegation that `owner` granted this signer on the Subscriptions &
    * Allowances program (spec §10), instead of from the signer's own USDC. Refunds go back to the owner. `nonce` names the
    * delegation, default 0. With `rpc`, the client reads the allowance before it signs and refuses a payment it cannot
-   * fund. Without, such a payment is refused by the facilitator's simulation, as `simulation_failed`. The policy's limits
+   * fund. A read of the node that fails refuses the payment too: the client does not sign what it could not check.
+   * Without `rpc`, such a payment is refused by the facilitator's simulation, as `simulation_failed`. The policy's limits
    * apply as well.
    */
   readonly allowance?: { readonly owner: Address; readonly nonce?: bigint };
@@ -2024,17 +2048,28 @@ export interface AllowanceOutput {
   ```
 
   Add `"stint_allowance"` to the list of tool names that test expects (around its line 99), keeping the list's order.
+  The fake set is cast, so this keeps the test truthful rather than compiling.
+- **The client's tool tests:** `packages/client/test/tools.test.ts` builds two fake clients typed `StintClient` (near its
+  lines 15 and 332), as `{ remainingBudget, open }`. Give both the two new members, or the typecheck fails:
+
+  ```ts
+    funding: { kind: "own" },
+    allowance: async () => undefined,
+  ```
+- **The MCP server serves the new tool,** since it registers every tool of `SessionTools`. In
+  `packages/mcp/test/stdio.test.ts`, add `"stint_allowance"` as the first entry of the sorted list of tool names, and
+  change `/serving 6 tools on stdio/` to `/serving 7 tools on stdio/`.
 
 - [ ] **Step 6: Run the tests**
 
-Run: `pnpm --filter @lxfoundry/stint-client test && pnpm --filter @lxfoundry/stint-client run typecheck && pnpm --filter @lxfoundry/stint-example-agent test`
-Expected: PASS, the five new tests and every existing one. If the example agent's package has another name, find it in
-`examples/agent/package.json`.
+Run: `pnpm --filter @lxfoundry/stint-client test && pnpm --filter @lxfoundry/stint-mcp test && pnpm typecheck`, then the
+example agent's tests (its package name is in `examples/agent/package.json`).
+Expected: PASS, the five new tests and every existing one.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add packages/client examples/agent pnpm-lock.yaml
+git add packages/client packages/mcp/test/stdio.test.ts examples/agent pnpm-lock.yaml
 git commit -m "Let the session client pay from an allowance, check it before signing, and report it"
 ```
 
@@ -2046,7 +2081,7 @@ git commit -m "Let the session client pay from an allowance, check it before sig
 - Create: `packages/client/src/allowance-command.ts`, `packages/client/src/cli.ts`,
   `packages/client/test/allowance-command.test.ts`
 - Modify: `packages/client/package.json` (script), `package.json` (root script), `packages/mcp/src/config.ts`,
-  `packages/mcp/src/cli.ts`, `packages/mcp/test/config.test.ts`, `packages/mcp/test/stdio.test.ts`
+  `packages/mcp/src/cli.ts`, `packages/mcp/test/config.test.ts`
 
 **Interfaces:**
 - Consumes: Task 1's `grantInstructions`, `revokeInstructions`, `allowanceAccounts` and
@@ -2184,14 +2219,11 @@ In `packages/mcp/test/config.test.ts`, add:
   });
 ```
 
-In `packages/mcp/test/stdio.test.ts`, add `"stint_allowance"` as the first entry of the sorted list of tool names.
-
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `pnpm --filter @lxfoundry/stint-client test allowance-command; pnpm --filter @lxfoundry/stint-mcp test`
-Expected: FAIL. `../src/allowance-command.js` does not exist; the MCP config has no `allowance` or `rpcUrl`; the
-stdio test does not list `stint_allowance` (it does once Task 5 is in, and the MCP server serves every tool of
-`SessionTools`, so only the config tests fail).
+Expected: FAIL. `../src/allowance-command.js` does not exist, and the MCP config has no `allowance` or `rpcUrl`. The
+stdio test passes already: Task 5 updated it.
 
 - [ ] **Step 3: Implement `packages/client/src/allowance-command.ts`**
 
@@ -2231,7 +2263,11 @@ const USAGE = [
   "stint allowance grant  --keypair <owner keypair file> --agent <address> --per-period <base units> --period <seconds> --expires <ISO 8601 date> --rpc <url> [--nonce <n>]",
   "stint allowance revoke --keypair <owner keypair file> --agent <address> --rpc <url> [--nonce <n>] [--close-authority]",
   "stint allowance status --owner <address> --agent <address> --rpc <url> [--nonce <n>]",
+  "Give the keypair file's absolute path: the command runs in packages/client. The owner's USDC account must exist.",
 ].join("\n");
+
+/** The longest period the program accepts: a year (its `MAX_DELEGATION_PERIOD_SECS`). */
+const MAX_PERIOD_SECONDS = 31_536_000n;
 
 async function readKeypair(deps: CommandDeps, path: string): Promise<KeyPairSigner> {
   try {
@@ -2301,6 +2337,7 @@ export async function runAllowanceCommand(argv: readonly string[], deps: Command
   if (action === "grant") {
     perPeriod = whole("per-period", 1n);
     period = whole("period", 1n);
+    if (period !== undefined && period > MAX_PERIOD_SECONDS) problems.push(`--period may be at most ${MAX_PERIOD_SECONDS} s, the program's limit`);
     const expires = Date.parse(text("expires") ?? "");
     if (Number.isNaN(expires) || expires <= Date.now()) problems.push("--expires must be an ISO 8601 date in the future");
     else expiresAt = BigInt(Math.floor(expires / 1000));
@@ -2498,7 +2535,7 @@ git commit -m "Add the stint allowance command, and the MCP server's allowance a
 
 **Interfaces:**
 - Consumes: Task 1's `grantInstructions`, `revokeInstructions`, `allowanceAccounts`, `SUBSCRIPTIONS_PROGRAM_ADDRESS`
-  and `getRecurringDelegationSize`.
+  and `getRecurringDelegationEncoder`.
 - Produces, in `conformance/src/types.ts`:
 
 ```ts
@@ -2668,8 +2705,20 @@ In `e2e/test/local-network.test.ts`, replace the test "runs the Subscriptions pr
 
 `e2e/package.json` must depend on `@lxfoundry/stint-conformance`; it does, since the targets import it.
 
-In `e2e/test/local-target.test.ts` and `e2e/test/devnet-target.test.ts`, change the expected capability sets to include
-`"allowance"`, and expect `context().allowance` to be defined.
+In `e2e/test/local-target.test.ts`:
+- rename the test "offers chain control, stack control and the facilitator's API, but not allowance funding yet" to
+  "offers chain control, stack control, the facilitator's API and allowance funding", expect
+  `["allowance", "chain", "facilitatorApi", "stack"]`, and add `expect(stack.context().allowance).toBeDefined();`;
+- in "passes every required scenario, and reports the others", scenario 12 now runs where the capability is, but
+  until Task 8 it has no `run`. Replace the comment and the two lines after it with:
+
+  ```ts
+    // Every scenario that is not required is pending, scenario 12 included until it is written.
+    expect(outcomes.filter((outcome) => outcome.result === "pending")).toHaveLength(35 - REQUIRED.length);
+  ```
+
+In `e2e/test/devnet-target.test.ts`, expect `["allowance", "facilitatorApi", "stack"]` in "offers stack control and the
+facilitator's API, and no chain control".
 
 - [ ] **Step 2: Run them to see them fail**
 
@@ -2756,9 +2805,9 @@ export function createAllowanceControl(options: AllowanceFixtureOptions): Allowa
 import type { Address, Base58EncodedBytes, KeyPairSigner, Rpc, SolanaRpcApi } from "@solana/kit";
 import {
   SUBSCRIPTIONS_PROGRAM_ADDRESS,
-  allowanceAccounts,
+  findSubscriptionAuthorityPda,
   getCloseSubscriptionAuthorityInstruction,
-  getRecurringDelegationSize,
+  getRecurringDelegationEncoder,
   revokeInstructions,
 } from "@lxfoundry/stint-subscriptions-client";
 import { describeError } from "@lxfoundry/stint-conformance";
@@ -2785,7 +2834,7 @@ export async function revokeHeldAllowances(
   const problems: string[] = [];
   const keys = [...holders.keys()];
   const authorities = await Promise.all(
-    keys.map(async (owner) => (await allowanceAccounts({ owner, agent: owner, mint: USDC_DEVNET_MINT, nonce: 0n })).subscriptionAuthority),
+    keys.map(async (owner) => (await findSubscriptionAuthorityPda({ user: owner, tokenMint: USDC_DEVNET_MINT }))[0]),
   );
   const found: { owner: Address; authority: Address }[] = [];
   for (let start = 0; start < keys.length; start += 100) {
@@ -2803,7 +2852,8 @@ export async function revokeHeldAllowances(
           encoding: "base64",
           commitment: "confirmed",
           filters: [
-            { dataSize: BigInt(getRecurringDelegationSize()) },
+            // The IDL gives no size: the encoder's fixed size is the account's, 211 bytes.
+            { dataSize: BigInt(getRecurringDelegationEncoder().fixedSize) },
             // An address is the base58 text of its 32 bytes.
             { memcmp: { offset: DELEGATOR_OFFSET, bytes: owner as unknown as Base58EncodedBytes, encoding: "base58" } },
           ],
@@ -2839,6 +2889,8 @@ Then, in `e2e/src/devnet/funds.ts`'s `cleanUp`, right after the `closing session
 - [ ] **Step 5: Give both targets the capability**
 
 **In `e2e/src/targets/local.ts`:**
+- Import `generateKeyPairSigner` from `@solana/kit`, and `GRANT_LAMPORTS` and `createAllowanceControl` from
+  `../fixtures/allowance.js`. `newBuyer` and `waitForNewSlot` are imported already.
 - Add `"allowance"` to the target's capability set, and remove the comment that says allowance funding joins "once the
   facilitator supports it".
 - Add to the context:
@@ -2900,52 +2952,42 @@ git commit -m "Grant allowances in the harness on both targets, and revoke them 
 
 **Files:**
 - Create: `conformance/src/scenarios/12-allowance-funding.ts`
-- Modify: `conformance/src/catalogue.ts:49`, `conformance/src/index.ts` (if it lists the scenarios)
+- Modify: `conformance/src/catalogue.ts` (scenario 12's line), `conformance/src/helpers.ts` (`refusalOf`),
+  `conformance/test/catalogue.test.ts`, `e2e/test/local-target.test.ts`, `e2e/test/devnet-target.test.ts`
 
 **Interfaces:**
-- Consumes: `ScenarioContext.allowance` (Task 7), `ClientOptions.allowance` and `rpc` (Task 5), and the conformance
-  helpers `sessionSeconds`, `awaitClose`, `readUntil` and `expectEqual`/`expectTrue`.
+- Consumes: `ScenarioContext.allowance` (Task 7), `ClientOptions.allowance` and `rpc` (Task 5); the conformance
+  helpers `sessionSeconds`, `closePollMs`, `awaitClose`, `readUntil`, `expectEqual`/`expectTrue` and `describeError`; stage 3's
+  `openOffers` and `refusalOf` (extended here with `message`).
 - Produces: `allowanceFunding(context: ScenarioContext): Promise<void>`.
 
 - [ ] **Step 1: Write the scenario**
+
+It reuses stage 3's helpers:
+- `openOffers(gateUrl)` (`conformance/src/payments.ts`), for the gate's rate;
+- `refusalOf(attempt)` (`conformance/src/helpers.ts`), which returns `{ status, reason, body }`.
+
+Extend `refusalOf` to return the message too. Add `readonly message: string` to its result type, and set it from the
+`StintError` it catches (`message: error.message`). Its other callers ignore the new member.
 
 `conformance/src/scenarios/12-allowance-funding.ts`:
 
 ```ts
 import type { Address } from "@solana/kit";
-import { StintError, createStintClient, type Policy } from "@lxfoundry/stint-client";
+import { createStintClient, type Policy } from "@lxfoundry/stint-client";
 import { fetchMaybeSession } from "@lxfoundry/stint-program-client";
 import { fetchMaybeRecurringDelegation } from "@lxfoundry/stint-subscriptions-client";
-import { HEADERS, associatedTokenAddress, decodePaymentRequiredHeader, readElapsedRequirements } from "@lxfoundry/stint-x402";
+import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import { expectEqual, expectTrue } from "../assert.js";
 import { awaitClose } from "../closes.js";
-import { closePollMs, sessionSeconds } from "../helpers.js";
+import { closePollMs, refusalOf, sessionSeconds } from "../helpers.js";
+import { openOffers } from "../payments.js";
 import { readUntil } from "../reads.js";
+import { describeError } from "../runner.js";
 import type { ScenarioContext } from "../types.js";
 
 /** The limits the scenarios use (helpers.ts's `buyerClient`), so that only the allowance's cap refuses a payment. */
 const POLICY: Policy = { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } };
-
-/** The gate's rate, from its first offer: the scenario sizes the allowance's cap from it. */
-async function offeredRate(gateUrl: string): Promise<bigint> {
-  const response = await fetch(`${gateUrl}/sessions`, { method: "POST" });
-  const header = response.headers.get(HEADERS.paymentRequired);
-  const required = header ? decodePaymentRequiredHeader(header) : await response.json();
-  const offer = (required as { accepts: unknown[] }).accepts.map(readElapsedRequirements).find((entry) => entry?.extra.action === "open");
-  if (!offer) throw new Error("The gate made no open offer");
-  return BigInt(offer.extra.rate);
-}
-
-/** How a payment was refused: the HTTP status (none when the client refused it itself), the body's reason, the message. */
-async function refusalOf(attempt: Promise<unknown>): Promise<{ readonly status?: number; readonly reason?: unknown; readonly message: string } | undefined> {
-  try {
-    await attempt;
-    return undefined;
-  } catch (error) {
-    if (!(error instanceof StintError)) throw error;
-    return { status: error.status, reason: (error.body as { error?: unknown } | undefined)?.error, message: error.message };
-  }
-}
 
 /**
  * Scenario 12 (spec §10, §12.7): an owner grants the agent's key a recurring delegation, and the agent's sessions are paid
@@ -2957,89 +2999,107 @@ async function refusalOf(attempt: Promise<unknown>): Promise<{ readonly status?:
 export async function allowanceFunding(context: ScenarioContext): Promise<void> {
   const allowance = context.allowance;
   if (!allowance) throw new Error("Scenario 12 needs the allowance capability");
-  const rate = await offeredRate(context.gateUrl);
+  const { offer } = await openOffers(context.gateUrl);
+  const rate = BigInt(offer.extra.rate);
   const first = sessionSeconds(context.target, 20);
   const extra = sessionSeconds(context.target, 10);
-  // The cap covers the open and the top-up with 5 s to spare: a third payment, of 10 s, goes over it.
+  const third = sessionSeconds(context.target, 10);
+  // The cap covers the open and the top-up with 5 s to spare: a third payment, of at least 10 s, goes over it.
   const perPeriod = rate * BigInt(first + extra + 5);
   const grant = await allowance.grant({ usdc: rate * BigInt(first + extra + 40), perPeriod, periodSeconds: 3_600 });
   try {
     const owner = grant.owner.signer.address;
-    const usdcOf = async (account: Address) => {
+    const usdcOf = async (account: Address): Promise<bigint> => {
       const { value } = await context.rpc.getAccountInfo(account, { encoding: "base64", commitment: "confirmed" }).send();
       if (!value) return 0n;
       return BigInt((await context.rpc.getTokenAccountBalance(account, { commitment: "confirmed" }).send()).value.amount);
     };
-    const pulled = async () => {
-      const read = await fetchMaybeRecurringDelegation(context.rpc, grant.delegation, { commitment: "confirmed" });
-      expectTrue(read.exists, "the delegation exists");
-      return read.exists ? read.data.amountPulledInPeriod : 0n;
-    };
+    // A node can answer from behind right after it reported a transaction confirmed (spec §12.2): every read that follows
+    // a payment is retried until it shows what the scenario expects, and the assertion reports what it last found.
+    const ownerBalance = (expected: bigint) => readUntil(context.readRetry, () => usdcOf(grant.owner.usdcAccount), (amount) => amount === expected);
+    const pulled = (expected: bigint) =>
+      readUntil(
+        context.readRetry,
+        async () => {
+          const read = await fetchMaybeRecurringDelegation(context.rpc, grant.delegation, { commitment: "confirmed" });
+          return read.exists ? read.data.amountPulledInPeriod : undefined;
+        },
+        (amount) => amount === expected,
+      );
     const client = createStintClient({ signer: grant.agent, policy: POLICY, allowance: { owner, nonce: grant.nonce } });
     const ownerStart = await usdcOf(grant.owner.usdcAccount);
 
-    // Pulled from the owner.
+    // Pulled from the owner. A connection holds the session from the open to the close: the gate closes a session that has
+    // had none for its idle close, and the reads below take seconds on devnet.
     const session = await client.open(context.gateUrl, { seconds: first });
-    const readSession = () => fetchMaybeSession(context.rpc, session.id, { commitment: "confirmed" });
-    const opened = await readUntil(context.readRetry, readSession, (read) => read.exists);
-    expectTrue(opened.exists, "the session exists on-chain after the open");
-    if (!opened.exists) return;
-    expectEqual(opened.data.refundOwner, owner, "the session's refund owner is the allowance's owner");
-    expectEqual(opened.data.authority, grant.agent.address, "the session's authority is the agent");
-    expectEqual(await usdcOf(grant.owner.usdcAccount), ownerStart - session.cost, "the open is pulled from the owner's account");
-    const agentToken = await associatedTokenAddress(grant.agent.address, opened.data.mint);
-    expectEqual((await context.rpc.getAccountInfo(agentToken, { commitment: "confirmed" }).send()).value, null, "the agent has no USDC account at all");
-    expectEqual(await pulled(), session.cost, "the period counts the open");
-
-    // The top-up is pulled too. A connection holds the session meanwhile: the gate closes one that has had none for its idle close.
+    const deposit = session.cost;
     const holding = await session.connect();
     holding.on("error", () => {});
-    const toppedUp = await session.topUp({ seconds: extra }).finally(() => holding.terminate());
-    expectEqual(await usdcOf(grant.owner.usdcAccount), ownerStart - session.cost - toppedUp.cost, "the top-up is pulled from the owner's account");
-    const pulledBeforeClose = await pulled();
-    expectEqual(pulledBeforeClose, session.cost + toppedUp.cost, "the period counts the open and the top-up");
+    try {
+      const readSession = () => fetchMaybeSession(context.rpc, session.id, { commitment: "confirmed" });
+      const opened = await readUntil(context.readRetry, readSession, (read) => read.exists);
+      expectTrue(opened.exists, "the session exists on-chain after the open");
+      if (!opened.exists) return;
+      expectEqual(opened.data.refundOwner, owner, "the session's refund owner is the allowance's owner");
+      expectEqual(opened.data.authority, grant.agent.address, "the session's authority is the agent");
+      expectEqual(await ownerBalance(ownerStart - deposit), ownerStart - deposit, "the open is pulled from the owner's account");
+      const agentToken = await associatedTokenAddress(grant.agent.address, opened.data.mint);
+      expectEqual((await context.rpc.getAccountInfo(agentToken, { commitment: "confirmed" }).send()).value, null, "the agent has no USDC account at all");
+      expectEqual(await pulled(deposit), deposit, "the period counts the open");
 
-    // Refunded to the owner, and the period's count stays.
-    const beforeClose = await usdcOf(grant.owner.usdcAccount);
-    await session.close();
-    const { event } = await awaitClose(context.rpc, session.id, context.readRetry, 15_000, "the close is on-chain", closePollMs(context.target));
-    expectTrue(event.refunded > 0n, "closing early refunds something");
-    expectEqual(await usdcOf(grant.owner.usdcAccount), beforeClose + event.refunded, "the refund goes to the owner's account");
-    expectEqual(await usdcOf(agentToken), 0n, "nothing reaches the agent");
-    expectEqual(await pulled(), pulledBeforeClose, "a refund does not restore the allowance");
+      // The top-up is pulled too. `session.cost` counts everything the session holds: the deposit and the top-up.
+      const toppedUp = await session.topUp({ seconds: extra });
+      const held = session.cost;
+      expectEqual(held, deposit + toppedUp.cost, "the session holds the deposit and the top-up");
+      expectEqual(await ownerBalance(ownerStart - held), ownerStart - held, "the top-up is pulled from the owner's account");
+      expectEqual(await pulled(held), held, "the period counts the open and the top-up");
 
-    // Refused over the cap, by the chain: nothing taken, nothing locked.
-    const budget = client.remainingBudget();
-    const ownerBefore = await usdcOf(grant.owner.usdcAccount);
-    const third = sessionSeconds(context.target, 10);
-    const refused = await refusalOf(client.open(context.gateUrl, { seconds: third }));
-    expectEqual(refused?.status, 402, "a payment over the cap is refused with 402");
-    expectEqual(refused?.reason, "simulation_failed", "a payment over the cap is refused as simulation_failed");
-    expectTrue(/allowance/.test(refused?.message ?? ""), "the refusal says that an allowance may be the cause");
-    expectEqual(await usdcOf(grant.owner.usdcAccount), ownerBefore, "the refused payment takes nothing from the owner");
-    expectEqual(client.remainingBudget(), budget, "the refused payment locks nothing");
-    expectEqual(await pulled(), pulledBeforeClose, "the refused pull is not counted");
+      // Refunded to the owner, and the period's count stays.
+      await session.close();
+      const { event } = await awaitClose(context.rpc, session.id, context.readRetry, 15_000, "the close is on-chain", closePollMs(context.target));
+      expectTrue(event.refunded > 0n, "closing early refunds something");
+      const afterClose = ownerStart - held + event.refunded;
+      expectEqual(await ownerBalance(afterClose), afterClose, "the refund goes to the owner's account");
+      expectEqual(await usdcOf(agentToken), 0n, "nothing reaches the agent");
+      expectEqual(await pulled(held), held, "a refund does not restore the allowance");
 
-    // A client with a node refuses it before signing.
-    const checking = createStintClient({ signer: grant.agent, policy: POLICY, allowance: { owner, nonce: grant.nonce }, rpc: context.rpc });
-    const early = await refusalOf(checking.open(context.gateUrl, { seconds: third }));
-    expectEqual(early?.status, undefined, "a client with a node refuses before sending anything");
-    expectTrue(/allowance for this period is used up/.test(early?.message ?? ""), "it says that the period's allowance is used up");
+      // Refused over the cap, by the chain: nothing taken, nothing locked, nothing counted.
+      const budget = client.remainingBudget();
+      const refused = await refusalOf(client.open(context.gateUrl, { seconds: third }));
+      expectEqual(refused?.status, 402, "a payment over the cap is refused with 402");
+      expectEqual(refused?.reason, "simulation_failed", "a payment over the cap is refused as simulation_failed");
+      expectTrue(/allowance/.test(refused?.message ?? ""), "the refusal says that an allowance may be the cause");
+      expectEqual(await usdcOf(grant.owner.usdcAccount), afterClose, "the refused payment takes nothing from the owner");
+      expectEqual(client.remainingBudget(), budget, "the refused payment locks nothing");
+      expectEqual(await pulled(held), held, "the refused pull is not counted");
+
+      // A client with a node refuses it before signing.
+      const checking = createStintClient({ signer: grant.agent, policy: POLICY, allowance: { owner, nonce: grant.nonce }, rpc: context.rpc });
+      const early = await refusalOf(checking.open(context.gateUrl, { seconds: third }));
+      expectEqual(early?.status, undefined, "a client with a node refuses before sending anything");
+      expectTrue(/allowance for this period is used up/.test(early?.message ?? ""), "it says that the period's allowance is used up");
+    } finally {
+      holding.terminate();
+    }
   } finally {
-    await allowance.revoke(grant);
+    // A failed revoke must not hide the scenario's own outcome. On devnet, the clean-up revokes whatever is left.
+    await allowance.revoke(grant).catch((error: unknown) => console.error(`scenario 12: the revoke failed: ${describeError(error)}`));
   }
 }
 ```
 
-`session.cost` is the open's deposit, and `toppedUp.cost` the top-up's (spec §9.4). The cap is `rate × (first + extra
-+ 5)`; the third payment costs `rate × third`, with `third ≥ 10`. So the third is refused whatever the target's
-`sessionSeconds` adds. Check that `HEADERS`, `decodePaymentRequiredHeader` and `readElapsedRequirements` are exported by
-`@lxfoundry/stint-x402` (the client imports them from there), and add `@lxfoundry/stint-x402` to
-`conformance/package.json` if it is not a dependency.
+**The arithmetic:**
+- `session.cost` counts everything the session holds through this client, the opening deposit and each top-up (spec
+  §9.4). The scenario keeps the deposit apart (`deposit`), and compares the owner's balance and the period's count with
+  `session.cost` after the top-up.
+- The cap is `rate × (first + extra + 5)`, and the third payment costs `rate × third`, with `third ≥ 10`, so it is
+  refused whatever the target's `sessionSeconds` adds.
+- **The idle close:** the connection is opened right after the open and held until after the close. The gate arms its
+  idle close (10 s) at the open, and on devnet the reads between the open and the top-up take longer than that.
 
 - [ ] **Step 2: Register it as pending first, and run it on `local`**
 
-In `conformance/src/catalogue.ts`, import `allowanceFunding` and change line 49 to
+In `conformance/src/catalogue.ts`, import `allowanceFunding` and change scenario 12's line, `pending(12, "Allowance funding", ["allowance"])`, to
 `pending(12, "Allowance funding", ["allowance"], "shared", allowanceFunding)`.
 
 Run: `pnpm e2e:local`
@@ -3049,8 +3109,13 @@ If it fails, read the scenario's failure in `e2e/report` and fix the cause. Do n
 - [ ] **Step 3: Five runs in a row, then make it required**
 
 Run `pnpm e2e:local` five times. Expected: scenario 12 passes every time, and every required scenario still passes.
-Then change the line to `required(12, "Allowance funding", allowanceFunding, ["allowance"])`.
-`conformance/test/catalogue.test.ts` checks the committed list of required scenario IDs: add 12 there.
+Then:
+- change the line to `required(12, "Allowance funding", allowanceFunding, ["allowance"])`;
+- add 12 to the committed list of required scenario IDs that `conformance/test/catalogue.test.ts` checks;
+- in `e2e/test/local-target.test.ts`, add 12 to `REQUIRED`, and add its time to the comment above it (about 5 s);
+- in `e2e/test/devnet-target.test.ts`, add 12 to the `required` list of "passes the required scenarios with buyers
+  funded from the funding key". That runs the devnet target's grant, through its pool and funding key, and its
+  clean-up's revoke in CI's unit tests, not only in a manual devnet run.
 
 Run: `pnpm --filter @lxfoundry/stint-conformance test && pnpm e2e:local`
 Expected: PASS; the report counts scenario 12 among the required ones.
@@ -3058,7 +3123,7 @@ Expected: PASS; the report counts scenario 12 among the required ones.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add conformance
+git add conformance e2e/test
 git commit -m "Add scenario 12, allowance funding, and make it required"
 ```
 
@@ -3107,7 +3172,12 @@ git commit -m "Add scenario 12, allowance funding, and make it required"
   - Add: "A refusal by the program names the cause in the facilitator's message (the period's cap used up, the
     delegation expired or not started); its reason stays `simulation_failed`."
 - **§12.2 "Allowance":** "The `local` and `devnet` targets have it: the harness grants an allowance from a new owner
-  to a new agent key, and revokes it after."
+  to a new agent key, and revokes it after." In the targets table above it, the Capabilities cell of `local` becomes
+  "Chain control, stack control, facilitator API, allowance", and that of `devnet` "Stack control, facilitator API,
+  allowance".
+- **§12.6:** where the devnet clean-up is described ("closes every session that the seed's keys have open …"), add:
+  "It also revokes the delegations those keys granted and closes their Subscription Authorities, whose rent returns to
+  them before their balances go back to the funding key."
 - **§12.3:** the Subscriptions program's client comes from its vendored IDL; question 6 is answered with a real pull.
 - **§14:** question 3 is answered. "Yes: `transferRecurring` and `stint.open` (and `stint.top_up`) share one
   transaction through Kora, whose allowlist must include the Subscriptions program (section 6.2); the instruction and its
@@ -3125,7 +3195,9 @@ MCP server's three variables, and the facts an owner needs:
 - refunds come back to the owner but do not restore the period's allowance;
 - the agent's key can pull up to the period's cap until the delegation is revoked or expires.
 
-Update the README's scenario count.
+Update the README's scenario count. In its devnet paragraph ("A run checks that the endpoint is devnet … then cleans
+up: it closes every session that the seed's keys have open and returns what they hold to the funding key"), add after
+"open": ", revokes the allowances they granted,".
 
 If `packages/mcp/README.md` or `.env.example` lists the MCP server's variables, add the three new ones, with empty
 values in `.env.example`.
