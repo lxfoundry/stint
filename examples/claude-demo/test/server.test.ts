@@ -122,6 +122,37 @@ describe("the demo's MCP server", () => {
     expect(calls).toEqual([]);
   });
 
+  it("lists a strict schema for each tool: no argument but the ones it names", async () => {
+    const { tools } = await (await connect()).listTools();
+    expect(tools).toHaveLength(Object.values(TOOL).length);
+    for (const tool of tools) expect(tool.inputSchema, tool.name).toMatchObject({ type: "object", additionalProperties: false });
+    const state = tools.find((tool) => tool.name === TOOL.state)!;
+    expect(state.inputSchema.properties).toEqual({ refreshBalance: { type: "boolean" } });
+    for (const tool of tools.filter((entry) => entry.name !== TOOL.state)) expect(tool.inputSchema.properties ?? {}, tool.name).toEqual({});
+  });
+
+  it("refuses an argument a tool does not name, as a tool error that names it, instead of dropping it: a launch takes no length", async () => {
+    const c = await connect();
+    for (const name of Object.values(TOOL)) {
+      const result = await c.callTool({ name, arguments: { seconds: 30 } });
+      expect(result.isError, name).toBe(true);
+      expect(text(result), name).toMatch(/seconds/);
+    }
+    const alongside = await c.callTool({ name: TOOL.state, arguments: { refreshBalance: true, seconds: 30 } });
+    expect(alongside.isError).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it("still takes the arguments it names, and none at all", async () => {
+    const c = await connect();
+    for (const name of Object.values(TOOL)) {
+      expect((await c.callTool({ name, arguments: {} })).isError, name).toBeFalsy();
+      expect((await c.callTool({ name })).isError, name).toBeFalsy();
+    }
+    expect((await c.callTool({ name: TOOL.state, arguments: { refreshBalance: false } })).isError).toBeFalsy();
+    expect(calls).toHaveLength(Object.values(TOOL).length * 2 + 1);
+  });
+
   it("refuses a tool it does not list, with the protocol's own error, before the handler runs", async () => {
     const c = await connect();
     await expect(c.callTool({ name: "stint_other", arguments: {} })).rejects.toThrow(/Tool stint_other not found/);

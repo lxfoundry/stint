@@ -1,16 +1,20 @@
 import type { CallToolResult } from "@modelcontextprotocol/server";
-import { redactUrls } from "@lxfoundry/stint-x402";
+import { TOP_UP_MARGIN_SECONDS, redactUrls } from "@lxfoundry/stint-x402";
+import { formatUsdc } from "../app/model.js";
 import type { Demo } from "./demo.js";
 import type { CallHandler } from "./owner.js";
-import { LAUNCH_SECONDS, TOOL, TOP_UP_SECONDS, type DemoState, type ToolName } from "./state.js";
+import { LAUNCH_AMOUNT, LAUNCH_SECONDS, TOOL, TOP_UP_SECONDS, type DemoState, type ToolName } from "./state.js";
+
+/** A top-up is refused with this many seconds of paid time left or fewer: the facilitator's margin and 3 s more, as `topUpRefusal` has it. */
+const TOP_UP_REFUSED_WITHIN_SECONDS = TOP_UP_MARGIN_SECONDS + 3;
 
 export const TOOL_DESCRIPTIONS: Readonly<Record<ToolName, string>> = {
   [TOOL.demo]:
     "Shows the Stint demo panel and returns the demo's state. Call it when the person asks to start, open or see the Stint demo.",
   [TOOL.state]:
     "The demo's state, for the panel: the agent's wallet, the session, the x402 exchange. Set refreshBalance to read the wallet's USDC again.",
-  [TOOL.launch]: `Opens a ${LAUNCH_SECONDS} s Stint session at the demo's gate: pays 0.100 devnet USDC over x402 into the session's escrow, then watches the agent's own USDC account on the stream. The panel shows it.`,
-  [TOOL.topUp]: `Buys ${TOP_UP_SECONDS} s more on the running session, before its paid time runs out. What is not used is still refunded at the close.`,
+  [TOOL.launch]: `Opens a ${LAUNCH_SECONDS} s Stint session at the demo's gate: pays ${formatUsdc(LAUNCH_AMOUNT)} on devnet over x402 into the session's escrow, then watches the agent's own USDC account on the stream. Open the panel first with ${TOOL.demo}: the panel shows the session, and this tool does not open it.`,
+  [TOOL.topUp]: `Buys ${TOP_UP_SECONDS} s more on the running session. Refused when ${TOP_UP_REFUSED_WITHIN_SECONDS} s or less of paid time is left, and when ${TOP_UP_SECONDS} s more would pass the seller's longest session. What is not used is still refunded at the close.`,
   [TOOL.close]: "Closes the running session now: the seller is paid for the time used, and the rest of the deposit is refunded.",
 };
 

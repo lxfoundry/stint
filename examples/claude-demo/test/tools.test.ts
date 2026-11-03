@@ -1,8 +1,10 @@
 import type { CloseAllOutput } from "@lxfoundry/stint-client";
+import { TOP_UP_MARGIN_SECONDS } from "@lxfoundry/stint-x402";
 import { describe, expect, it } from "vitest";
+import { formatUsdc, topUpRefusal } from "../app/model.js";
 import type { Demo } from "../src/demo.js";
-import { FAUCET_URL, TOOL, type DemoState } from "../src/state.js";
-import { createCallHandler } from "../src/tools.js";
+import { FAUCET_URL, LAUNCH_AMOUNT, LAUNCH_SECONDS, TOOL, type DemoSession, type DemoState } from "../src/state.js";
+import { TOOL_DESCRIPTIONS, createCallHandler } from "../src/tools.js";
 
 const STATE: DemoState = {
   wallet: { address: "AgentWallet", usdc: "100000", checkedAt: 1 },
@@ -30,6 +32,32 @@ function fakeDemo(overrides: Partial<Demo> = {}): { demo: Demo; reads: unknown[]
   return { demo, reads };
 }
 const text = (result: { content?: unknown }) => (result.content as { text: string }[])[0]!.text;
+
+describe("the tools' descriptions", () => {
+  it("tell the model to open the panel before it launches, and what a launch costs, from the constants", () => {
+    const launch = TOOL_DESCRIPTIONS[TOOL.launch];
+    expect(launch).toContain(`Open the panel first with ${TOOL.demo}`);
+    expect(launch).toContain(formatUsdc(LAUNCH_AMOUNT));
+    expect(launch).toContain(`${LAUNCH_SECONDS} s`);
+  });
+
+  it("tell the model when a top-up is refused: close to the end, and past the seller's longest session, as the panel refuses it", () => {
+    const topUp = TOOL_DESCRIPTIONS[TOOL.topUp];
+    expect(topUp).toMatch(/longest session/);
+    // The margin the description names is the one `topUpRefusal` applies: refused at it, accepted a second past it.
+    const margin = Number(/(\d+) s or less/.exec(topUp)?.[1]);
+    expect(margin).toBeGreaterThan(0);
+    const open = (leftSeconds: number): DemoSession => ({
+      state: "open",
+      topUpMarginSeconds: TOP_UP_MARGIN_SECONDS,
+      frames: 0,
+      links: { topUps: [] },
+      paidUntil: 1_000 + leftSeconds,
+    });
+    expect(topUpRefusal(open(margin), 1_000_000)).toBeDefined();
+    expect(topUpRefusal(open(margin + 1), 1_000_000)).toBeUndefined();
+  });
+});
 
 describe("the owner's tool handler", () => {
   it("answers each tool with the state, as JSON text and as structured content", async () => {

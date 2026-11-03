@@ -22,8 +22,10 @@ function toStderr(line: string): void {
 /**
  * The MCP server. `serveStdio` may call its factory more than once (a protocol probe), so this holds no state: every
  * call goes to `call`. `stint_demo` shows the panel; `stint_demo_state` is for the panel only; the three actions are
- * for the model and the panel alike. A call that `call` rejects (a router that has shut down, an owner that cannot be
- * reached) reaches the model as a tool error with its message, each URL in it cut to its host.
+ * for the model and the panel alike. Every schema is strict: an argument a tool does not name is refused, as a tool
+ * error that names it, never dropped (a launch passed a length would otherwise open the usual session without a word).
+ * A call that `call` rejects (a router that has shut down, an owner that cannot be reached) reaches the model as a
+ * tool error with its message, each URL in it cut to its host.
  */
 export function createDemoServer(options: DemoServerOptions): McpServer {
   const report = options.log ?? toStderr;
@@ -42,8 +44,11 @@ export function createDemoServer(options: DemoServerOptions): McpServer {
   }
 
   const server = new McpServer(SERVER_INFO, { capabilities: { extensions: { [EXTENSION_ID]: {} } }, instructions: INSTRUCTIONS });
-  registerAppTool(server, TOOL.demo, { description: TOOL_DESCRIPTIONS[TOOL.demo], _meta: { ui: { resourceUri: PANEL_URI } } }, async () =>
-    run(TOOL.demo, {}),
+  registerAppTool(
+    server,
+    TOOL.demo,
+    { description: TOOL_DESCRIPTIONS[TOOL.demo], inputSchema: z.strictObject({}), _meta: { ui: { resourceUri: PANEL_URI } } },
+    async () => run(TOOL.demo, {}),
   );
   registerAppResource(server, "Stint demo panel", PANEL_URI, { description: "The Stint demo's panel: the wallet, the session, the x402 exchange" }, async () => ({
     contents: [{ uri: PANEL_URI, mimeType: RESOURCE_MIME_TYPE, text: options.html }],
@@ -52,7 +57,7 @@ export function createDemoServer(options: DemoServerOptions): McpServer {
     TOOL.state,
     {
       description: TOOL_DESCRIPTIONS[TOOL.state],
-      inputSchema: z.object({ refreshBalance: z.boolean().optional() }),
+      inputSchema: z.strictObject({ refreshBalance: z.boolean().optional() }),
       _meta: { ui: { visibility: ["app"] } },
     },
     async (args) => run(TOOL.state, args),
@@ -60,7 +65,7 @@ export function createDemoServer(options: DemoServerOptions): McpServer {
   for (const name of [TOOL.launch, TOOL.topUp, TOOL.close]) {
     server.registerTool(
       name,
-      { description: TOOL_DESCRIPTIONS[name], inputSchema: z.object({}), _meta: { ui: { visibility: ["model", "app"] } } },
+      { description: TOOL_DESCRIPTIONS[name], inputSchema: z.strictObject({}), _meta: { ui: { visibility: ["model", "app"] } } },
       async () => run(name, {}),
     );
   }
