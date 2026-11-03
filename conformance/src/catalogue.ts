@@ -2,10 +2,13 @@ import { openConnectCloseEarly } from "./scenarios/01-open-connect-close.js";
 import { closeBeforeMinSeconds } from "./scenarios/02-close-before-min-seconds.js";
 import { expiry } from "./scenarios/03-expiry.js";
 import { topUpBeforeAndAfterExpiry } from "./scenarios/04-top-up.js";
+import { unilateralClose } from "./scenarios/07-unilateral-close.js";
 import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
 import { sponsoredClose } from "./scenarios/15-sponsored-close.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
+import { gateUnreachableAtClose } from "./scenarios/24-gate-unreachable-at-close.js";
+import { gateAndFacilitatorUnreachableAtClose } from "./scenarios/25-gate-and-facilitator-unreachable-at-close.js";
 import { expiredSessionNobodyCloses } from "./scenarios/26-expired-session-nobody-closes.js";
 import { topUpWhileClosingAtExpiry } from "./scenarios/34-top-up-while-closing.js";
 import type { Capability, IsolationGroup, Scenario } from "./types.js";
@@ -38,7 +41,7 @@ export const catalogue: readonly Scenario[] = [
   required(4, "Top-up before and after expiry", topUpBeforeAndAfterExpiry),
   pending(5, "Payment with wrong terms, a wrong amount, or a Memo instruction"),
   pending(6, "Failed payment"),
-  pending(7, "Unilateral on-chain close"),
+  required(7, "Unilateral on-chain close", unilateralClose),
   pending(8, "Token: expired, wrong aud, wrong purpose, replayed"),
   required(9, "Disconnect past the grace period; reconnect within it; never connect", disconnectAndGrace),
   pending(10, "Resource outage", ["stack"], "ownStack"),
@@ -55,8 +58,8 @@ export const catalogue: readonly Scenario[] = [
   pending(21, "Refund account closed, a stray base unit, then expiry"),
   required(22, "The example agent's task, scripted", exampleAgentTask, ["stack"]),
   pending(23, "The gate restarts with a session open", ["stack"], "ownStack"),
-  pending(24, "The gate is unreachable when the buyer closes", ["stack"], "ownStack"),
-  pending(25, "The gate and the facilitator are unreachable when the buyer closes", ["stack"], "ownStack"),
+  required(24, "The gate is unreachable when the buyer closes", gateUnreachableAtClose, ["stack"], "ownStack"),
+  required(25, "The gate and the facilitator are unreachable when the buyer closes", gateAndFacilitatorUnreachableAtClose, ["stack"], "ownStack"),
   required(26, "An expired session that nobody closes", expiredSessionNobodyCloses, ["stack"], "ownStack"),
   pending(27, "The seller has closed its receiver_token before a close that pays it", ["stack"], "ownStack"),
   pending(28, "A payout account, then the vault, frozen", ["chain", "stack"], "ownStack"),

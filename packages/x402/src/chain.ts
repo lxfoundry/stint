@@ -54,6 +54,43 @@ export async function fetchClosedEvent(rpc: Rpc<SolanaRpcApi>, signature: string
   return instructions && findClosedEvent(instructions);
 }
 
+/** A session's close found on the chain: its signature, and the `Closed` event it emitted. */
+export interface FoundClose {
+  readonly signature: string;
+  readonly event: ClosedEvent;
+}
+
+/** How many of an address's newest transactions `findClose` looks through. */
+const CLOSE_LOOKBACK = 20;
+
+/**
+ * The close of a session (spec §7.3, "Account closed by another party"): the newest successful transaction that loaded the
+ * session's address and emitted a `Closed` event for it. A failed close, and a later transfer of lamports to the closed
+ * address (S12), can come after the close, so the newest entry alone is not enough. Undefined while there is none. A node
+ * still lists an address's transactions once its account is gone.
+ *
+ * Each entry is a request for its transaction, so a caller that looks again passes the same `notCloses` set: a signature that
+ * was read and holds no close of this session is added to it, and is not read again. One that could not be read (the node
+ * does not return it yet) is not added, and is tried at the next look. Without `retry`, each transaction is read once.
+ */
+export async function findClose(
+  rpc: Rpc<SolanaRpcApi>,
+  session: Address,
+  retry?: RetryOptions,
+  notCloses: Set<string> = new Set(),
+): Promise<FoundClose | undefined> {
+  const entries = await rpc.getSignaturesForAddress(session, { commitment: "confirmed", limit: CLOSE_LOOKBACK }).send();
+  for (const entry of entries) {
+    if (entry.err !== null || notCloses.has(entry.signature)) continue;
+    const instructions = await fetchProgramInstructions(rpc, entry.signature, retry);
+    if (!instructions) continue;
+    const event = findClosedEvent(instructions);
+    if (event?.session === session) return { signature: entry.signature, event };
+    notCloses.add(entry.signature);
+  }
+  return undefined;
+}
+
 /** An instruction as `getTransaction` records it with `json` encoding: account indices and base58 data. */
 export interface RecordedInstruction {
   readonly programIdIndex: number;

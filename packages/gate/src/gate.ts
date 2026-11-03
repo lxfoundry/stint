@@ -76,6 +76,8 @@ interface Tracked<U> {
   muted?: Map<WebSocket, { send: WebSocket["send"]; emit: WebSocket["emit"] }>;
   /** Set when the end timer first fires at the current `paidUntil`: `since` on the session clock (ms), `delayMs` the wait last armed for a retry. `resume` clears it. */
   endRetry?: { since: number; delayMs: number };
+  /** The lookup of a close by another party, once one has started (spec §7.3): a second notification joins it. */
+  endingElsewhere?: Promise<void>;
 }
 
 interface CloseOutcome {
@@ -123,6 +125,26 @@ const TOKEN_SKEW_MS = 30_000;
 const END_RETRY_STEADY_MS = 30_000;
 /** The longest wait between two end closes once the waits double, unless `endRetrySeconds` is longer. */
 const END_RETRY_MAX_MS = 60_000;
+/**
+ * The longest the lookup of a close by another party takes, looks included, whatever `readRetry` allows (spec §7.3): the
+ * connections are muted by then, and the session clock decides their close code without the event.
+ */
+const CLOSE_LOOKUP_MS = 2_000;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** What `promise` gives, or undefined if it has not settled within `ms`: the caller goes on without it. */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), Math.max(0, ms));
+  });
+  try {
+    return await Promise.race([promise, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 /** The longest delay `setTimeout` takes: a longer one fires at once. */
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -393,10 +415,11 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   }
 
   /**
-   * Re-reads the session at `confirmed`, once. True when that settles the matter: the session ended meanwhile; or its
-   * account is gone or holds another session, so it ends here with 4402; or `paid_until` moved later on the same
-   * session, so it runs on. A read that fails settles nothing, and neither does one that returns while a close is in
-   * flight: that close ends the session, with its own reason and code.
+   * Re-reads the session at `confirmed`, once. True when that settles the matter: the session ended meanwhile; or another
+   * party closed it, and its close is being looked up (`endClosedElsewhere`), which ends the session whatever the read
+   * found, and even if the read failed; or its account is gone or holds another session, so it ends here with 4402; or
+   * `paid_until` moved later on the same session, so it runs on. A read that fails settles nothing otherwise, and neither
+   * does one that returns while a close is in flight: that close ends the session, with its own reason and code.
    *
    * One read, not `readRetry`'s several: the account was read when the open settled, so finding nothing now means it has
    * closed, not that the RPC has yet to see it. An account at the address that started at another moment, or on other
@@ -407,6 +430,9 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     try {
       const stored = await upstream(() => config.chain.readSession(tracked.info.session));
       if (tracked.ended) return true;
+      // The lookup of another party's close ends the session, with the code its Closed event gives: a node that lags may
+      // still show the account, with a later `paid_until`, and an account gone here is that close, not the end timer's.
+      if (tracked.endingElsewhere) return true;
       // A close that started during the read decides: it is the reason the account may be gone, and it ends the session.
       if (tracked.closing) return false;
       if (!sameSession(tracked, stored)) {
@@ -419,16 +445,17 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       return true;
     } catch (error) {
       logError(error);
-      return false;
+      // The lookup of another party's close ends the session: an end-timer pass sends no close and arms no retry.
+      return tracked.endingElsewhere !== undefined;
     }
   }
 
   /**
    * Follows the session's account (spec §7.3), when the chain can: a later `paid_until` on the same session, a top-up this
    * gate did not settle, moves the end timer at once and resumes forwarding if the end timer has fired. An account that is
-   * gone, or that holds another session, is left to the end timer. A subscription that fails, or cannot start, is logged
-   * and not replaced: the end timer's re-read still finds a later `paid_until`. A gate that has stopped starts none, since
-   * nothing would end it.
+   * gone, or that holds another session, means the session was closed: `closedElsewhere` decides how it ends. A
+   * subscription that fails, or cannot start, is logged and not replaced: the end timer's re-read still finds a later
+   * `paid_until`, or the account gone. A gate that has stopped starts none, since nothing would end it.
    */
   function follow(tracked: Tracked<U>): void {
     if (stopped || !config.chain.watchSession) return;
@@ -438,13 +465,79 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       tracked.unwatch = config.chain.watchSession(
         session,
         (stored) => {
-          if (!sameSession(tracked, stored)) return;
-          paidLonger(tracked, paidUntil(stored));
+          if (sameSession(tracked, stored)) paidLonger(tracked, paidUntil(stored));
+          else closedElsewhere(tracked);
         },
         failed,
       );
     } catch (error) {
       failed(error);
+    }
+  }
+
+  /**
+   * The session's account is gone, or holds another session (spec §7.3, "Account closed by another party"). A close of the
+   * gate's own in flight decides first: it may be what closed the account, and once confirmed it ends the session with its
+   * own reason and code; if it does not confirm (it fails, or is still pending), this runs again. Otherwise the session
+   * ends here, with no close (`endClosedElsewhere`). A second notification while that runs joins it.
+   */
+  function closedElsewhere(tracked: Tracked<U>): void {
+    if (tracked.ended) return;
+    const closing = tracked.closing;
+    if (closing) {
+      // Runs after `startClose`'s own handler, which has cleared `closing` by then if the close failed.
+      const again = () => closedElsewhere(tracked);
+      void closing.then((outcome) => outcome.ended || again(), again);
+      return;
+    }
+    tracked.endingElsewhere ??= endClosedElsewhere(tracked).catch(logError);
+  }
+
+  /**
+   * Ends a session that another party closed. Forwarding stops at once: the session is over on chain, whatever the lookup
+   * finds. From then on a new connection, a close or a top-up is answered `404` (`endingElsewhere` is set), a top-up that
+   * confirms does not resume forwarding, an end-timer pass already running leaves the session to this (`settledByChain`),
+   * and the end timer is disarmed, since there is nothing left to settle. The close is looked up (`lookUpClose`). The
+   * connections get `4402` if the close came at or after its `paid_until`, since the paid time ran out whoever closed it,
+   * and `4410` before; without the close, the session clock is compared with the last `paid_until` the gate saw. The
+   * session ends whatever the lookup did, and before anything is logged: with its end timer disarmed, nothing else would
+   * end it.
+   */
+  async function endClosedElsewhere(tracked: Tracked<U>): Promise<void> {
+    mute(tracked);
+    disarm(tracked, "end");
+    const session = tracked.info.session;
+    let event: ClosedEvent | undefined;
+    try {
+      if (config.chain.lastClose) event = await lookUpClose(session, config.chain.lastClose.bind(config.chain));
+    } catch (error) {
+      logError(error);
+    } finally {
+      if (!tracked.ended) {
+        const ranOut = event ? event.at >= event.paidUntil : BigInt(Math.floor(sessionClock() / 1000)) >= tracked.paidUntil;
+        await end(tracked, "closedElsewhere", ranOut ? CLOSE_CODES.PAID_TIME_ENDED : CLOSE_CODES.SESSION_CLOSED);
+        log({ event: "closed_elsewhere", session, found: event !== undefined });
+      }
+    }
+  }
+
+  /**
+   * The `Closed` event of a close by another party (spec §7.3), or undefined if none shows. The node's list of the
+   * address's transactions can lag the account notification, so the look is repeated every `readRetry.delayMs`, within
+   * `readRetry.attempts`, for `CLOSE_LOOKUP_MS` at most, looks included: a look still running then is given up. The looks
+   * share one `notCloses`, so a transaction read and found to hold no close is not read again. A look that fails ends the
+   * lookup. The bound is kept on a monotonic clock (`performance.now`), which a change of the system clock does not move.
+   */
+  async function lookUpClose(
+    session: Address,
+    lastClose: (session: Address, notCloses: Set<string>) => Promise<ClosedEvent | undefined>,
+  ): Promise<ClosedEvent | undefined> {
+    const deadline = performance.now() + CLOSE_LOOKUP_MS;
+    const notCloses = new Set<string>();
+    for (let look = 1; ; look++) {
+      const event = await within(upstream(() => lastClose(session, notCloses)), deadline - performance.now());
+      if (event || look >= readRetry.attempts || performance.now() + readRetry.delayMs >= deadline) return event;
+      await sleep(readRetry.delayMs);
     }
   }
 
@@ -529,7 +622,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
    * fired, and otherwise only the end moves. A session that has ended stays ended.
    */
   function paidLonger(tracked: Tracked<U>, until: bigint): void {
-    if (tracked.ended || until <= tracked.paidUntil) return;
+    // A session that another party closed stays over: a top-up that confirms while its close is looked up resumes nothing.
+    if (tracked.ended || tracked.endingElsewhere || until <= tracked.paidUntil) return;
     if (tracked.muted) resume(tracked, until);
     else extend(tracked, until);
   }
@@ -544,7 +638,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
    */
   async function topUp(request: IncomingMessage, response: ServerResponse, url: URL, session: Address): Promise<void> {
     const tracked = sessions.get(session);
-    if (!tracked || tracked.ended) return sendJson(response, 404, { error: "unknown_session" });
+    // A session that another party closed is over on chain while the gate looks its close up (spec §7.3).
+    if (!tracked || tracked.ended || tracked.endingElsewhere) return sendJson(response, 404, { error: "unknown_session" });
     if (tracked.muted) return paymentRequired(response, menu, "session_expired");
     const stored = await upstream(() => config.chain.readSession(session));
     if (!sameSession(tracked, stored)) {
@@ -654,8 +749,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     const tracked = sessions.get(session);
     if (!tracked) return sendJson(response, 404, { error: "unknown_session" });
     if (!(await authenticate(bearer(request), tracked, "close"))) return sendJson(response, 401, { error: "unauthorized" });
-    // The session may have ended while the token was checked.
-    if (tracked.ended) return sendJson(response, 404, { error: "unknown_session" });
+    // The session may have ended while the token was checked, or another party may have closed it (spec §7.3).
+    if (tracked.ended || tracked.endingElsewhere) return sendJson(response, 404, { error: "unknown_session" });
     // Overlapping closes share one settlement and one outcome (the first assignment is synchronous).
     const outcome = await (tracked.closing ??= startClose(tracked, BUYER_CLOSE));
     sendJson(response, outcome.status, outcome.body);
@@ -754,8 +849,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     if (!tracked) return refuseUpgrade(socket, 404);
     const token = bearer(request) ?? url.searchParams.get("token") ?? undefined;
     if (!(await authenticate(token, tracked, "connect"))) return refuseUpgrade(socket, 401);
-    // The session may have ended while the token was checked.
-    if (tracked.ended) return refuseUpgrade(socket, 404);
+    // The session may have ended while the token was checked, or another party may have closed it (spec §7.3).
+    if (tracked.ended || tracked.endingElsewhere) return refuseUpgrade(socket, 404);
     if (!sessionMatches(tracked.stored, seller)) return refuseUpgrade(socket, 403);
     if (Number(tracked.paidUntil) * 1000 - sessionClock() <= marginMs) return refuseUpgrade(socket, 402);
     wss.handleUpgrade(request, socket, head, (ws) => {

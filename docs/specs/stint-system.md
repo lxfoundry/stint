@@ -1006,8 +1006,8 @@ not a connection is live.
 | Resource outage (`closeOnOutage`) | Drop connections (`4503`); close | `WaiveMinimum` |
 | Admin command (section 7.7) | Drop connections (`4410`); close | `WaiveMinimum` |
 | A top-up seen on the account | Move the end timer | — |
-| End timer fires | Stop forwarding (the gate discards what the resource sends to a connection and what the connection sends to the resource, and forwards both again if the session continues), and stop the idle timer: it does not run while forwarding is stopped, a connection that drops then does not start it, and if the session continues with no connection left, it starts again for `idleCloseSeconds`. A close already in flight when the timer fires is joined with no re-read, and one that starts during the re-read decides the same way: that close, the buyer's or the idle timer's, ends the session with its own reason and code (`4410` for the buyer's), not `4402`. Re-read the session at `confirmed`. If the account is gone, or holds another session (another `started_at`, or terms the gate does not offer: an account opened again at the address after a close, section 4.1), the session the gate tracks has ended: drop its connections (`4402`), with no close. If `paid_until` moved on the same session, resume forwarding and reset the timer. Otherwise close. On `NotExpired`, re-read the same way: gone or another session, drop the connections (`4402`); `paid_until` moved on the same session (a top-up landed), resume forwarding and reset the timer; neither (the chain's clock is behind), retry. Whatever made a close fail while the session is unchanged, each retry waits `endRetrySeconds` for the first 30 s since the timer first fired at this `paid_until`, then twice the previous wait each time, up to 60 s (or `endRetrySeconds`, if that is longer), until the session ends; a session paid for longer starts again with the short wait. Once the gate's own close is confirmed, drop connections (`4402`) | `AtExpiry` |
-| Account closed by another party | Drop connections: `4402` if the `Closed` event's `at` is at or after its `paid_until`, since the paid time ran out whoever closed it; otherwise `4410`. The gate lists the session address's transactions at `confirmed`, which still works once the account is gone. It takes the most recent successful one whose inner instructions hold a `Closed` event for this session (section 4.4). Failed transactions and later lamport transfers to the address (S12) can come after the close, so the latest entry alone is not enough. If that lookup fails, the gate compares its session clock with the last `paid_until` it saw | — |
+| End timer fires | Stop forwarding (the gate discards what the resource sends to a connection and what the connection sends to the resource, and forwards both again if the session continues), and stop the idle timer: it does not run while forwarding is stopped, a connection that drops then does not start it, and if the session continues with no connection left, it starts again for `idleCloseSeconds`. A close already in flight when the timer fires is joined with no re-read, and one that starts during the re-read decides the same way: that close, the buyer's or the idle timer's, ends the session with its own reason and code (`4410` for the buyer's), not `4402`. Re-read the session at `confirmed`. If the account is gone, or holds another session (another `started_at`, or terms the gate does not offer: an account opened again at the address after a close, section 4.1), the session the gate tracks has ended: drop its connections (`4402`), with no close. Once the lookup of a close by another party has started (the row "Account closed by another party"), that lookup decides instead, whatever the re-read finds. If `paid_until` moved on the same session, resume forwarding and reset the timer. Otherwise close. On `NotExpired`, re-read the same way: gone or another session, drop the connections (`4402`); `paid_until` moved on the same session (a top-up landed), resume forwarding and reset the timer; neither (the chain's clock is behind), retry. Whatever made a close fail while the session is unchanged, each retry waits `endRetrySeconds` for the first 30 s since the timer first fired at this `paid_until`, then twice the previous wait each time, up to 60 s (or `endRetrySeconds`, if that is longer), until the session ends; a session paid for longer starts again with the short wait. Once the gate's own close is confirmed, drop connections (`4402`) | `AtExpiry` |
+| Account closed by another party: the subscription finds the account gone, or holding another session (section 4.1) | A close of the gate's own in flight decides first: once confirmed, it ends the session with its own reason and code. Otherwise, or if that close does not confirm, stop forwarding at once, answer a new connection, a close or a top-up of the session with `404`, and drop connections, with no close: `4402` if the `Closed` event's `at` is at or after its `paid_until`, since the paid time ran out whoever closed it; otherwise `4410`. The gate lists the session address's transactions at `confirmed`, which still works once the account is gone. It takes the most recent successful one whose inner instructions hold a `Closed` event for this session (section 4.4). Failed transactions and later lamport transfers to the address (S12) can come after the close, so the latest entry alone is not enough. The node's list can lag the notification, so a lookup that finds nothing is repeated for a few seconds at most. If it still finds nothing, or fails, the gate compares its session clock with the last `paid_until` it saw | — |
 | A close before `paid_until` fails because the buyer's `refund_to` is closed and the close pays it | Do not retry. The session settles at expiry with `AtExpiry`, which pays any residual to the receiver (section 4.3) | — |
 | The session ends, whatever the cause | `teardown(reason)`, once; unsubscribe | — |
 
@@ -1237,6 +1237,35 @@ that close is pending. The client polls the status until `404`, for at most `clo
 then moves on. A gate close that lands later is harmless: the next step first checks that the
 session is still open, and two closes of one session cannot both land.
 
+The client moves to the next step on any answer to the gate's close but `200` and `202`, and
+when the gate cannot be reached: a refusal of the close itself, such as `409`, is met again by
+the later steps, which judge the close for themselves. It also moves on when the facilitator
+cannot be reached, answers `GET closeUrl` with anything but the session's fields or `404
+unknown_session`, or does not close the session. A request with no answer is given up: a read
+after a few seconds, a request that sends a close after a longer limit, past the facilitator's
+wait for the close to confirm; that close may still land. So may a close whose connection drops
+after it was sent; a connection that cannot be made means the close was never sent. A step whose
+close may still land (a `202` past `closeWaitSeconds`, `settlement_pending` from the facilitator,
+or the client's own close that is still pending, or whose sending or confirmation could not be
+read in time) passes its signature on. The check finds the session closed when the gate's status
+or `GET closeUrl` answers `404 unknown_session`, and so does a sponsored close that the
+facilitator refuses with `unknown_session` (another close, such as the gate's pending one, landed
+between the `GET` and the `POST`): the latest close passed on is then the receipt, and with none
+the client reports the session closed by another party. When no step closes the session, the
+client names the closes that may still land. Overlapping closes of one session share one chain.
+The receipt says which step closed the session.
+
+With an `rpc`, the client checks the gate's or the facilitator's word that the session is
+closed with its own read of the account: if the chain still shows the session, the chain goes
+on; if the read fails, that word stands. When it finds the session closed with closes of its own
+passed on, it looks the close up on the chain: the one it matches is the receipt, with its
+amounts; a close that matches none of them was another party's; while the chain shows no close,
+or the lookup cannot be read, the latest close passed on is the receipt. The client's own
+requests to its node have the same time limits as its other requests: a read is given up after a
+few seconds, and its own close, from its sending to its confirmation, after the longer limit.
+Step 3 needs the authority to hold the fee of one signature on top of a rent-exempt balance,
+since a fee payer may not drop below it.
+
 ### 9.4 API
 
 ```ts
@@ -1411,8 +1440,9 @@ run is repeatable.
 - **Stack control:** the harness runs the services, so it holds their keys (the seller's wallet,
   the receiver authorizer, the facilitator's API key, the resource's admin key) and can stop,
   restart or add instances of them. In particular, it can stop the gate and start it again on the same
-  address while the facilitator, its sweeper and Kora keep running (scenario 26), and start it with its session
-  clock running ahead of the wall clock (scenario 34).
+  address while the facilitator, its sweeper and Kora keep running (scenario 26), start it with its session
+  clock running ahead of the wall clock (scenario 34), and stop the facilitator, its sweeper included, and start it
+  again on the same address while Kora keeps running (scenario 25).
 - **Facilitator API:** the harness can call the facilitator's `/verify` with an API key (section 6.5). Always
   on `local` and `devnet`; on `external` only with `--facilitator` and `--facilitator-key`.
 - **Allowance:** the facilitator accepts an allowance pull as the funding instruction (section
@@ -1439,6 +1469,9 @@ the payment's amount, because the node sends one message per change, the account
 included. The stream's `slot` is asserted only on `devnet`: the local network reports the slot of the
 subscription (T6). The rent payer's balance change is read from the close transaction's lamport
 balances (`preBalances` and `postBalances`), which are not the token balances that T9 is about.
+
+A buyer holds no SOL (section 9.1). A scenario whose buyer pays a fee itself gives it SOL through the context's
+`fundSol`, from the harness (scenario 25).
 
 **Status.** Every scenario is `required` or `pending`; the library records which, beside the
 scenario.

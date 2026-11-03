@@ -27,7 +27,7 @@ async function controlledClient(count: number) {
         status: () => Promise.reject(new Error("not used")),
         close: () =>
           new Promise<CloseReceipt>((resolve, reject) => {
-            closes.push({ id, settle: (error) => (error ? reject(error) : resolve({ transaction: `close-of-${id}` })) });
+            closes.push({ id, settle: (error) => (error ? reject(error) : resolve({ transaction: `close-of-${id}`, via: "gate" })) });
           }),
         [Symbol.asyncDispose]: async () => {},
       };
@@ -358,7 +358,7 @@ describe("session tools (spec §9.5)", () => {
       sessionId,
       /** The closes the tools have sent to the session, answered or not. */
       closesSent: () => sent,
-      settle: () => pending.shift()?.({ transaction: "sig" }),
+      settle: () => pending.shift()?.({ transaction: "sig", via: "gate" }),
       async dropWith(code: number) {
         socket.emit("close", code, "test");
         await expect.poll(() => runtime.closeCode(sessionId)).toBe(code);

@@ -1,12 +1,16 @@
-import { SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM, isSolanaError } from "@solana/kit";
+import { SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM, isSolanaError, type Rpc, type SolanaRpcApi } from "@solana/kit";
 import { createStintClient, type StintClient } from "@lxfoundry/stint-client";
 import type { Buyer, Target } from "./types.js";
 
-/** A client for the buyer's key with the limits the scenarios use: at most 1 USDC a session and an hour, 10,000 base units a second. */
-export function buyerClient(buyer: Buyer): StintClient {
+/**
+ * A client for the buyer's key with the limits the scenarios use: at most 1 USDC a session and an hour, 10,000 base units a
+ * second. With `rpc`, the client can close a session on the chain itself, if the buyer holds SOL (spec §9.3).
+ */
+export function buyerClient(buyer: Buyer, options: { readonly rpc?: Rpc<SolanaRpcApi> } = {}): StintClient {
   return createStintClient({
     signer: buyer.signer,
     policy: { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } },
+    ...(options.rpc === undefined ? {} : { rpc: options.rpc }),
   });
 }
 
