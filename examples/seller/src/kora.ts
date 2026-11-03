@@ -116,7 +116,10 @@ export interface KoraProcess {
   readonly apiKey: string;
   /** Settles when Kora exits, with its exit code (`null` when a signal ended it): whoever started it can watch it. */
   readonly exit: Promise<number | null>;
-  /** The latest `KORA_LOG_TAIL` characters Kora printed, every URL cut to its scheme and host. */
+  /**
+   * What Kora printed, within the latest `KORA_LOG_TAIL` characters, every URL cut to its scheme and host. Once the log
+   * is that long, its first line, which the cut may have begun in the middle, is left out.
+   */
   logs(): string;
   stop(): Promise<void>;
 }
@@ -128,6 +131,17 @@ export const KORA_LOG_TAIL = 64 * 1024;
 export function appendTail(current: string, chunk: string, limit = KORA_LOG_TAIL): string {
   const next = current + chunk;
   return next.length > limit ? next.slice(next.length - limit) : next;
+}
+
+/**
+ * The part of a kept tail that can be shown. A tail that has been cut may begin inside a URL, past its `scheme://`,
+ * which is all `redactUrls` looks for: what is left of the URL, a key included, would pass through. So its first line is
+ * dropped, everything up to and including the first line break (all of it, if there is none).
+ */
+export function readableTail(tail: string, truncated: boolean): string {
+  if (!truncated) return tail;
+  const lineBreak = tail.indexOf("\n");
+  return lineBreak === -1 ? "" : tail.slice(lineBreak + 1);
 }
 
 async function freePort(): Promise<number> {
@@ -171,8 +185,17 @@ export async function startKora(options: KoraOptions): Promise<KoraProcess> {
       },
     );
     let output = "";
-    child.stdout.on("data", (chunk) => (output = appendTail(output, String(chunk))));
-    child.stderr.on("data", (chunk) => (output = appendTail(output, String(chunk))));
+    let truncated = false;
+    const keep = (chunk: unknown) => {
+      const text = String(chunk);
+      const next = appendTail(output, text);
+      truncated = truncated || next.length < output.length + text.length;
+      output = next;
+    };
+    child.stdout.on("data", keep);
+    child.stderr.on("data", keep);
+    // Kora quotes the RPC URL in its errors, and the URL can carry a key.
+    const shown = () => redactUrls(readableTail(output, truncated));
     let exited = false;
     let spawnError: Error | undefined;
     const exit = new Promise<number | null>((resolve) => {
@@ -201,18 +224,17 @@ export async function startKora(options: KoraOptions): Promise<KoraProcess> {
     let delay = 50;
     while (Date.now() < deadline) {
       if (spawnError) throw new Error(`Could not start Kora (${binary}): ${spawnError.message}`);
-      // Kora quotes the RPC URL in its errors, and the URL can carry a key.
-      if (exited) throw new Error(`Kora exited during startup:\n${redactUrls(output)}`);
+      if (exited) throw new Error(`Kora exited during startup:\n${shown()}`);
       try {
         const response = await fetch(`${url}/liveness`);
-        if (response.ok) return { url, apiKey: options.apiKey, exit, logs: () => redactUrls(output), stop };
+        if (response.ok) return { url, apiKey: options.apiKey, exit, logs: shown, stop };
       } catch {
         // Not listening yet.
       }
       await new Promise((resolve) => setTimeout(resolve, delay));
       delay = Math.min(delay * 2, 1_000);
     }
-    throw new Error(`Kora was not ready within 30 s:\n${redactUrls(output)}`);
+    throw new Error(`Kora was not ready within 30 s:\n${shown()}`);
   } catch (error) {
     await stop?.();
     cleanUp();
