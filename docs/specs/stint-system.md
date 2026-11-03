@@ -1244,7 +1244,7 @@ cannot be reached, answers `GET closeUrl` with anything but the session's fields
 unknown_session`, or does not close the session. A request with no answer is given up: a read
 after a few seconds, a request that sends a close after a longer limit, past the facilitator's
 wait for the close to confirm; that close may still land. So may a close whose connection drops
-after it was sent; a connection that is refused means the close was never sent. A step whose
+after it was sent; a connection that cannot be made means the close was never sent. A step whose
 close may still land (a `202` past `closeWaitSeconds`, `settlement_pending` from the facilitator,
 or the client's own close that is still pending, or whose sending or confirmation could not be
 read in time) passes its signature on. The check finds the session closed when the gate's status
