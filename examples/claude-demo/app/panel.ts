@@ -9,7 +9,8 @@ import {
   type DemoState,
   type ExchangeRow,
 } from "../src/state.js";
-import { canLaunch, capsule, closeRefusal, formatUsdc, headline, secondsLeft, skewOf, topUpRefusal } from "./model.js";
+import { canLaunch, capsule, closeRefusal, formatUsdc, headline, isStale, needsFunding, secondsLeft, skewOf, surfaceOf, topUpRefusal } from "./model.js";
+import { createPoller } from "./poller.js";
 
 type ToolAnswer = Awaited<ReturnType<App["callServerTool"]>>;
 /** The parts of the host's context the panel uses (optional: the host's theme, colours and fonts). */
@@ -42,7 +43,6 @@ let actionError: string | undefined;
 let pollFailure: string | undefined;
 /** What the last link, copy or chat update did, when the person should know; `url` is shown to be selected. */
 let notice: { readonly text: string; readonly url?: string } | undefined;
-let pollTimer: ReturnType<typeof setTimeout> | undefined;
 let rowsKey = "";
 let linksKey = "";
 
@@ -68,9 +68,13 @@ function isDemoState(value: unknown): value is DemoState {
   return typeof candidate.now === "number" && typeof candidate.wallet === "object" && typeof candidate.session === "object" && typeof candidate.exchange === "object";
 }
 
-/** Takes a state the server sent, and corrects the panel's clock by the server's. False when the value is no state. */
+/**
+ * Takes a state the server sent, and corrects the panel's clock by the server's. False when the value is no state. A state
+ * stamped before the one drawn came late (a read that overlapped an action): it is a state, and it is not drawn.
+ */
 function accept(value: unknown): boolean {
   if (!isDemoState(value)) return false;
+  if (isStale(state, value)) return true;
   state = value;
   skew = skewOf(value.now, Date.now());
   render();
@@ -82,6 +86,13 @@ function applyHost(context: HostContext): void {
   if (context.theme) applyDocumentTheme(context.theme);
   if (context.styles?.variables) applyHostStyleVariables(context.styles.variables);
   if (context.styles?.css?.fonts) applyHostFonts(context.styles.css.fonts);
+  markSurface();
+}
+
+/** Marks whether the page is on a dark surface, from the colour it is painted: only then is Signal text or fill (see the stylesheet). */
+function markSurface(): void {
+  const surface = surfaceOf(getComputedStyle(document.body).backgroundColor);
+  if (document.documentElement.dataset.surface !== surface) document.documentElement.dataset.surface = surface;
 }
 
 function textOf(answer: Pick<ToolAnswer, "content">): string {
@@ -110,16 +121,18 @@ async function callTool<Name extends keyof ToolArguments>(name: Name, args: Tool
   return answer;
 }
 
-function schedulePoll(delayMs: number): void {
-  clearTimeout(pollTimer);
-  pollTimer = setTimeout(() => void poll(), delayMs);
-}
+/** Reads the state every 2 s, and every 0.5 s while an action runs: rows fill in as the exchange goes. One read at a time. */
+const poller = createPoller({
+  read: pollOnce,
+  nextDelay: () => (acting || state?.busy ? BUSY_POLL_MS : POLL_MS),
+  onError: (error) => {
+    pollFailure = messageOf(error);
+    renderMessages();
+  },
+});
 
-/**
- * Reads the state every 2 s, and every 0.5 s while an action runs: rows fill in as the exchange goes. A read that fails
- * is shown as a quiet line until one succeeds, and tried again.
- */
-async function poll(): Promise<void> {
+/** One read. One that fails is shown as a quiet line until one succeeds: the poller tries again. */
+async function pollOnce(): Promise<void> {
   try {
     const answer = await callTool(TOOL.state, {});
     pollFailure = answer.isError ? textOf(answer) : isDemoState(answer.structuredContent) ? undefined : "the answer holds no state";
@@ -127,7 +140,6 @@ async function poll(): Promise<void> {
     pollFailure = messageOf(error);
   }
   renderMessages();
-  schedulePoll(acting || state?.busy ? BUSY_POLL_MS : POLL_MS);
 }
 
 /** Tells the model what the panel did (optional), so that the chat knows the session's state. */
@@ -149,7 +161,7 @@ async function act(action: DemoAction, name: ActionTool): Promise<void> {
   actionError = undefined;
   notice = undefined;
   render();
-  schedulePoll(BUSY_POLL_MS);
+  poller.schedule(BUSY_POLL_MS);
   try {
     const answer = await callTool(name, {});
     if (answer.isError) actionError = textOf(answer);
@@ -285,9 +297,9 @@ function renderState(current: DemoState): void {
   const usdc = current.wallet.usdc;
   setText("address", current.wallet.address);
   setText("balance", usdc === undefined ? "checking…" : formatUsdc(usdc));
-  const short = usdc !== undefined && BigInt(usdc) < BigInt(LAUNCH_AMOUNT);
-  element("needs").hidden = !short;
-  element("fund").hidden = !short;
+  const funding = needsFunding(current);
+  element("needs").hidden = !funding;
+  element("fund").hidden = !funding;
   setText("headline", headline(current, nowMs));
   const { used, paid } = capsule(session, nowMs);
   // Nothing is paid for before a session opens: no capsule to draw.
@@ -309,6 +321,7 @@ function renderState(current: DemoState): void {
 }
 
 function render(): void {
+  markSurface();
   renderMessages();
   if (state) renderState(state);
 }
@@ -323,6 +336,7 @@ function redraw(): void {
 }
 
 async function main(): Promise<void> {
+  markSurface();
   setText("headline", "Connecting to the demo…");
   setText("needs", `needs ${formatUsdc(LAUNCH_AMOUNT)}`);
   setText("top-up", `Top up +${TOP_UP_SECONDS} s`);
@@ -334,7 +348,7 @@ async function main(): Promise<void> {
   element("copy").addEventListener("click", () => void copyAddress().catch(fail));
   await app.connect();
   applyHost(app.getHostContext() ?? {});
-  schedulePoll(0);
+  poller.schedule(0);
   setInterval(redraw, REDRAW_MS);
 }
 

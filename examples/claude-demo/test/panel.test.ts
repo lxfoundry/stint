@@ -42,3 +42,41 @@ describe("the panel's HTML", () => {
     expect(html).not.toContain(PLACEHOLDER);
   }, 60_000);
 });
+
+describe("the panel's stylesheet", () => {
+  const css = (/<style>([\s\S]*?)<\/style>/.exec(sourceOf("../app/panel.html"))?.[1] ?? "").replace(/\/\*[\s\S]*?\*\//g, "");
+  /** Each innermost rule: its selector and its declarations. */
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({ selector: match[1]!.trim(), body: match[2]! }));
+  const rule = (selector: string) => rules.find((candidate) => candidate.selector === selector);
+
+  it("draws in the brand's six colours and no mix of them", () => {
+    expect(css).not.toMatch(/color-mix|rgba?\(|hsla?\(|oklch\(/i);
+    const palette = ["#111318", "#f4f5f2", "#2ed18b", "#0b6b45", "#5e636c", "#a9aeb6"];
+    const hexes = css.match(/#[0-9a-f]{6}\b/gi) ?? [];
+    expect(hexes.length).toBeGreaterThanOrEqual(6);
+    for (const hex of hexes) expect(palette).toContain(hex.toLowerCase());
+  });
+
+  it("takes the border colour from the palette: Mist on a light surface, Slate on a dark one", () => {
+    expect(rule(":root")?.body).toMatch(/--line:\s*var\(--color-border-primary,\s*var\(--mist\)\)/);
+    expect(rule(':root[data-surface="dark"]')?.body).toMatch(/--line:\s*var\(--color-border-primary,\s*var\(--slate\)\)/);
+  });
+
+  it("uses Signal only on a dark surface, apart from the closed capsule's outline", () => {
+    const users = rules.filter((candidate) => /var\(--signal\)/.test(candidate.body));
+    expect(users.length).toBeGreaterThan(0);
+    for (const user of users) {
+      expect([':root[data-surface="dark"]', '#track[data-state="closed"] #paid']).toContain(user.selector);
+    }
+    // Signal is never text on the default (light) surface.
+    expect(rule(":root")?.body).toMatch(/--accent-text:\s*var\(--deep\)/);
+    expect(rule(":root")?.body).toMatch(/--used:\s*var\(--ink\)/);
+  });
+
+  it("tells a closed capsule from a running one in both themes: Signal outline, used part in the text colour", () => {
+    expect(rule('#track[data-state="closed"] #paid')?.body).toMatch(/border-color:\s*var\(--signal\)/);
+    expect(rule('#track[data-state="closed"] #used')?.body).toMatch(/background:\s*var\(--fg\)/);
+    // Not a fill of the outlined part.
+    expect(rule('#track[data-state="closed"] #paid')?.body).not.toMatch(/background/);
+  });
+});

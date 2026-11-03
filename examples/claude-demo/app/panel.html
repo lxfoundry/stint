@@ -12,23 +12,22 @@
     --muted: var(--color-text-secondary, var(--slate));
     --accent-text: var(--deep);
     --used: var(--ink);
-    --line: var(--color-border-primary, color-mix(in srgb, var(--mist) 45%, var(--paper)));
+    --line: var(--color-border-primary, var(--mist));
     --radius: var(--border-radius-md, 8px);
     --sans: var(--font-sans, system-ui, sans-serif);
     --mono: var(--font-mono, ui-monospace, monospace);
     color-scheme: light dark;
   }
+  /* The panel's own surface: Ink in a dark theme, Paper otherwise. A background the host sends wins. */
   @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: var(--color-background-primary, var(--ink)); --fg: var(--color-text-primary, var(--paper));
-      --muted: var(--color-text-secondary, var(--mist)); --accent-text: var(--signal); --used: var(--signal);
-      --line: var(--color-border-primary, color-mix(in srgb, var(--slate) 45%, var(--ink)));
-    }
+    :root:not([data-theme="light"]) { --bg: var(--color-background-primary, var(--ink)); }
   }
-  :root[data-theme="dark"] {
-    --bg: var(--color-background-primary, var(--ink)); --fg: var(--color-text-primary, var(--paper));
-    --muted: var(--color-text-secondary, var(--mist)); --accent-text: var(--signal); --used: var(--signal);
-    --line: var(--color-border-primary, color-mix(in srgb, var(--slate) 45%, var(--ink)));
+  :root[data-theme="dark"] { --bg: var(--color-background-primary, var(--ink)); }
+  /* The script sets data-surface from the colour the page is painted on, the host's or the panel's own: Signal is text or fill only on a dark one. */
+  :root[data-surface="dark"] {
+    --fg: var(--color-text-primary, var(--paper)); --muted: var(--color-text-secondary, var(--mist));
+    --accent-text: var(--signal); --used: var(--signal);
+    --line: var(--color-border-primary, var(--slate));
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
@@ -48,6 +47,7 @@
   #paid { height: 16px; width: 0; border: 2px solid var(--used); border-radius: 999px; overflow: hidden; transition: width 0.3s; }
   #used { height: 100%; width: 0; background: var(--used); }
   #track[data-state="closed"] #paid { border-color: var(--signal); }
+  #track[data-state="closed"] #used { background: var(--fg); }
   ol, ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
   #rows li { display: grid; gap: 2px; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius); }
   #rows li[data-kind="error"] { border-style: dashed; }

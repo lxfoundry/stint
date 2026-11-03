@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canLaunch, capsule, closeRefusal, formatUsdc, headline, secondsLeft, skewOf, topUpRefusal } from "../app/model.js";
+import { canLaunch, capsule, closeRefusal, formatUsdc, headline, isStale, needsFunding, secondsLeft, skewOf, surfaceOf, topUpRefusal } from "../app/model.js";
 import { FAUCET_URL, type DemoAction, type DemoSession, type DemoState } from "../src/state.js";
 
 /** A 100 s session from 1,000 to 1,100, at 1000 base units a second, in a seller's 300 s at most. */
@@ -111,5 +111,66 @@ describe("the headline", () => {
     expect(headline(stateOf(running({ state: "ended", paid: "61000", refunded: "39000" })), 0)).toBe(
       "Ended by the seller before its paid time: paid 0.061 USDC, refunded 0.039 USDC",
     );
+  });
+});
+
+describe("the funding row", () => {
+  it("shows when the wallet is short and no session runs", () => {
+    expect(needsFunding(stateOf(none, "0"))).toBe(true);
+    expect(needsFunding(stateOf(none, "99999"))).toBe(true);
+    expect(needsFunding(stateOf(running({ state: "closed" }), "40000"))).toBe(true);
+    expect(needsFunding(stateOf(running({ state: "expired" }), "40000"))).toBe(true);
+    expect(needsFunding(stateOf(running({ state: "ended" }), "40000"))).toBe(true);
+  });
+
+  it("stays away while a session runs: a launch spends the balance down on purpose", () => {
+    for (const phase of ["opening", "open", "closing"] as const) {
+      expect(needsFunding(stateOf(running({ state: phase }), "0"))).toBe(false);
+      expect(needsFunding(stateOf(running({ state: phase }), "40000"))).toBe(false);
+    }
+  });
+
+  it("stays away when the wallet holds enough, or has not been read", () => {
+    expect(needsFunding(stateOf(none, "100000"))).toBe(false);
+    expect(needsFunding(stateOf(none, "5000000"))).toBe(false);
+    expect(needsFunding(stateOf(none))).toBe(false);
+  });
+});
+
+describe("which state to draw", () => {
+  const at = (now: number): DemoState => ({ ...stateOf(none, "100000"), now });
+
+  it("takes the first state, and any that is not older than the one drawn", () => {
+    expect(isStale(undefined, at(1_000))).toBe(false);
+    expect(isStale(at(1_000), at(1_001))).toBe(false);
+    expect(isStale(at(1_000), at(1_000))).toBe(false);
+  });
+
+  it("ignores a state the server stamped before the one drawn: an answer that came late", () => {
+    expect(isStale(at(1_000), at(999))).toBe(true);
+    expect(isStale(at(1_000), at(0))).toBe(true);
+  });
+});
+
+describe("the surface the page is painted on", () => {
+  it("is dark only for a colour that reads as dark, so that Signal is never text on a light one", () => {
+    expect(surfaceOf("rgb(17, 19, 24)")).toBe("dark");
+    expect(surfaceOf("rgb(31, 30, 29)")).toBe("dark");
+    expect(surfaceOf("rgb(17 19 24)")).toBe("dark");
+    expect(surfaceOf("rgba(17, 19, 24, 1)")).toBe("dark");
+    expect(surfaceOf("color(srgb 0.07 0.07 0.09)")).toBe("dark");
+    expect(surfaceOf("rgb(244, 245, 242)")).toBe("light");
+    expect(surfaceOf("rgb(255, 255, 255)")).toBe("light");
+    expect(surfaceOf("rgb(169, 174, 182)")).toBe("light");
+    expect(surfaceOf("rgb(128, 128, 128)")).toBe("light");
+  });
+
+  it("is light for a colour it cannot read, and for one that is not opaque", () => {
+    expect(surfaceOf("")).toBe("light");
+    expect(surfaceOf("transparent")).toBe("light");
+    expect(surfaceOf("rgba(0, 0, 0, 0)")).toBe("light");
+    expect(surfaceOf("rgb(17 19 24 / 20%)")).toBe("light");
+    expect(surfaceOf("oklch(0.2 0.01 250)")).toBe("light");
+    expect(surfaceOf("light-dark(#fff, #111)")).toBe("light");
   });
 });

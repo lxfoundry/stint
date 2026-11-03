@@ -82,6 +82,52 @@ export function canLaunch(state: DemoState): boolean {
   return !isRunning(state.session) && !state.busy && usdc !== undefined && BigInt(usdc) >= BigInt(LAUNCH_AMOUNT);
 }
 
+/**
+ * Whether the funding row (what a launch needs, and the faucet) is shown: the wallet holds less than `LAUNCH_AMOUNT` and
+ * no session runs. While one runs, the balance is low because the launch spent it, and the row would say to fund a wallet
+ * that is working.
+ */
+export function needsFunding(state: DemoState): boolean {
+  const usdc = state.wallet.usdc;
+  return !isRunning(state.session) && usdc !== undefined && BigInt(usdc) < BigInt(LAUNCH_AMOUNT);
+}
+
+/**
+ * Whether `incoming` was stamped by the server before `current`, the state drawn: an answer that came late, such as a
+ * read that overlapped an action, and that would draw the past over the present.
+ */
+export function isStale(current: DemoState | undefined, incoming: DemoState): boolean {
+  return current !== undefined && incoming.now < current.now;
+}
+
+/** Below this relative luminance (WCAG) a surface is dark: Signal reads on it, and Deep does not. */
+const DARK_SURFACE_BELOW = 0.18;
+
+/** One channel of an sRGB colour, 0 to 1, as the part of the relative luminance. */
+const linear = (channel: number): number => (channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+
+/**
+ * Whether the page is painted on a dark surface, from the CSS colour the browser reports for its background (`rgb(...)`,
+ * `rgba(...)` or `color(srgb ...)`). Signal is text, or the used part of the capsule, only on a surface known to be dark:
+ * a colour that cannot be read, or that is not opaque, counts as light.
+ */
+export function surfaceOf(color: string): "dark" | "light" {
+  const match = /^(rgba?|color)\(([^)]*)\)$/i.exec(color.trim());
+  if (!match) return "light";
+  const parts = match[2]!.split(/[\s,/]+/).filter((part) => part !== "");
+  const srgb = match[1]!.toLowerCase() === "color";
+  if (srgb && parts.shift()?.toLowerCase() !== "srgb") return "light";
+  const number = (part: string | undefined, whole: number): number => {
+    if (part === undefined) return Number.NaN;
+    return part.endsWith("%") ? (Number(part.slice(0, -1)) / 100) * whole : Number(part);
+  };
+  const [r, g, b] = parts.slice(0, 3).map((part) => number(part, srgb ? 1 : 255) / (srgb ? 1 : 255));
+  const alpha = parts[3] === undefined ? 1 : number(parts[3], 1);
+  if (r === undefined || g === undefined || b === undefined || [r, g, b, alpha].some((value) => Number.isNaN(value)) || alpha < 0.9) return "light";
+  const luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+  return luminance < DARK_SURFACE_BELOW ? "dark" : "light";
+}
+
 /** One line on what the session is doing. */
 export function headline(state: DemoState, nowMs: number): string {
   const session = state.session;
