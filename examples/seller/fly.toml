@@ -13,6 +13,12 @@ primary_region = "lhr"
 kill_signal = "SIGINT"
 kill_timeout = 20
 
+# The seller exits with status 1 when Kora does, so that the machine starts again. Fly.io restarts a machine that exits
+# on its own only under its restart policy, and the default, on-failure, gives up after a number of retries: always
+# restarts it whatever the exit code.
+[[restart]]
+  policy = "always"
+
 [deploy]
   # One machine replaced by its successor. Not bluegreen or canary: those run two machines at once, two processes on
   # one seed, each closing the other's sessions at its start-up.

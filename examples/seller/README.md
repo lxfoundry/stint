@@ -15,7 +15,7 @@ names no duration (0.100 USDC), and a session that nobody connects to for 60 s i
 |---|---|
 | `STINT_SELLER_SEED` | 64 hexadecimal characters (`openssl rand -hex 32`), or a recovery phrase of 12 to 24 words in quotes. Every key of the deployment derives from it, by this example's own rule, so a phrase does not give the addresses a wallet shows for it. Required; secret |
 | `STINT_SELLER_RPC_URL` | A devnet RPC endpoint, http or https. Required; it may carry an API key, so treat it as a secret |
-| `STINT_SELLER_WS_URL` | Its WebSocket endpoint. Default: the RPC URL with `ws` for `http` |
+| `STINT_SELLER_WS_URL` | Its WebSocket endpoint. Default: the RPC URL with `ws` for `http`. It may carry an API key too |
 | `STINT_SELLER_SCAN_RPC_URL` | An endpoint that answers `getProgramAccounts`, for the start-up and the sweeper, if the RPC URL's provider refuses it, such as `https://api.devnet.solana.com`. Default: the RPC URL |
 | `PORT` | The stream's port. Default 8080 |
 | `HOST` | The stream's address. Default `0.0.0.0` |
@@ -45,7 +45,7 @@ even though this example derives other addresses from it.
 
 Make a seed and print the addresses (in WSL, from the repository root):
 
-    mkdir -p ~/.config/stint && openssl rand -hex 32 > ~/.config/stint/seller-seed && chmod 600 ~/.config/stint/seller-seed
+    (umask 077; mkdir -p ~/.config/stint; openssl rand -hex 32 > ~/.config/stint/seller-seed)
     STINT_SELLER_SEED="$(cat ~/.config/stint/seller-seed)" pnpm --filter @lxfoundry/stint-example-seller start keys
 
 Send the funding key (the first line) at least 0.5 SOL from a devnet faucet, such as `https://faucet.solana.com`. The
@@ -75,10 +75,13 @@ payer, and on the deployment's seed that would close the live deployment's sessi
 dropping their connections. Make the local seed once, fund its funding key as above, and run it with Kora 2.0.5 on the
 `PATH` (`cargo install kora-cli --version 2.0.5 --locked`, or `KORA_BIN`):
 
-    openssl rand -hex 32 > ~/.config/stint/seller-seed-local && chmod 600 ~/.config/stint/seller-seed-local
+    (umask 077; mkdir -p ~/.config/stint; openssl rand -hex 32 > ~/.config/stint/seller-seed-local)
     STINT_SELLER_SEED="$(cat ~/.config/stint/seller-seed-local)" pnpm --filter @lxfoundry/stint-example-seller start keys
-    export STINT_SELLER_SEED="$(cat ~/.config/stint/seller-seed-local)" STINT_SELLER_RPC_URL=https://api.devnet.solana.com
-    PUBLIC_ORIGIN=http://127.0.0.1:8080 HOST=127.0.0.1 pnpm --filter @lxfoundry/stint-example-seller start
+    STINT_SELLER_SEED="$(cat ~/.config/stint/seller-seed-local)" STINT_SELLER_RPC_URL=https://api.devnet.solana.com \
+      PUBLIC_ORIGIN=http://127.0.0.1:8080 HOST=127.0.0.1 pnpm --filter @lxfoundry/stint-example-seller start
+
+The public endpoint needs no key. A keyed one is not typed on the command line, where the shell keeps it in its history:
+read it with `read -rsp` as in step 2 below, and pass it as `STINT_SELLER_RPC_URL="$RPC_URL"`.
 
 It logs one JSON line per event on stdout, `at` first, with every URL cut to its scheme and host:
 
@@ -100,10 +103,21 @@ From the repository root, with `flyctl` signed in:
 
        fly apps create stint-demo
 
-2. Set the secrets. `PUBLIC_ORIGIN`, `HOST` and `PORT` are in `fly.toml`; change `PUBLIC_ORIGIN` to your host name.
+2. Set the secrets. They go to `fly` on its standard input, as `NAME=VALUE` lines: the seed is read from its file and
+   the RPC URL from a prompt that does not echo it, so that nothing secret is on a command line (where the shell keeps
+   it in its history and `ps` shows it) or on the screen. `printf` and `read` are shell built-ins. `PUBLIC_ORIGIN`,
+   `HOST` and `PORT` are in `fly.toml`; change `PUBLIC_ORIGIN` to your host name.
 
-       fly secrets set -a stint-demo STINT_SELLER_SEED="$(cat ~/.config/stint/seller-seed)" \
-         STINT_SELLER_RPC_URL="https://<your devnet endpoint>" STINT_SELLER_SCAN_RPC_URL=https://api.devnet.solana.com
+       read -rsp 'Devnet RPC URL: ' RPC_URL; echo
+       { printf 'STINT_SELLER_SEED=%s\n' "$(cat ~/.config/stint/seller-seed)"
+         printf 'STINT_SELLER_RPC_URL=%s\n' "$RPC_URL"
+         printf 'STINT_SELLER_SCAN_RPC_URL=%s\n' https://api.devnet.solana.com
+       } | fly secrets import --stage -a stint-demo
+       unset RPC_URL
+
+   `--stage` keeps the secrets for the deploy below; run later without it, the command also redeploys a running machine.
+   If the endpoint's WebSocket address is not its RPC URL with `ws` for `http`, add a `STINT_SELLER_WS_URL` line the same
+   way.
 
 3. Deploy. The build context is the repository root; Kora's build takes several minutes the first time. `--ha=false`
    keeps the first deploy to one machine: by default Fly.io adds a spare, and two machines are two processes on one seed.
@@ -142,7 +156,9 @@ From the repository root, with `flyctl` signed in:
   a client that falls back on the sponsored close would call that address on the buyer's own machine, so that
   fallback does not apply to this deployment. The gate's close is the path.
 - If Kora exits, the process logs `{"at":…,"event":"kora_exited","code":…,"output":…}` with the end of Kora's output,
-  stops, and exits with status 1; Fly.io starts it again. `/health` answers for the stream only.
+  stops, and exits with status 1. `fly.toml` sets the restart policy to `always`, so Fly.io starts the machine again
+  whatever the exit code; its default, `on-failure`, gives up after a number of retries. `/health` answers for the
+  stream only.
 - On SIGINT or SIGTERM the process stops the stream, the facilitator, then Kora, and exits with status 0, at the latest
   15 s after the signal. `fly.toml` sends SIGINT and waits 20 s before the kill.
 - Kora is started with the RPC URL on its command line, so the URL is visible to the machine's processes (`ps`).
