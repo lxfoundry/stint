@@ -688,8 +688,9 @@ settles, the facilitator records which API key it came through.
 
 `/verify` MUST be read-only: it simulates and never submits.
 
-**A payload whose message this facilitator has claimed or recorded** (a retry: see Idempotency in
-section 5.5) is not verified again. `/verify` answers from its record.
+**A payload whose message this facilitator has recorded** (a retry: see Idempotency in section 5.5) is not verified
+again: `/verify` answers from its record. A message that is only claimed, its transaction not recorded yet, has not
+been submitted, so its payload is verified as any other.
 
 **Every type:**
 
@@ -745,7 +746,13 @@ it is used.
 4. Kora signs as fee payer.
 5. Complete the record (see Idempotency), then submit the transaction and wait for `confirmed`.
 
-If step 2, 3 or 4 refuses the payload, the claim is released.
+If step 2, 3 or 4 refuses the payload, the claim is released. So is it when the node refuses the transaction at its
+first submission with an error that a node returns before it forwards a transaction (a failed preflight, a signature
+that does not verify, an unhealthy node, invalid parameters): it did not take the transaction.
+A node that reports it already processed has it (S16): its outcome is read by its ID. After any other failure to
+submit, such as a request with no answer or another error, which a proxy can return after forwarding, the node may have
+taken the transaction: the facilitator waits for its outcome as for one it submitted, keeps the record, and answers
+`settlement_pending` while the outcome is unknown.
 
 The response follows x402 v2:
 - `success`, `transaction`, `network`;
@@ -753,7 +760,9 @@ The response follows x402 v2:
 - `amount`: for `open` and `topUp`, the amount deposited; for `close`, `owed + redirected` from
   the `Closed` event, which is what this transaction paid the receiver. It leaves out earlier
   claims, which the gate's `paid` adds (below);
-- `settlement_pending` is a non-final `errorReason`, accompanied by a non-empty `transaction`.
+- `settlement_pending` is a non-final `errorReason`, accompanied by a non-empty `transaction`. The one exception needs
+  a store shared by instances: an instance that finds the message claimed by another, which has not recorded its
+  transaction yet, has no transaction to give, and answers with an empty one.
 
 Servers MUST derive the payer from the signed transaction, not from the response.
 
@@ -781,18 +790,22 @@ twice. The facilitator recognises a retry from its own records:
   with, and, once known, its outcome. All of the facilitator's instances share these records, in
   a store that survives restarts (section 6.5).
 - **How a retry is answered.** A payload whose message is claimed or recorded, and that comes with
-  the same API key and the same requirements, is answered from that record. "The same
-  requirements" leaves out the advisory fields that a fresh offer changes: `maxTimeoutSeconds`,
-  `extra.recentBlockhash` and `extra.lastValidBlockHeight`. Every field the transaction is
-  checked against must match. Nothing is verified, signed or
-  submitted again: the message is the one being, or already, settled.
+  the same API key and the same requirements, is a retry. "The same requirements" leaves out the
+  advisory fields that a fresh offer changes: `maxTimeoutSeconds`, `extra.recentBlockhash` and
+  `extra.lastValidBlockHeight`. Every field the transaction is checked against must match. Once its
+  transaction is recorded, a retry is answered from that record: nothing is verified, signed or
+  submitted again, since the message is the one being, or already, settled. A message that is only
+  claimed, its transaction not recorded yet, has not been submitted: `/verify` verifies its payload
+  as any other, and a `/settle` of it is a duplicate in flight (below).
   - `/verify` reports it valid while its settlement is pending or has succeeded. Otherwise it
     reports the recorded failure: `blockhash_expired` for a transaction that never landed, and
     `simulation_failed` for one that landed with an error.
-  - `/settle` reports the recorded outcome, or `settlement_pending` while there is none yet. If
-    the transaction was submitted but its outcome is not known, it first looks the transaction
-    up by its ID. If the transaction has not landed and its blockhash is still valid, it submits
-    the recorded transaction again, which S16 makes safe.
+  - `/settle` reports the recorded outcome, or `settlement_pending` while there is none yet. A
+    duplicate that reaches the instance settling its message, while that settlement runs, waits for
+    it and gets its answer. If the transaction was submitted but its outcome is not known, it first
+    looks the transaction up by its ID, in the node's transaction history as well as its recent
+    statuses, since a record outlives them. If the transaction has not landed and its blockhash is
+    still valid, it submits the recorded transaction again, which S16 makes safe.
 - **A repeated submission.** Submitting the recorded transaction again either returns the same
   ID, since the bytes are identical, or is refused with `AlreadyProcessed` because the first
   submission has landed (S16). Either way, the facilitator then reads the outcome by that ID.
@@ -838,7 +851,7 @@ One endpoint for buyers, without an API key:
 | Endpoint | Behaviour |
 |---|---|
 | `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, blockHeight, programId}`, read at most a few seconds before the request (see below), with `lastValidBlockHeight` and `blockHeight` as decimal strings. `blockHeight` is read at `confirmed`, and also tells a client without node access when one of its own transactions can no longer land (section 9.3). With `?session=<address>`, also `session`: the session's `address` and its stored fields (section 4.1) other than `version` and `bump`, with `u64` values as decimal strings, `u32` values as numbers and `startedAt` in Unix seconds; or `404 {error: "unknown_session"}` if no account of the program exists at that address (no session was opened there, or it has closed) |
-| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `200 {success: true, transaction, paid, refunded}`, with `paid` = `claimed + owed + redirected` from the `Closed` event, as for the gate, or `200 {success: true, transaction}` when the close is confirmed but its `Closed` event cannot be read. A refusal or a failure is `200 {success: false, errorReason, errorMessage, transaction}`, with a reason of section 5.4 or 5.5, and `errorMessage` when there is one; `transaction` is empty when the close was refused before it was submitted, and otherwise carries its signature, also when the node rejected it (`simulation_failed`) or when it may still land (`settlement_pending`). While a sponsored close of a session is being settled, another sponsored close of the same session that passes verification is not submitted: it gets that close's answer. A body that is not JSON is `400 {error: "invalid_json"}` |
+| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and submitted as in section 5.5, steps 4 and 5, without a settlement record: once a close of the session has landed, its account is gone, so the same close sent again is refused at verification (`unknown_session`), which the client reads as a closed session (section 9.3). Returns `200 {success: true, transaction, paid, refunded}`, with `paid` = `claimed + owed + redirected` from the `Closed` event, as for the gate, or `200 {success: true, transaction}` when the close is confirmed but its `Closed` event cannot be read. A refusal or a failure is `200 {success: false, errorReason, errorMessage, transaction}`, with a reason of section 5.4 or 5.5, and `errorMessage` when there is one; `transaction` is empty when the close was refused before it was submitted, and otherwise carries its signature, also when the node rejected it (`simulation_failed`) or when it may still land (`settlement_pending`). While a sponsored close of a session is being settled, another sponsored close of the same session that passes verification is not submitted: it gets that close's answer. A body that is not JSON is `400 {error: "invalid_json"}` |
 
 Both are rate-limited per session and per client address. `GET` serves a blockhash cached for a few
 seconds, so unauthenticated requests do not each reach the node.
@@ -1673,6 +1686,8 @@ section 12.2.
 - A remote-browser resource. The adapter interface supports it.
 - The `exact` fallback entry. It is specified in section 5.6.
 - A shared hosted facilitator. The image makes it a deployment.
+- A store for settlement records that survives restarts and is shared by the facilitator's instances (section 6.5). The
+  facilitator takes one through its interface; this repository has only the in-memory one, which a restart empties.
 - Token-2022 mints.
 - Mainnet deployment.
 - A facilitator fee paid by the buyer.

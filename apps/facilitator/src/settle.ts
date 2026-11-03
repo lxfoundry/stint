@@ -23,13 +23,21 @@ import {
 import {
   TransactionFailedError,
   fetchClosedEvent,
+  inspectTransaction,
   readConfirmation,
+  readElapsedPayload,
   readUntilFound,
+  refuse,
+  retryRequirementsKey,
   waitForConfirmation,
+  type ElapsedRequirements,
+  type InspectedTransaction,
+  type InvalidReason,
   type Network,
   type RetryOptions,
   type SettleResponse,
 } from "@lxfoundry/stint-x402";
+import type { SettlementRecord, SettlementStore } from "./records.js";
 import { verifyPayment, type FacilitatorContext } from "./verify.js";
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -56,37 +64,148 @@ export async function signAsFeePayer(
 /** How `/settle` re-reads a confirmed close whose transaction the node does not return yet. */
 export const DEFAULT_READ_RETRY: RetryOptions = { attempts: 5, delayMs: 400 };
 
+/** What `/verify` answers (spec §5.4): the session authority as the payer, or a refusal. */
+export type VerifyAnswer =
+  | { readonly ok: true; readonly payer: Address }
+  | { readonly ok: false; readonly reason: InvalidReason; readonly message: string };
+
+/** `/verify` and `/settle` for resource servers (spec §6.1), with the settlement records of spec §5.5. */
+export interface Settlement {
+  /** Read-only: a payload whose message is recorded is answered from its record. `apiKey` is the API key's SHA-256, hex. */
+  verify(payload: unknown, requirements: unknown, apiKey: string): Promise<VerifyAnswer>;
+  /** Settles a payload at most once: a retry is answered from its record. `apiKey` is the API key's SHA-256, hex. */
+  settle(payload: unknown, requirements: unknown, apiKey: string): Promise<SettleResponse>;
+}
+
+/** Who a settlement came from: a retry repeats both (spec §5.5, "How a retry is answered"). */
+interface Origin {
+  readonly apiKey: string;
+  readonly requirements: string;
+}
+
+const sameOrigin = (a: Origin, b: Origin) => a.apiKey === b.apiKey && a.requirements === b.requirements;
+
+const OTHER_SETTLEMENT = refuse(
+  "invalid_payment_requirements",
+  "the transaction belongs to a settlement that came with other requirements or another API key",
+);
+
+/** The payload's transaction, if it decodes: what a retry is known by. */
+function transactionOf(payload: unknown): InspectedTransaction | undefined {
+  const elapsed = readElapsedPayload(payload);
+  return elapsed && inspectTransaction(elapsed.transaction);
+}
+
+/** `/verify`'s answer from a completed record: valid while the settlement is pending or has succeeded (spec §5.5). */
+function fromRecord(signed: SignedSettlement, outcome: SettleResponse | undefined): VerifyAnswer {
+  if (!outcome || outcome.success) return { ok: true, payer: signed.payer };
+  return refuse((outcome.errorReason ?? "simulation_failed") as InvalidReason, outcome.errorMessage ?? "the recorded settlement failed");
+}
+
 /**
- * Spec §5.5, without settlement records (not yet kept): re-verify, the rent payer signs
- * an open, Kora signs as fee payer, then submit and wait for `confirmed`.
+ * `/verify` and `/settle` (spec §5.4, §5.5). A settlement claims its message's hash before anything else, re-verifies,
+ * has the rent payer sign an open and Kora sign as fee payer, then records the signed transaction and submits it. Within
+ * this instance, a duplicate in flight joins the settlement already running: it is registered before anything is
+ * awaited, so two requests cannot both start one.
  */
-export async function settlePayment(
-  ctx: FacilitatorContext,
-  payload: unknown,
-  requirements: { readonly amount?: unknown },
-): Promise<SettleResponse> {
+export function createSettlement(ctx: FacilitatorContext, store: SettlementStore): Settlement {
   const network = ctx.network as Network;
-  const verified = await verifyPayment(ctx, payload, requirements);
-  if (!verified.ok) {
-    return { success: false, errorReason: verified.reason, errorMessage: verified.message, transaction: "", network };
-  }
-  const payer = verified.payer;
+  const inFlight = new Map<string, Origin & { readonly settling: Promise<SettleResponse> }>();
 
-  let transaction = verified.tx.transaction;
-  if (verified.type === "open") transaction = await partiallySignTransaction([ctx.rentPayer.keyPair], transaction);
-
-  const signed = await signAsFeePayer(ctx, transaction);
-  if (!signed.ok) {
-    return { success: false, errorReason: "simulation_failed", errorMessage: signed.errorMessage, transaction: "", network, payer };
-  }
-  return submitSettlement(ctx, {
-    type: verified.type,
-    wire: signed.wire,
-    signature: signed.signature,
-    blockhash: verified.tx.blockhash,
-    payer,
-    amount: String(requirements.amount),
+  const refusal = (check: { readonly reason: InvalidReason; readonly message: string }, payer?: Address): SettleResponse => ({
+    success: false,
+    errorReason: check.reason,
+    errorMessage: check.message,
+    transaction: "",
+    network,
+    ...(payer === undefined ? {} : { payer }),
   });
+
+  /** Steps 2 to 4 of spec §5.5: re-verify; the rent payer signs an open, which creates accounts; Kora signs as fee payer. */
+  async function verifyAndSign(
+    payload: unknown,
+    requirements: unknown,
+  ): Promise<{ readonly ok: true; readonly value: SignedSettlement } | { readonly ok: false; readonly response: SettleResponse }> {
+    const verified = await verifyPayment(ctx, payload, requirements);
+    if (!verified.ok) return { ok: false, response: refusal(verified) };
+    let transaction = verified.tx.transaction;
+    if (verified.type === "open") transaction = await partiallySignTransaction([ctx.rentPayer.keyPair], transaction);
+    const signed = await signAsFeePayer(ctx, transaction);
+    if (!signed.ok) return { ok: false, response: refusal(refuse("simulation_failed", signed.errorMessage), verified.payer) };
+    // Verification passed, so these are elapsed requirements.
+    const amount = (requirements as ElapsedRequirements).amount;
+    return {
+      ok: true,
+      value: { type: verified.type, wire: signed.wire, signature: signed.signature, blockhash: verified.tx.blockhash, payer: verified.payer, amount },
+    };
+  }
+
+  /** A payload whose message is claimed or recorded (spec §5.5, "How a retry is answered"). */
+  async function answerRetry(held: SettlementRecord, origin: Origin): Promise<SettleResponse> {
+    if (!sameOrigin(held, origin)) return refusal(OTHER_SETTLEMENT);
+    if (held.outcome) return held.outcome;
+    // Claimed and not yet submitted, by another instance: only a store shared by instances holds such a claim here.
+    if (!held.signed) return { success: false, errorReason: "settlement_pending", transaction: "", network };
+    const submission = await resolveRecorded(ctx, held.signed);
+    if (submission.kind === "settled") await store.put({ ...held, outcome: submission.response });
+    return submission.response;
+  }
+
+  /** Spec §5.5, steps 1 to 5, for one message. */
+  async function settleOnce(messageHash: string, origin: Origin, payload: unknown, requirements: unknown): Promise<SettleResponse> {
+    const claim: SettlementRecord = { messageHash, ...origin };
+    const held = await store.claim(claim);
+    if (held) return answerRetry(held, origin);
+    let kept = false;
+    try {
+      const signed = await verifyAndSign(payload, requirements);
+      if (!signed.ok) return signed.response;
+      // Step 5: the record holds the transaction before it is submitted, so that a retry finds it whatever happens next.
+      await store.put({ ...claim, signed: signed.value });
+      kept = true;
+      const submission = await sendAndConfirm(ctx, signed.value);
+      // The node did not take it: the payload may come again, and is then verified as new.
+      if (submission.kind === "refused") kept = false;
+      else if (submission.kind === "settled") await store.put({ ...claim, signed: signed.value, outcome: submission.response });
+      return submission.response;
+    } finally {
+      if (!kept) await store.release(messageHash);
+    }
+  }
+
+  return {
+    async verify(payload, requirements, apiKey) {
+      const tx = transactionOf(payload);
+      const record = tx && (await store.get(tx.messageHash));
+      if (record) {
+        if (!sameOrigin(record, { apiKey, requirements: retryRequirementsKey(requirements) })) return OTHER_SETTLEMENT;
+        // A claim that holds no transaction yet has not been submitted: it is verified as any payload is.
+        if (record.signed) return fromRecord(record.signed, record.outcome);
+      }
+      const verified = await verifyPayment(ctx, payload, requirements);
+      return verified.ok ? { ok: true, payer: verified.payer } : verified;
+    },
+
+    async settle(payload, requirements, apiKey) {
+      const tx = transactionOf(payload);
+      if (!tx) {
+        // Nothing a retry is known by: verification refuses a payload whose transaction does not decode.
+        const verified = await verifyPayment(ctx, payload, requirements);
+        return refusal(verified.ok ? refuse("invalid_payload", "the transaction cannot be decoded") : verified);
+      }
+      const origin: Origin = { apiKey, requirements: retryRequirementsKey(requirements) };
+      // No `await` between the lookup and the registration: a duplicate in flight joins this settlement.
+      const running = inFlight.get(tx.messageHash);
+      if (running) return sameOrigin(running, origin) ? running.settling : refusal(OTHER_SETTLEMENT);
+      const settling = settleOnce(tx.messageHash, origin, payload, requirements);
+      inFlight.set(tx.messageHash, { ...origin, settling });
+      try {
+        return await settling;
+      } finally {
+        inFlight.delete(tx.messageHash);
+      }
+    },
+  };
 }
 
 /** A verified transaction, signed by every party, ready to submit. */

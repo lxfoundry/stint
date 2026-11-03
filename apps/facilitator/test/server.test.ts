@@ -1,9 +1,10 @@
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { generateKeyPairSigner } from "@solana/kit";
+import { address, generateKeyPairSigner } from "@solana/kit";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
-import type { SupportedResponse } from "@lxfoundry/stint-x402";
+import { buildOpenOffer, buildOpenTransaction, type SupportedResponse } from "@lxfoundry/stint-x402";
+import { createMemoryStore, type SettlementRecord, type SettlementStore } from "../src/records.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startFacilitator, type RunningFacilitator } from "../src/index.js";
 
@@ -124,5 +125,48 @@ describe("facilitator HTTP interface (spec §6.1)", () => {
 
   it("answers 404 elsewhere", async () => {
     expect((await fetch(`${facilitator.url}/nowhere`)).status).toBe(404);
+  });
+
+  it("hands the settlement store the API key's SHA-256, never the key", async () => {
+    const claims: SettlementRecord[] = [];
+    const memory = createMemoryStore();
+    const store: SettlementStore = { ...memory, claim: async (record) => (claims.push(record), memory.claim(record)) };
+    const keyed = await startFacilitator({
+      rpcUrl: "http://127.0.0.1:9",
+      network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      kora: { url: kora.url, apiKey: "kora-key" },
+      rentPayerSecretKey: newSecretKey(),
+      apiKeys: ["seller-key"],
+      settlementStore: store,
+    });
+    try {
+      const offer = buildOpenOffer({
+        network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+        asset: address("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"),
+        payTo: (await generateKeyPairSigner()).address,
+        receiverAuthorizer: (await generateKeyPairSigner()).address,
+        terms: { rate: 1_000n, minSeconds: 5, maxSeconds: 120 },
+        seconds: 30,
+        facilitator: { feePayer, rentPayer: keyed.rentPayer, programId: STINT_PROGRAM_ADDRESS, closeUrl: keyed.closeUrl },
+        lifetime: { blockhash: "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N", lastValidBlockHeight: 1_234n },
+        maxTimeoutSeconds: 60,
+        idleCloseSeconds: 10,
+        closeOnOutage: true,
+      });
+      const built = await buildOpenTransaction({ requirements: offer, authority: await generateKeyPairSigner(), decimals: 6 });
+      const paymentPayload = { x402Version: 2, accepted: offer, payload: { type: "open", transaction: built.transaction, session: built.session } };
+      // The node cannot be reached, so the settlement fails once it has claimed the message.
+      const response = await fetch(`${keyed.url}/settle`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer seller-key" },
+        body: JSON.stringify({ x402Version: 2, paymentPayload, paymentRequirements: offer }),
+      });
+      expect(response.status).toBe(500);
+      expect(claims.map((claim) => claim.apiKey)).toEqual([createHash("sha256").update("seller-key", "utf8").digest("hex")]);
+      // Released when the settlement failed, before anything was submitted.
+      expect(await store.list()).toEqual([]);
+    } finally {
+      await keyed.stop();
+    }
   });
 });

@@ -6,9 +6,10 @@ import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
 import { HttpError, SCHEME, X402_VERSION, readJson, sendJson, type Network, type RetryOptions, type SupportedResponse } from "@lxfoundry/stint-x402";
 import { createCloseInfoSource, createSponsoredCloser } from "./close.js";
 import { createKoraClient } from "./kora.js";
-import { settlePayment } from "./settle.js";
+import { DEFAULT_PRUNE_INTERVAL_MS, createMemoryStore, createRecordPruner, type SettlementStore } from "./records.js";
+import { createSettlement } from "./settle.js";
 import { DEFAULT_SWEEP_INTERVAL_MS, createSweeper, type SweepReport, type SweeperConfig } from "./sweeper.js";
-import { verifyPayment, type FacilitatorContext } from "./verify.js";
+import type { FacilitatorContext } from "./verify.js";
 
 export interface FacilitatorConfig {
   readonly host?: string;
@@ -28,6 +29,10 @@ export interface FacilitatorConfig {
   readonly closeInfoTtlMs?: number;
   /** Absent: no periodic sweep (spec §6.4). `sweepOnce()` works either way. */
   readonly sweeper?: SweeperConfig;
+  /** Where settlement records live (spec §5.5, §6.5). Default: this process's memory, which a restart empties. */
+  readonly settlementStore?: SettlementStore;
+  /** Milliseconds between passes that drop the records whose transaction can no longer land (default 30,000). */
+  readonly recordPruneIntervalMs?: number;
   readonly log?: (entry: Record<string, unknown>) => void;
 }
 
@@ -72,6 +77,10 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
   };
   const closeInfo = createCloseInfoSource(ctx, { ttlMs: config.closeInfoTtlMs });
   const sponsoredClose = createSponsoredCloser(ctx);
+  const store = config.settlementStore ?? createMemoryStore();
+  const settlement = createSettlement(ctx, store);
+  const pruner = createRecordPruner(ctx, store);
+  let pruning: ReturnType<typeof setInterval> | undefined;
   // The sweeper builds and signs its own closes with `ctx`: they do not pass `verifyPayment`, which refuses the rent payer as a closer.
   const sweeper = createSweeper({
     ctx,
@@ -103,10 +112,12 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
     if (request.method === "POST" && (path === "/verify" || path === "/settle")) {
       const key = request.headers.authorization?.replace(/^Bearer /, "");
       if (!key || !isKnownKey(key, apiKeys)) return sendJson(response, 401, { error: "unauthorized" });
+      // A record holds the key's digest, never the key (spec §5.5).
+      const apiKey = digest(key).toString("hex");
       const body = await readJson(request);
       const { paymentPayload, paymentRequirements } = (body ?? {}) as Record<string, unknown>;
       if (path === "/verify") {
-        const verified = await verifyPayment(ctx, paymentPayload, paymentRequirements);
+        const verified = await settlement.verify(paymentPayload, paymentRequirements, apiKey);
         log({ event: "verify", ok: verified.ok, ...(verified.ok ? {} : { reason: verified.reason }) });
         return sendJson(
           response,
@@ -116,7 +127,7 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
             : { isValid: false, invalidReason: verified.reason, invalidMessage: verified.message },
         );
       }
-      const settled = await settlePayment(ctx, paymentPayload, (paymentRequirements ?? {}) as { amount?: unknown });
+      const settled = await settlement.settle(paymentPayload, paymentRequirements, apiKey);
       log({ event: "settle", success: settled.success, reason: settled.errorReason, transaction: settled.transaction });
       return sendJson(response, 200, settled);
     }
@@ -150,6 +161,11 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
   url = `http://${host}:${(server.address() as AddressInfo).port}`;
   // Started only once the server listens, so that a start that fails leaves no timer behind.
   if (config.sweeper) sweeper.start(config.sweeper.intervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
+  pruning = setInterval(
+    () => void pruner.pruneOnce().catch((error: unknown) => log({ event: "error", error: error instanceof Error ? error.message : String(error) })),
+    config.recordPruneIntervalMs ?? DEFAULT_PRUNE_INTERVAL_MS,
+  );
+  pruning.unref();
 
   return {
     url,
@@ -159,6 +175,7 @@ export async function startFacilitator(config: FacilitatorConfig): Promise<Runni
     sweepOnce: () => sweeper.sweepOnce(),
     stop: async () => {
       // The sweeper first: a close it has sent is waited for before the server goes.
+      clearInterval(pruning);
       await sweeper.stop();
       await new Promise<void>((resolve) => {
         server.closeAllConnections();
