@@ -1,7 +1,8 @@
 import { generateKeyPairSigner, getSolanaErrorFromJsonRpcError } from "@solana/kit";
+import { StintError } from "@lxfoundry/stint-client";
 import { STINT_ERROR__NOT_EXPIRED, STINT_ERROR__UNAUTHORIZED } from "@lxfoundry/stint-program-client";
 import { describe, expect, it } from "vitest";
-import { buyerClient, closePollMs, rejectedWithProgramError, sessionSeconds } from "../src/helpers.js";
+import { buyerClient, closePollMs, rejectedWithProgramError, refusalOf, sessionSeconds } from "../src/helpers.js";
 import type { Target } from "../src/types.js";
 
 describe("buyerClient", () => {
@@ -73,5 +74,17 @@ describe("rejectedWithProgramError", () => {
     const loop = new Error("loop");
     loop.cause = loop;
     expect(rejectedWithProgramError(loop, STINT_ERROR__UNAUTHORIZED)).toBe(false);
+  });
+});
+
+describe("refusalOf", () => {
+  it("gives a StintError's status, the error its body names, and its body", async () => {
+    const body = { error: "invalid_duration", minSeconds: 5, maxSeconds: 120 };
+    expect(await refusalOf(Promise.reject(new StintError("refused", 400, body)))).toEqual({ status: 400, reason: "invalid_duration", body });
+  });
+
+  it("is undefined for a call that went through, and throws any other error", async () => {
+    expect(await refusalOf(Promise.resolve("opened"))).toBeUndefined();
+    await expect(refusalOf(Promise.reject(new Error("network down")))).rejects.toThrow("network down");
   });
 });

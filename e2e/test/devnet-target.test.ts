@@ -121,6 +121,7 @@ describe("the devnet target, run against the local network", () => {
   it("offers stack control and the facilitator's API, and no chain control", () => {
     expect(stack.target.name).toBe("devnet");
     expect([...stack.target.capabilities].sort()).toEqual(["facilitatorApi", "stack"]);
+    expect(stack.context().facilitator).toBeDefined();
   });
 
   it("passes the required scenarios with buyers funded from the funding key", async () => {

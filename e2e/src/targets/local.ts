@@ -1,6 +1,7 @@
 import type { DirectChain, ScenarioContext, StackControl, Target } from "@lxfoundry/stint-conformance";
 import type { RunningStream } from "@lxfoundry/stint-example-stream";
 import type { RunningFacilitator } from "@lxfoundry/stint-facilitator";
+import { createFacilitatorClient } from "@lxfoundry/stint-gate";
 import { newBuyer } from "../fixtures/buyers.js";
 import { fundSol, newHarnessKey } from "../fixtures/keys.js";
 import { sendUsdc } from "../fixtures/transfers.js";
@@ -63,6 +64,8 @@ export async function startLocalStack(): Promise<LocalStack> {
     });
     stops.unshift(() => services.stop());
     const direct = await directChainOf(chain);
+    // The facilitator keeps its address when it restarts, so one client serves every context.
+    const facilitatorApi = createFacilitatorClient(services.facilitator.url, services.facilitatorApiKey);
     const control: StackControl = {
       rentPayer: services.facilitator.rentPayer,
       stopGate: () => services.stopGate(),
@@ -93,6 +96,7 @@ export async function startLocalStack(): Promise<LocalStack> {
         readRetry: READ_RETRY,
         stack: control,
         direct,
+        facilitator: facilitatorApi,
         // A cheatcode sets the balance; the next slot makes it visible.
         fundSol: async (owner, lamports) => {
           chain.network.surfnet.fundSol(owner, Number(lamports));

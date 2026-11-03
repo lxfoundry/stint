@@ -49,6 +49,12 @@ describe("local target", () => {
     // One of each per stack: every context it makes shares them.
     expect(stack.context().stack).toBe(context.stack);
     expect(stack.context().direct).toBe(context.direct);
+    expect(stack.context().facilitator).toBe(context.facilitator);
+    // The stack's API key is accepted: the payload is judged, not refused as unauthorised.
+    expect(await context.facilitator!.verify({ x402Version: 1, accepted: {} as never, payload: {} }, {} as never)).toMatchObject({
+      isValid: false,
+      invalidReason: "invalid_x402_version",
+    });
 
     await context.stack!.stopGate();
     await context.stack!.startGate();
