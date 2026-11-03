@@ -28,7 +28,7 @@ export interface DemoOptions {
   readonly chain: DemoChain;
   /** Milliseconds. Default `Date.now`. */
   readonly now?: () => number;
-  /** Where a failure that is not an action's goes, one line at a time. Default: stderr. Every line is redacted first. */
+  /** Where the demo's lines go, one at a time: each failure, an action's included. Default: stderr. Every line is redacted first. */
   readonly log?: (line: string) => void;
 }
 
@@ -98,6 +98,8 @@ export function createDemo(options: DemoOptions): Demo {
   let lastLookup = -Infinity;
   let lastSubscribe = -Infinity;
   let following: Promise<void> | undefined;
+  /** The session whose subscription is being sent: at most one in flight for a session, however long it takes. */
+  let subscribing: string | undefined;
   let leaving = false;
 
   const sink: ExchangeSink = {
@@ -148,6 +150,7 @@ export function createDemo(options: DemoOptions): Demo {
     } catch (error) {
       const redacted = safe(error);
       failure = { action, message: redacted.message, at: now() };
+      say(`${action} failed: ${redacted.message}`);
       throw redacted;
     } finally {
       if (current.length > 0) last = { action, rows: current };
@@ -162,17 +165,24 @@ export function createDemo(options: DemoOptions): Demo {
    * Sends the stream subscription to the agent's own USDC account: frames arrive when its money moves. Sent again at
    * most every `RESUBSCRIBE_EVERY_MS`, while more than 3 s are paid for: the stream ignores an account a connection
    * already watches, and `stint_send` opens the connection again if it dropped.
+   *
+   * Its callers do not wait for it: a connection that never opens must not hold a launch, which would keep the person
+   * from closing, nor every later state read. It cannot reject (everything that can fail is inside the `try`, and `say`
+   * does not throw), and the next one is not sent while this one is still in flight.
    */
   async function subscribe(force: boolean): Promise<void> {
     const id = session.sessionId;
-    if (session.state !== "open" || !id || session.paidUntil === undefined) return;
+    if (session.state !== "open" || !id || session.paidUntil === undefined || subscribing === id) return;
     if (!force && now() - lastSubscribe < RESUBSCRIBE_EVERY_MS) return;
     if (now() >= (session.paidUntil - 3) * 1000) return;
     lastSubscribe = now();
+    subscribing = id;
     try {
       await tools.tools.stint_send.run({ sessionId: id, message: { op: "subscribe", accounts: [chain.usdcAccount] } });
     } catch (error) {
       say(`the stream subscription failed: ${message(error)}`);
+    } finally {
+      if (subscribing === id) subscribing = undefined;
     }
   }
 
@@ -236,13 +246,19 @@ export function createDemo(options: DemoOptions): Demo {
       return lookUpClose(true);
     }
     if (session.paidUntil !== undefined && now() >= session.paidUntil * 1000) return lookUpClose(false);
-    await subscribe(false);
+    void subscribe(false);
   }
 
-  async function launch(): Promise<void> {
+  const refuseWhenLeaving = (): void => {
     if (leaving) throw new DemoError("The demo is shutting down: no session can be opened");
+  };
+
+  async function launch(): Promise<void> {
+    refuseWhenLeaving();
     if (isRunning(session)) throw new DemoError("A session is already running: top it up, close it, or let it end");
     await refreshBalance();
+    // A shutdown during the balance read found no session to close: nothing may open after it. No await from here to the open.
+    refuseWhenLeaving();
     if (wallet.usdc !== undefined && BigInt(wallet.usdc) < BigInt(LAUNCH_AMOUNT)) {
       throw new DemoError(
         `The wallet holds ${formatUsdc(wallet.usdc)} and a launch needs ${formatUsdc(LAUNCH_AMOUNT)}: get devnet USDC for ${options.address} at ${FAUCET_URL}`,
@@ -280,7 +296,7 @@ export function createDemo(options: DemoOptions): Demo {
         seller: offered ? explorerAddress(offered.payTo) : undefined,
       },
     };
-    await subscribe(true);
+    void subscribe(true);
   }
 
   async function topUp(): Promise<void> {

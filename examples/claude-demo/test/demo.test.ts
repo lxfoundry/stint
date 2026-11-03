@@ -19,7 +19,7 @@ import { describe, expect, it } from "vitest";
 import type { DemoChain, FoundClose } from "../src/chain.js";
 import { createDemo, type Demo } from "../src/demo.js";
 import { explorerAddress, explorerTx } from "../src/links.js";
-import { AGENT_USDC, SELLER, SESSION, offer, signatureOf } from "./fixtures.js";
+import { AGENT_USDC, FEE_PAYER, SELLER, SESSION, offer, signatureOf } from "./fixtures.js";
 
 const START_MS = 1_800_000_000_000;
 const OPEN_TX = signatureOf(1);
@@ -42,6 +42,12 @@ interface Behave {
   offer?: ElapsedRequirements | null;
   /** The close waits for this before it answers. */
   holdClose?: Promise<void>;
+  /** The balance read waits for this before it answers. */
+  holdBalance?: Promise<void>;
+  /** The stream connection never opens: a send never settles. */
+  hangSend?: boolean;
+  /** The address of the session the next open returns. */
+  sessionId?: string;
   openFails?: Error;
   topUpFails?: Error;
   closeFails?: Error;
@@ -73,7 +79,7 @@ function setup(options: { balance?: bigint } = {}) {
         sink().settled("open", behave.openTx);
         paidUntil = Math.floor(clock / 1000) + 100;
         await behave.hold;
-        return { sessionId: SESSION, paidUntil, cost: "100000", remainingBudget: "500000" };
+        return { sessionId: behave.sessionId ?? SESSION, paidUntil, cost: "100000", remainingBudget: "500000" };
       }),
       stint_session_status: tool<StatusInput, StatusOutput>("stint_session_status", async () => {
         throw new Error("not used by the demo");
@@ -87,6 +93,7 @@ function setup(options: { balance?: bigint } = {}) {
       }),
       stint_send: tool<SendInput, { ok: true }>("stint_send", async (input) => {
         sent.push(input.message);
+        if (behave.hangSend) await new Promise<never>(() => {});
         return { ok: true };
       }),
       stint_receive: tool<ReceiveInput, ReceiveOutput>("stint_receive", async () => {
@@ -111,6 +118,7 @@ function setup(options: { balance?: bigint } = {}) {
   const chain: DemoChain = {
     usdcAccount: AGENT_USDC,
     usdcBalance: async () => {
+      await behave.holdBalance;
       if (behave.balanceFails) throw behave.balanceFails;
       return balance;
     },
@@ -334,6 +342,8 @@ describe("what the demo reports", () => {
     t.advance(5_000);
     t.behave.closeFails = new Error("the gate answered 500");
     await expect(t.demo.close()).rejects.toThrow("the gate answered 500");
+    // One line, even though the action's caller gets the error too.
+    expect(t.logs).toEqual(["close failed: the gate answered 500"]);
     let state = await t.demo.state();
     expect(state.error).toEqual({ action: "close", message: "the gate answered 500", at: START_MS + 5_000 });
     // The session is open again, and a close can be tried again.
@@ -403,6 +413,7 @@ describe("what the demo reports", () => {
     expect(t.logs.length).toBeGreaterThan(0);
     for (const line of t.logs) expect(line).not.toContain("secret-marker");
     expect(t.logs.join("\n")).toContain("request to https://rpc.example failed");
+    expect(t.logs).toContain("close failed: could not read https://rpc.example");
   });
 
   it("writes each log line on one line", async () => {
@@ -457,6 +468,66 @@ describe("what the state links to", () => {
     expect(state.session.maxSeconds).toBeUndefined();
     expect(state.session.links.seller).toBeUndefined();
     expect(state.session.links.open).toBe(explorerTx(OPEN_TX));
+  });
+});
+
+describe("a stream connection that never opens", () => {
+  it("holds neither the launch nor a state read, sends no second subscription while the first is in flight, and still follows the gate's end", async () => {
+    const t = setup();
+    t.behave.hangSend = true;
+    const launched = await t.demo.launch();
+    expect(launched).toMatchObject({ session: { state: "open" } });
+    expect(launched.busy).toBeUndefined();
+    expect(t.sent).toHaveLength(1);
+    t.advance(15_000);
+    expect((await t.demo.state()).session.state).toBe("open");
+    t.advance(15_000);
+    await t.demo.state();
+    expect(t.sent).toHaveLength(1);
+    t.closeCodes.set(SESSION, 4410);
+    t.closes.set(SESSION, { signature: CLOSE_TX, at: t.paidUntil() - 70, paidUntil: t.paidUntil(), paid: "30000", refunded: "70000" });
+    expect((await t.demo.state()).session).toMatchObject({ state: "ended", paid: "30000", refunded: "70000" });
+  }, 1_000);
+
+  it("lets the person close the session that was launched meanwhile, and logs nothing for a subscription still waiting", async () => {
+    const t = setup();
+    t.behave.hangSend = true;
+    await t.demo.launch();
+    t.advance(2_000);
+    const state = await t.demo.close();
+    expect(state.session).toMatchObject({ state: "closed", paid: "12000", refunded: "88000" });
+    expect(t.counts.close).toBe(1);
+    expect(t.logs).toEqual([]);
+  }, 1_000);
+
+  it("sends a new session's subscription although the last session's is still in flight", async () => {
+    const t = setup();
+    t.behave.hangSend = true;
+    await t.demo.launch();
+    await t.demo.close();
+    t.behave.sessionId = FEE_PAYER;
+    await t.demo.launch();
+    expect(t.sent).toHaveLength(2);
+  }, 1_000);
+});
+
+describe("a shutdown while a launch reads the balance", () => {
+  it("opens nothing after it, and refuses the launch", async () => {
+    const t = setup();
+    let release!: () => void;
+    t.behave.holdBalance = new Promise<void>((resolve) => (release = resolve));
+    const launching = t.demo.launch();
+    const refused = expect(launching).rejects.toThrow(/shutting down/);
+    await tick();
+    // No session runs yet: the shutdown has nothing to close.
+    expect(await t.demo.shutdown()).toEqual({ closed: [], failed: [] });
+    release();
+    await refused;
+    expect(t.counts.open).toBe(0);
+    expect(t.counts.closeAll).toBe(0);
+    expect((await t.demo.state()).session.state).toBe("none");
+    await expect(t.demo.launch()).rejects.toThrow(/shutting down/);
+    expect(t.counts.open).toBe(0);
   });
 });
 

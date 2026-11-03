@@ -11,7 +11,9 @@ import {
   type Address,
 } from "@solana/kit";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { SessionTools } from "@lxfoundry/stint-client";
 import { createRpcDemoChain } from "../src/chain.js";
+import { createDemo } from "../src/demo.js";
 import { PROGRAM, SELLER, SESSION, signatureOf } from "./fixtures.js";
 
 /** Anchor's event tag and the `Closed` event's discriminator: what the program's `emit_cpi!` writes first. */
@@ -72,6 +74,8 @@ const node = {
   signatures: [] as string[],
   transactions: new Map<string, ReturnType<typeof transaction>>(),
   calls: [] as string[],
+  /** The node reads a request and never answers it. */
+  hang: false,
 };
 let server: Server;
 let url: string;
@@ -83,6 +87,7 @@ beforeAll(async () => {
     request.on("end", () => {
       const { id, method, params } = JSON.parse(Buffer.concat(chunks).toString()) as { id: unknown; method: string; params: unknown[] };
       node.calls.push(method);
+      if (node.hang) return;
       const context = { slot: 1 };
       let result: unknown;
       if (method === "getAccountInfo") {
@@ -101,7 +106,10 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
+afterAll(() => {
+  server.closeAllConnections();
+  return new Promise<void>((resolve) => server.close(() => resolve()));
+});
 
 describe("the demo's reads from the chain", () => {
   it("watches the owner's USDC account, and reads its balance in base units, 0 while it does not exist", async () => {
@@ -150,5 +158,35 @@ describe("the demo's reads from the chain", () => {
     expect(await chain.findClose(SESSION)).toBeUndefined();
     expect(node.calls.filter((method) => method === "getTransaction")).toHaveLength(1);
     expect(node.calls.filter((method) => method === "getSignaturesForAddress")).toHaveLength(2);
+  });
+});
+
+describe("a node that does not answer", () => {
+  it("has each request given up at its time limit, and answers again once the node does", async () => {
+    const chain = await createRpcDemoChain(url, SELLER, { requestTimeoutMs: 50 });
+    node.hang = true;
+    await expect(chain.usdcBalance()).rejects.toMatchObject({ name: "TimeoutError" });
+    await expect(chain.findClose(SESSION)).rejects.toMatchObject({ name: "TimeoutError" });
+    node.hang = false;
+    node.token = "7";
+    node.signatures = [];
+    expect(await chain.usdcBalance()).toBe(7n);
+    expect(await chain.findClose(SESSION)).toBeUndefined();
+  });
+
+  it("is logged by the demo, which still answers the state read, and read again at the next one", async () => {
+    const chain = await createRpcDemoChain(url, SELLER, { requestTimeoutMs: 50 });
+    const logs: string[] = [];
+    const tools = { tools: {}, closeCode: () => undefined, closeAll: async () => ({ closed: [], failed: [] }) } as unknown as SessionTools;
+    const demo = createDemo({ address: SELLER, gateUrl: "https://gate.example", tools, chain, log: (line) => void logs.push(line) });
+    node.hang = true;
+    expect((await demo.state()).wallet).toEqual({ address: SELLER });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatch(/^reading the wallet's balance failed: /);
+    expect(logs[0]).not.toContain(url);
+    node.hang = false;
+    node.token = "7";
+    expect((await demo.state()).wallet).toMatchObject({ address: SELLER, usdc: "7" });
+    expect(logs).toHaveLength(1);
   });
 });
