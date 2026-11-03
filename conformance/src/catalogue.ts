@@ -11,6 +11,8 @@ import { samePaymentTwice } from "./scenarios/14-same-payment-twice.js";
 import { sponsoredClose } from "./scenarios/15-sponsored-close.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { topUpUnknownSession } from "./scenarios/17-top-up-unknown-session.js";
+import { payerMisuse } from "./scenarios/18-payer-misuse.js";
+import { verifyValidOpen } from "./scenarios/19-verify-valid-open.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
 import { gateUnreachableAtClose } from "./scenarios/24-gate-unreachable-at-close.js";
 import { gateAndFacilitatorUnreachableAtClose } from "./scenarios/25-gate-and-facilitator-unreachable-at-close.js";
@@ -58,8 +60,8 @@ export const catalogue: readonly Scenario[] = [
   required(15, "Sponsored close through closeUrl", sponsoredClose),
   required(16, "Close by an unrelated key after paid_until", closeAfterPaidUntil),
   required(17, "Top-up for an unknown session", topUpUnknownSession),
-  pending(18, "Fee payer or rent payer in a forbidden position", ["facilitatorApi"]),
-  pending(19, "/verify of a valid open", ["facilitatorApi"]),
+  required(18, "Fee payer or rent payer in a forbidden position", payerMisuse, ["facilitatorApi"]),
+  required(19, "/verify of a valid open", verifyValidOpen, ["facilitatorApi"]),
   pending(20, "Session opened on-chain with the gate's terms but another mint"),
   pending(21, "Refund account closed, a stray base unit, then expiry"),
   required(22, "The example agent's task, scripted", exampleAgentTask, ["stack"]),
