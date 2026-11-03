@@ -2,8 +2,11 @@ import { openConnectCloseEarly } from "./scenarios/01-open-connect-close.js";
 import { closeBeforeMinSeconds } from "./scenarios/02-close-before-min-seconds.js";
 import { expiry } from "./scenarios/03-expiry.js";
 import { topUpBeforeAndAfterExpiry } from "./scenarios/04-top-up.js";
+import { paymentRefusals } from "./scenarios/05-payment-refusals.js";
+import { failedPayment } from "./scenarios/06-failed-payment.js";
 import { unilateralClose } from "./scenarios/07-unilateral-close.js";
 import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
+import { mismatchedPayload } from "./scenarios/13-mismatched-payload.js";
 import { sponsoredClose } from "./scenarios/15-sponsored-close.js";
 import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
@@ -39,15 +42,15 @@ export const catalogue: readonly Scenario[] = [
   required(2, "Close before minSeconds", closeBeforeMinSeconds),
   required(3, "Expiry", expiry),
   required(4, "Top-up before and after expiry", topUpBeforeAndAfterExpiry),
-  pending(5, "Payment with wrong terms, a wrong amount, or a Memo instruction"),
-  pending(6, "Failed payment"),
+  required(5, "Payment with wrong terms, a wrong amount, or a Memo instruction", paymentRefusals),
+  required(6, "Failed payment", failedPayment),
   required(7, "Unilateral on-chain close", unilateralClose),
   pending(8, "Token: expired, wrong aud, wrong purpose, replayed"),
   required(9, "Disconnect past the grace period; reconnect within it; never connect", disconnectAndGrace),
   pending(10, "Resource outage", ["stack"], "ownStack"),
   pending(11, "Two gate instances, reconnecting elsewhere", ["stack"], "ownStack"),
   pending(12, "Allowance funding", ["allowance"]),
-  pending(13, "Payment whose accepted differs by one byte; x402Version 1"),
+  required(13, "Payment whose accepted differs by one byte; x402Version 1", mismatchedPayload),
   pending(14, "The same payment sent twice"),
   required(15, "Sponsored close through closeUrl", sponsoredClose),
   required(16, "Close by an unrelated key after paid_until", closeAfterPaidUntil),
