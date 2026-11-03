@@ -170,6 +170,11 @@ describe("settlement records on /verify and /settle (spec §5.5)", () => {
   const dropsAtOnce = () => void (node.status = CONFIRMED);
   /** A transaction the node takes, and that does not land. */
   const neverLands = () => {};
+  /** A node that refuses the transaction before forwarding it: a failed preflight, as a lagging node's BlockhashNotFound. */
+  const preflightRefusal = () => {
+    const cause = new SolanaError(SOLANA_ERROR__TRANSACTION_ERROR__BLOCKHASH_NOT_FOUND);
+    throw new SolanaError(SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE, { cause } as never);
+  };
 
   it("settles an open once, records the outcome, and answers a retry from it: nothing verified, signed or sent again", async () => {
     const payload = await openPayload();
@@ -245,10 +250,7 @@ describe("settlement records on /verify and /settle (spec §5.5)", () => {
 
   it("releases the claim when the node refuses the first submission: it did not take the transaction", async () => {
     const payload = await openPayload();
-    node.onSend = () => {
-      const cause = new SolanaError(SOLANA_ERROR__TRANSACTION_ERROR__BLOCKHASH_NOT_FOUND);
-      throw new SolanaError(SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE, { cause } as never);
-    };
+    node.onSend = preflightRefusal;
     expect(await settlement.settle(payload, offer, API_KEY)).toMatchObject({ success: false, errorReason: "simulation_failed" });
     expect(await store.get(hashOf(payload))).toBeUndefined();
     node.onSend = dropsAtOnce;
@@ -282,6 +284,22 @@ describe("settlement records on /verify and /settle (spec §5.5)", () => {
     expect(await settlement.settle(payload, offer, API_KEY)).toMatchObject({ success: true });
     expect(node.calls).toEqual({ simulate: 1, send: 2 });
     expect(kora.signed).toBe(1);
+  });
+
+  it("keeps the record, with no outcome, when the node refuses a recorded transaction sent again: its first submission may still land", async () => {
+    const payload = await openPayload();
+    node.onSend = neverLands;
+    const pending = await settlement.settle(payload, offer, API_KEY);
+    expect(pending).toMatchObject({ success: false, errorReason: "settlement_pending" });
+    node.onSend = preflightRefusal;
+
+    const again = await settlement.settle(payload, offer, API_KEY);
+
+    expect(again).toMatchObject({ success: false, errorReason: "settlement_pending", transaction: pending.transaction });
+    const record = await store.get(hashOf(payload));
+    expect(record?.signed?.signature).toBe(pending.transaction);
+    expect(record?.outcome).toBeUndefined();
+    expect(node.calls).toEqual({ simulate: 1, send: 2 });
   });
 
   it("records blockhash_expired for a transaction that never landed, once its blockhash has expired, and /verify reports it", async () => {
