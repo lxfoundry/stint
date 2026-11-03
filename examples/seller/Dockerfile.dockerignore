@@ -1,0 +1,14 @@
+# Read by BuildKit next to the Dockerfile, and by `fly deploy --ignorefile`. The build context is the repository root.
+.git
+**/node_modules
+**/dist
+**/.cache
+target
+programs
+docs
+brand
+e2e/report
+**/.env
+**/.env.*
+**/*keypair*.json
+**/*.pem

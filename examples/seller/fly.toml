@@ -1,0 +1,44 @@
+# The example seller as one always-on machine. The gate keeps sessions in memory, so the app runs one machine,
+# which Fly.io neither stops when idle nor starts a second of.
+# Deploy from the repository root (examples/seller/README.md):
+#   fly deploy . --config examples/seller/fly.toml --dockerfile examples/seller/Dockerfile --ignorefile examples/seller/Dockerfile.dockerignore --ha=false
+# --ha=false: a first deploy otherwise adds a spare machine, and two machines are two processes on one seed.
+# The Dockerfile and the ignore file are named on the command line, not in a [build] section: Fly.io's reference does
+# not say what [build] paths are relative to, and the build context must be the repository root.
+app = "stint-demo"
+primary_region = "lhr"
+# On SIGINT the seller stops the stream, the facilitator, then Kora (given 5 s after its own SIGINT), and ends within 15 s
+# whatever happens. The seconds between the stop signal and the kill are longer than that: Fly.io's default of 5 would
+# kill the process while Kora is still stopping.
+kill_signal = "SIGINT"
+kill_timeout = 20
+
+[deploy]
+  # One machine replaced by its successor. Not bluegreen or canary: those run two machines at once, two processes on
+  # one seed, each closing the other's sessions at its start-up.
+  strategy = "rolling"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "8080"
+  PUBLIC_ORIGIN = "https://stint-demo.lxfoundry.ai"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    # The start-up funds the keys and closes the sessions an earlier machine left before the stream listens.
+    grace_period = "90s"
+    interval = "15s"
+    timeout = "5s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
