@@ -605,6 +605,26 @@ describe("the client's own close on the chain (spec §9.3, step 3)", () => {
       expect(node.sent).toEqual([]);
     });
 
+    it("gives up the read of the rent-exempt minimum after requestTimeoutMs, and sends nothing", async () => {
+      const node: FakeNode = { session: gate.stored, lamports: 1_000_000n, silent: ["getMinimumBalanceForRentExemption"], sent: [] };
+      const session = await strandedSession(node, QUICK);
+      const started = Date.now();
+
+      await expect(session.close()).rejects.toThrow(/its node did not answer within 200 ms[\s\S]*runs to the end of its paid time/);
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(node.sent).toEqual([]);
+    });
+
+    it("gives up the read of the latest blockhash after requestTimeoutMs, and sends nothing", async () => {
+      const node: FakeNode = { session: gate.stored, lamports: 1_000_000n, silent: ["getLatestBlockhash"], sent: [] };
+      const session = await strandedSession(node, QUICK);
+      const started = Date.now();
+
+      await expect(session.close()).rejects.toThrow(/its node did not answer within 200 ms[\s\S]*runs to the end of its paid time/);
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(node.sent).toEqual([]);
+    });
+
     it("names its own close as one that may still land when the send has no answer within closeRequestTimeoutMs", async () => {
       const node: FakeNode = { session: gate.stored, lamports: 1_000_000n, silent: ["sendTransaction"], sent: [] };
       const session = await strandedSession(node, QUICK);
