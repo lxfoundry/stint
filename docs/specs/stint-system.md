@@ -699,6 +699,9 @@ been submitted, so its payload is verified as any other.
   exactly.
 - **Fee payer:** it is `feePayer`, the first account, unsigned (S14).
 - **Facilitator keys:** the fee payer and the rent payer appear only where section 5.3 allows.
+  The fee-payer and facilitator-key checks come before the per-type checks of the transaction
+  (below), so that a transaction that breaks both is refused `payer_misuse`. For a `topUp` or a
+  `close`, the checks of the session it names, which is read first, come before them.
 - **Allowed programs:** compute budget, associated token account, SPL Token, Stint, and the
   allowance program (section 10).
 - **Simulation** (including inner instructions):
@@ -746,9 +749,9 @@ it is used.
 4. Kora signs as fee payer.
 5. Complete the record (see Idempotency), then submit the transaction and wait for `confirmed`.
 
-If step 2, 3 or 4 refuses the payload, the claim is released. So is it when the node refuses the transaction at its
-first submission with an error that a node returns before it forwards a transaction (a failed preflight, a signature
-that does not verify, an unhealthy node, invalid parameters): it did not take the transaction.
+If step 2, 3 or 4 refuses the payload, or fails, the claim is released. So is it when the node refuses the
+transaction at its first submission with an error that a node returns before it forwards a transaction (a failed
+preflight, a signature that does not verify, an unhealthy node, invalid parameters): it did not take the transaction.
 A node that reports it already processed has it (S16): its outcome is read by its ID. After any other failure to
 submit, such as a request with no answer or another error, which a proxy can return after forwarding, the node may have
 taken the transaction: the facilitator waits for its outcome as for one it submitted, keeps the record, and answers
@@ -810,7 +813,7 @@ twice. The facilitator recognises a retry from its own records:
   ID, since the bytes are identical, or is refused with `AlreadyProcessed` because the first
   submission has landed (S16). Either way, the facilitator then reads the outcome by that ID.
 - **Already processed, with no record.** The chain can report a message as already processed
-  (`AlreadyProcessed`, in simulation or at submission) for which the facilitator holds no record,
+  (`AlreadyProcessed`, in simulation) for which the facilitator holds no record,
   for example after a store failure. The payload is then not refused: it is answered with
   `already_processed`, a non-final reason (section 5.4). The payment may have landed, so the gate
   and the client watch the chain (sections 7.1 and 9.3).
@@ -916,7 +919,7 @@ A Docker Compose stack: the facilitator, Kora and a configuration template.
 
 | Setting | Meaning |
 |---|---|
-| `RPC_URL`, `NETWORK`, `PROGRAM_ID` | Where and what to settle |
+| `RPC_URL`, `NETWORK`, `PROGRAM_ID` | Where and what to settle. `RPC_URL` reaches a node, or a proxy that does not send a `sendTransaction` on to another backend: a node's refusal before forwarding, returned after another backend has forwarded the same transaction, would release the claim and answer as refused a payment that can still land (section 5.5) |
 | Key paths | Fee-payer and rent-payer keys |
 | API keys | One per resource server; REQUIRED on `/verify` and `/settle` by default |
 | Limits per API key | Open sessions, rent fronted, recreated receiver accounts, and the session horizon: offers with a `maxSeconds` above the cap (default 86,400 s) are refused |
