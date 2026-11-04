@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { createKeyPairSignerFromBytes, isAddress, type Address, type KeyPairSigner } from "@solana/kit";
-import type { Asset, Policy } from "@lxfoundry/stint-client";
+import { isNodeUrl, type Asset, type Policy } from "@lxfoundry/stint-client";
 
 /** Every problem with the environment, so that one run of the server shows them all. */
 export class ConfigError extends Error {
@@ -13,6 +13,10 @@ export class ConfigError extends Error {
 export interface McpConfig {
   readonly signer: KeyPairSigner;
   readonly policy: Policy;
+  /** STINT_ALLOWANCE_OWNER (and STINT_ALLOWANCE_NONCE, default 0): fund sessions from that owner's allowance (spec §10). */
+  readonly allowance?: { readonly owner: Address; readonly nonce: bigint };
+  /** STINT_RPC_URL: a node for the client (spec §9.1). It may carry an API key, so it is never quoted. */
+  readonly rpcUrl?: string;
 }
 
 /** The server's configuration from environment variables (spec §9.6). */
@@ -71,6 +75,12 @@ export async function loadConfig(
   const programs = addresses("STINT_PROGRAMS");
   const networks = list("STINT_NETWORKS");
   const allowedAssets = assets();
+  const allowanceOwner = text("STINT_ALLOWANCE_OWNER");
+  if (allowanceOwner !== undefined && !isAddress(allowanceOwner)) problems.push(`STINT_ALLOWANCE_OWNER is not an address: "${allowanceOwner}"`);
+  const allowanceNonce = integer("STINT_ALLOWANCE_NONCE", text("STINT_ALLOWANCE_NONCE"), 0n);
+  if (allowanceNonce !== undefined && allowanceOwner === undefined) problems.push("STINT_ALLOWANCE_NONCE needs STINT_ALLOWANCE_OWNER");
+  const rpcUrl = text("STINT_RPC_URL");
+  if (rpcUrl !== undefined && !isNodeUrl(rpcUrl)) problems.push("STINT_RPC_URL must be an http or https URL");
 
   let signer: KeyPairSigner | undefined;
   if (keyPath !== undefined) {
@@ -105,5 +115,7 @@ export async function loadConfig(
       ...(networks === undefined ? {} : { networks }),
       ...(allowedAssets === undefined ? {} : { assets: allowedAssets }),
     },
+    ...(allowanceOwner !== undefined && isAddress(allowanceOwner) ? { allowance: { owner: allowanceOwner, nonce: allowanceNonce ?? 0n } } : {}),
+    ...(rpcUrl === undefined ? {} : { rpcUrl }),
   };
 }

@@ -108,4 +108,26 @@ describe("loadConfig", () => {
     const mismatched = JSON.stringify([...seed, ...JSON.parse(other.json).slice(32)]);
     expect((await problemsOf(required, mismatched))[0]).toMatch(/STINT_KEYPAIR_PATH/);
   });
+
+  it("reads an allowance owner, its nonce and a node", async () => {
+    const owner = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
+    const { json } = await keyFile();
+    const config = await loadConfig({ ...required, STINT_ALLOWANCE_OWNER: owner, STINT_ALLOWANCE_NONCE: "2", STINT_RPC_URL: "https://api.devnet.solana.com" }, () => json);
+    expect(config.allowance).toEqual({ owner, nonce: 2n });
+    expect(config.rpcUrl).toBe("https://api.devnet.solana.com");
+    const plain = await loadConfig(required, () => json);
+    expect(plain.allowance).toBeUndefined();
+    expect(plain.rpcUrl).toBeUndefined();
+  });
+
+  it("refuses a malformed allowance owner, a nonce without an owner, and an RPC URL that is not an http(s) URL that parses, without quoting the URL", async () => {
+    expect(await problemsOf({ ...required, STINT_ALLOWANCE_OWNER: "nope" })).toContainEqual(expect.stringMatching(/STINT_ALLOWANCE_OWNER/));
+    expect(await problemsOf({ ...required, STINT_ALLOWANCE_NONCE: "1" })).toContainEqual(expect.stringMatching(/needs STINT_ALLOWANCE_OWNER/));
+    // Another scheme, a space in the host, no scheme: fetch would refuse the last two with a message that quotes them.
+    for (const url of ["ftp://host/secret-key", "https://node example/?api-key=secret-key", "node.example/?api-key=secret-key"]) {
+      const problems = await problemsOf({ ...required, STINT_RPC_URL: url });
+      expect(problems).toContainEqual(expect.stringMatching(/STINT_RPC_URL/));
+      expect(problems.join("\n")).not.toContain("secret-key");
+    }
+  });
 });
