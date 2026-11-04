@@ -17,8 +17,9 @@ const DELEGATOR_OFFSET = 3n;
  * Revokes every recurring delegation a held key granted for USDC, and closes its Subscription Authority, so that their rent
  * returns to the key before the clean-up empties it (spec §12.6). An earlier run that stopped half-way leaves them. Each
  * key's authority is found by its address. Its delegations are found by a `getProgramAccounts` filtered on the delegator,
- * on `scanRpc`, the endpoint that answers that method. The fee is the funding key's (`feePayer`); the held key signs.
- * Returns the problems, as the rest of the clean-up does.
+ * on `scanRpc`, the endpoint that answers that method. An authority for which the scan finds no delegation is left in place
+ * and reported (a scan that lags behind the chain), so that the next clean-up finds it again. The fee is the funding key's
+ * (`feePayer`); the held key signs. Returns the problems, as the rest of the clean-up does.
  */
 export async function revokeHeldAllowances(
   rpc: Rpc<SolanaRpcApi>,
@@ -55,6 +56,15 @@ export async function revokeHeldAllowances(
           ],
         })
         .send();
+      // This harness creates an authority and its delegation in one transaction and closes them in one. An authority that
+      // exists with no delegation found means that the scan is behind: closing the authority alone would leave the delegation,
+      // and its rent, for good, since a later clean-up looks only at the owners whose authority exists.
+      if (delegations.length === 0) {
+        problems.push(
+          `revoking the allowances of ${owner}: the scan found no delegation for its Subscription Authority, which is left for the next clean-up`,
+        );
+        continue;
+      }
       const instructions = [
         ...delegations.flatMap(({ pubkey }) => revokeInstructions({ owner: signer, delegation: pubkey })),
         getCloseSubscriptionAuthorityInstruction({ user: signer, subscriptionAuthority: authority }),

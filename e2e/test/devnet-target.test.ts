@@ -460,16 +460,23 @@ describe("the devnet target, run against the local network", () => {
     expect(await sessionsOnChain()).toBe(0);
   }, 120_000);
 
+  /** What the local network answers to a request. */
+  const localNodeAnswer = async (body: string) => ({
+    status: 200,
+    reply: (await (await fetch(chain.network.rpcUrl, { method: "POST", headers: { "content-type": "application/json" }, body })).json()) as object,
+  });
+
   /** Like the free tier of a provider: the local network answers every method but the listing of a program's accounts. */
   const nodeThatCannotListProgramAccounts = () =>
     serveRpc(async (method, body) =>
       method === "getProgramAccounts"
         ? { status: 400, reply: { error: { code: -32600, message: "getProgramAccounts is not available on the Free tier" } } }
-        : {
-            status: 200,
-            reply: (await (await fetch(chain.network.rpcUrl, { method: "POST", headers: { "content-type": "application/json" }, body })).json()) as object,
-          },
+        : localNodeAnswer(body),
     );
+
+  /** Like a node that is behind the chain: the local network answers every method, but its listing of a program's accounts is empty. */
+  const nodeThatListsNoProgramAccounts = () =>
+    serveRpc(async (method, body) => (method === "getProgramAccounts" ? { status: 200, reply: { result: [] } } : localNodeAnswer(body)));
 
   it("finds the sessions to close through the scan endpoint when the main one cannot list the program's accounts", async () => {
     const { seed, fundingUsdc } = await fundedSeed();
@@ -597,6 +604,29 @@ describe("the devnet target, run against the local network", () => {
       expect(await allowanceOnChain(grant)).toEqual({ delegation: true, authority: true });
     } finally {
       await provider.close();
+    }
+
+    expect(await cleanDevnet({ rpcUrl: chain.network.rpcUrl, seed, preflight: false, pollMs: 100 })).toEqual([]);
+    expect(await allowanceOnChain(grant)).toEqual({ delegation: false, authority: false });
+    expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC);
+  }, 120_000);
+
+  it("leaves an authority whose delegation the scan does not list in place, and reports it, until a scan that is up to date lists it", async () => {
+    const { seed, fundingUsdc } = await fundedSeed();
+    const dying = await start(seed);
+    const grant = await grantAllowance(dying);
+    await dying.services.stop();
+    const lagging = await nodeThatListsNoProgramAccounts();
+    try {
+      const problems = await cleanDevnet({ rpcUrl: chain.network.rpcUrl, scanRpcUrl: lagging.url, seed, preflight: false, pollMs: 100 });
+
+      const owner = problems.filter((problem) => problem.startsWith(`revoking the allowances of ${grant.owner.signer.address}: `));
+      expect(owner).toHaveLength(1);
+      expect(owner[0]).toMatch(/no delegation/);
+      // Closing the authority alone would leave the delegation behind for good: nothing looks for it once its authority is gone.
+      expect(await allowanceOnChain(grant)).toEqual({ delegation: true, authority: true });
+    } finally {
+      await lagging.close();
     }
 
     expect(await cleanDevnet({ rpcUrl: chain.network.rpcUrl, seed, preflight: false, pollMs: 100 })).toEqual([]);
