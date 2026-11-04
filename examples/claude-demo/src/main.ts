@@ -109,14 +109,6 @@ async function main(panelHtml: () => Promise<string>): Promise<void> {
   ensureDemoFolder(config.dir, log);
   const side = createOwnerSide(config, log);
   const router = await createRouter({ dir: config.dir, readOnly: READ_ONLY, log, becomeOwner: side.becomeOwner, onStepDown: side.dropped });
-  // One line per call in a copy that forwards it too, but for the panel's state reads, which come every 2 s.
-  const call: CallHandler = async (name, args) => {
-    if (router.role() === "forwarder" && name !== TOOL.state) log(`${name} forwarded`);
-    return router.call(name, args);
-  };
-  const html = await panelHtml();
-  // The factory holds no state (`serveStdio` may call it more than once): every call goes to the router.
-  serveStdio(() => createDemoServer({ html, call, log }));
 
   /**
    * On the way out the sessions of every state this copy built are closed first (the owner's, and those of states it
@@ -152,9 +144,18 @@ async function main(panelHtml: () => Promise<string>): Promise<void> {
   process.stdin.once("end", () => void leave());
   process.stdin.once("close", () => void leave());
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => void leave());
-  // Last, so that the line means the copy can be stopped: a signal that arrives before its handler is registered ends the
-  // process by that signal, with no exit code.
+
+  // After the handlers above: what the line announces (an `owner.json` that names this copy) is what a signal has to clean up,
+  // and a signal that arrives before a handler exists ends the process with no exit code and leaves the file behind.
   log(router.role() === "owner" ? "this copy holds the demo's state" : "forwarding to the copy that holds the demo's state");
+  // One line per call in a copy that forwards it too, but for the panel's state reads, which come every 2 s.
+  const call: CallHandler = async (name, args) => {
+    if (router.role() === "forwarder" && name !== TOOL.state) log(`${name} forwarded`);
+    return router.call(name, args);
+  };
+  const html = await panelHtml();
+  // The factory holds no state (`serveStdio` may call it more than once): every call goes to the router.
+  serveStdio(() => createDemoServer({ html, call, log }));
 }
 
 /** Starts the server with the panel's HTML from `panelHtml`; a start that fails says why on stderr and exits 1. */
