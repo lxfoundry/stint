@@ -66,7 +66,7 @@ by environment variables, and refuses to start without the caps:
 | `STINT_MAX_MIN_SECONDS` | The highest minimum charge accepted. Default 300 |
 | `STINT_SELLERS`, `STINT_PROGRAMS`, `STINT_NETWORKS`, `STINT_ASSETS` | Optional allowlists, comma-separated (`mint:decimals` for assets) |
 | `STINT_ALLOWANCE_OWNER`, `STINT_ALLOWANCE_NONCE` | Optional. The address of an owner whose allowance funds every session ([Allowance funding](#allowance-funding)), and the nonce that names its delegation (default 0). The nonce needs the owner |
-| `STINT_RPC_URL` | Optional. A Solana node's http or https URL. With it the client reads the chain: it checks an allowance before it signs, and `stint_allowance` reports it. The URL may carry an API key, so it is never printed |
+| `STINT_RPC_URL` | Optional. A Solana node's http or https URL. With it the client reads the chain: it checks an allowance before it signs, and `stint_allowance` reports it. The URL may carry an API key, so its user info, path, query and fragment are never printed; an error may still name its scheme and host |
 
 Every limit is enforced by the client's code, whatever a seller offers or the model asks. The agent's
 key holds USDC and no SOL. When the host disconnects, or the process is stopped, every session still
@@ -110,8 +110,9 @@ itself. When a session closes early, the unused part goes back to the owner's ac
 
 The owner grants, checks and revokes with `pnpm stint allowance`, from the repository root (inside WSL on Windows).
 The node is read from `STINT_RPC_URL`, not from the arguments, because an RPC URL may carry an API key; the command
-prints no part of it. It works on devnet only: it checks the node's genesis hash before it sends anything. The owner's
-keypair is given by its absolute path (`~` is not expanded; the shell expands `$HOME`):
+prints none of the URL's user info, path, query or fragment, though an error may still name its scheme and host. It
+works on devnet only: it checks the node's genesis hash before it sends anything. The owner's keypair is given by its
+absolute path (`~` is not expanded; the shell expands `$HOME`):
 
     export STINT_RPC_URL=https://api.devnet.solana.com
     # 0.3 USDC (300000 base units) every hour, until the expiry

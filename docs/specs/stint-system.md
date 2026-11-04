@@ -1331,7 +1331,8 @@ server.
 the key path, caps and allowlists, and optionally an allowance's owner and nonce
 (`STINT_ALLOWANCE_OWNER`, `STINT_ALLOWANCE_NONCE`) and a node (`STINT_RPC_URL`). A node's URL may carry an API key:
 a value that cannot be a node's URL (it is not an http or https URL, or it has user info) is refused without being
-quoted, and the node's errors carry no part of the URL.
+quoted, and the node's errors carry none of the URL's user info, path, query or fragment: an error may still name its
+scheme and host.
 
 ### 9.7 Example agent
 
@@ -1373,7 +1374,8 @@ the transaction lands. `revoke` closes the delegation, and `--close-authority` t
 their rent returns to the owner.
 
 The command reads its node from `STINT_RPC_URL`, never from its arguments, since an RPC URL may carry an API key, and it
-prints no part of that URL. It sends to devnet only: it checks the node's genesis hash before any other call to the node.
+prints none of the URL's user info, path, query or fragment: an error may still name its scheme and host. It sends to
+devnet only: it checks the node's genesis hash before any other call to the node.
 
 SPL Token allows one delegate per token account (S8), and refunds return to an associated token
 account, of which a wallet has exactly one per mint (section 4.1, S7). A dedicated owner wallet for
