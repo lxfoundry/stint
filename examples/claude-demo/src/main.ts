@@ -1,4 +1,3 @@
-import { mkdirSync } from "node:fs";
 import { createSessionTools, createStintClient, type CloseAllOutput, type Policy, type SessionTools } from "@lxfoundry/stint-client";
 import { redactUrls } from "@lxfoundry/stint-x402";
 import type { KeyPairSigner } from "@solana/kit";
@@ -11,7 +10,7 @@ import { createRouter, type CallHandler } from "./owner.js";
 import { createDemoServer } from "./server.js";
 import { FAUCET_URL, TOOL } from "./state.js";
 import { createCallHandler } from "./tools.js";
-import { loadOrCreateWallet } from "./wallet.js";
+import { ensureDemoFolder, loadOrCreateWallet } from "./wallet.js";
 
 /** The tools that only read: a forwarder may ask again for one whose owner went away during it. */
 export const READ_ONLY: ReadonlySet<string> = new Set([TOOL.demo, TOOL.state]);
@@ -57,7 +56,7 @@ export function createOwnerSide(config: DemoConfig, say: (line: string) => void,
   return {
     becomeOwner: async () => {
       // Only here, and only after the election: a copy that forwards never reads or creates `agent.json`.
-      const wallet = await loadOrCreateWallet(config.dir, config.policy);
+      const wallet = await loadOrCreateWallet(config.dir, config.policy, { log: say });
       say(`${wallet.created ? "created the agent's wallet" : "using the agent's wallet"} ${wallet.signer.address} (${wallet.path}); devnet USDC: ${FAUCET_URL}`);
       const chain = await createRpcDemoChain(config.rpcUrl, wallet.signer.address);
       const tools = makeTools(wallet.signer, config.policy);
@@ -79,7 +78,7 @@ export function createOwnerSide(config: DemoConfig, say: (line: string) => void,
 
 async function main(panelHtml: () => Promise<string>): Promise<void> {
   const config = loadConfig(process.env);
-  mkdirSync(config.dir, { recursive: true });
+  ensureDemoFolder(config.dir, log);
   const side = createOwnerSide(config, log);
   const router = await createRouter({ dir: config.dir, readOnly: READ_ONLY, log, becomeOwner: side.becomeOwner });
   log(router.role() === "owner" ? "this copy holds the demo's state" : "forwarding to the copy that holds the demo's state");

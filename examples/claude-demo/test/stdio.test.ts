@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/client";
@@ -82,6 +82,8 @@ describe("the bundled server on stdio", () => {
     expect(String((contents[0] as { text?: unknown }).text)).toContain('id="launch"');
     expect(existsSync(join(files, "agent.json"))).toBe(true);
     expect(existsSync(join(files, "owner.json"))).toBe(true);
+    // Beside the key: a repository around the folder never commits it.
+    expect(readFileSync(join(files, ".gitignore"), "utf8")).toBe("*\n");
     await eventually(stderr, /stint-claude-demo: created the agent's wallet [1-9A-HJ-NP-Za-km-z]{32,44}/);
     await eventually(stderr, /stint-claude-demo: this copy holds the demo's state/);
 

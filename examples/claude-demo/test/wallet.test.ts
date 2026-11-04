@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createKeyPairSignerFromBytes } from "@solana/kit";
 import { SOLANA_DEVNET, SOLANA_MAINNET } from "@lxfoundry/stint-x402";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { WALLET_FILE, WalletError, allowsDevnetOnly, loadOrCreateWallet } from "../src/wallet.js";
+import { IGNORE_FILE, WALLET_FILE, WalletError, allowsDevnetOnly, ensureDemoFolder, loadOrCreateWallet } from "../src/wallet.js";
 
 // Under the package, in a git-ignored directory: `/tmp` can be emptied at any time.
 const scratch = fileURLToPath(new URL("../.cache/", import.meta.url));
@@ -103,11 +103,71 @@ describe("the agent's wallet", () => {
     expect(readFileSync(path, "utf8")).toBe("[1, 2, 3] secret words");
   });
 
+  it("keeps a failed removal of its temporary file from failing the start, and says so", async () => {
+    const lines: string[] = [];
+    const removed: string[] = [];
+    const remove = (path: string) => {
+      removed.push(path);
+      throw Object.assign(new Error(`EBUSY: resource busy or locked, unlink '${path}'`), { code: "EBUSY" });
+    };
+    const created = await loadOrCreateWallet(home, DEVNET, { log: (line) => void lines.push(line), remove });
+    expect(created).toMatchObject({ created: true, path: join(home, WALLET_FILE) });
+    expect(removed).toHaveLength(1);
+    expect(removed[0]).toMatch(/agent\.json\.\d+\..+\.tmp$/);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/could not remove .*\.tmp: EBUSY/);
+    // The key file is whole, and the next start loads it.
+    expect((await loadOrCreateWallet(home, DEVNET)).signer.address).toBe(created.signer.address);
+    // A removal that fails with no one to tell is not an error either.
+    const quiet = await loadOrCreateWallet(join(home, "quiet"), DEVNET, { remove });
+    expect(quiet.created).toBe(true);
+  });
+
   it("makes no key for a policy that allows a network other than devnet", async () => {
     expect(allowsDevnetOnly({})).toBe(true);
     expect(allowsDevnetOnly({ networks: [SOLANA_DEVNET, SOLANA_MAINNET] })).toBe(false);
     expect(allowsDevnetOnly({ networks: [] })).toBe(false);
     await expect(loadOrCreateWallet(home, { networks: [SOLANA_MAINNET] })).rejects.toThrow(/none is made/);
     expect(() => readFileSync(join(home, WALLET_FILE))).toThrow();
+  });
+});
+
+describe("the demo's folder", () => {
+  let home: string;
+  beforeEach(() => {
+    mkdirSync(scratch, { recursive: true });
+    home = mkdtempSync(join(scratch, "folder-"));
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  it("creates the folder with a .gitignore that ignores everything in it, so that a repository around it never commits the key", () => {
+    const dir = join(home, "not", "yet", "stint-demo");
+    ensureDemoFolder(dir);
+    expect(readFileSync(join(dir, IGNORE_FILE), "utf8")).toBe("*\n");
+    expect(readdirSync(dir)).toEqual([IGNORE_FILE]);
+  });
+
+  it("writes one into a folder that has none, and leaves one that is there alone", () => {
+    const bare = join(home, "bare");
+    mkdirSync(bare);
+    ensureDemoFolder(bare);
+    expect(readFileSync(join(bare, IGNORE_FILE), "utf8")).toBe("*\n");
+    const own = join(home, "own");
+    mkdirSync(own);
+    writeFileSync(join(own, IGNORE_FILE), "agent.json\n");
+    ensureDemoFolder(own);
+    ensureDemoFolder(own);
+    expect(readFileSync(join(own, IGNORE_FILE), "utf8")).toBe("agent.json\n");
+  });
+
+  it("logs a .gitignore it cannot write, with each URL in the message cut to its host, and still creates the folder", () => {
+    const dir = join(home, "stint-demo");
+    const lines: string[] = [];
+    const write = () => {
+      throw new Error("EACCES: permission denied (https://rpc.example/v2?api-key=secret-marker)");
+    };
+    expect(() => ensureDemoFolder(dir, (line) => void lines.push(line), write)).not.toThrow();
+    expect(readdirSync(dir)).toEqual([]);
+    expect(lines).toEqual([`could not write ${join(dir, IGNORE_FILE)}: EACCES: permission denied (https://rpc.example)`]);
   });
 });

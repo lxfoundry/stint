@@ -2,16 +2,25 @@ import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } 
 import { join } from "node:path";
 import { createKeyPairSignerFromBytes, createKeyPairSignerFromPrivateKeyBytes, getAddressEncoder, type KeyPairSigner } from "@solana/kit";
 import type { Policy } from "@lxfoundry/stint-client";
-import { SOLANA_DEVNET } from "@lxfoundry/stint-x402";
+import { SOLANA_DEVNET, redactUrls } from "@lxfoundry/stint-x402";
 
 /** The agent's key, in the `stint-demo` folder of `STINT_DEMO_HOME`: a Solana CLI keypair file, a JSON array of 64 bytes. */
 export const WALLET_FILE = "agent.json";
+/** Beside the key: it makes a repository around the folder ignore everything in it. */
+export const IGNORE_FILE = ".gitignore";
 /** A key file that is not yet complete (one made by an older version or another tool) is read a few times before it is called invalid. */
 const READ_ATTEMPTS = 5;
 const READ_DELAY_MS = 100;
 
 export class WalletError extends Error {
   override name = "WalletError";
+}
+
+export interface WalletOptions {
+  /** Where a problem that does not stop the start is reported, one line at a time. Default: nowhere. */
+  readonly log?: (line: string) => void;
+  /** Removes a file. Default: `rmSync` with `force`. A test replaces it to make the removal fail. */
+  readonly remove?: (path: string) => void;
 }
 
 export interface Wallet {
@@ -59,9 +68,11 @@ async function readWhenWritten(path: string): Promise<KeyPairSigner> {
  * Makes `path` hold `contents`, whole and readable by its owner only, unless the name is taken: true when this call
  * made it, false when another did. The contents go to a temporary file beside `path` (a name unique to this call, mode
  * 0600 from its creation), which is then linked to `path`: the link fails if the name exists, and the name appears with
- * everything in it at once. The temporary file is removed in every case. After a crash, a `*.tmp` file may remain.
+ * everything in it at once. The temporary file is removed in every case, and a removal that fails (Windows can refuse
+ * one while another program holds the file) is reported and changes nothing else: the key is whole by then. After a
+ * crash, a `*.tmp` file may remain.
  */
-function publish(path: string, contents: string): boolean {
+function publish(path: string, contents: string, options: WalletOptions): boolean {
   const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
     writeFileSync(temp, contents, { mode: 0o600, flag: "wx" });
@@ -73,7 +84,43 @@ function publish(path: string, contents: string): boolean {
     }
     return true;
   } finally {
-    rmSync(temp, { force: true });
+    try {
+      (options.remove ?? ((file) => rmSync(file, { force: true })))(temp);
+    } catch (error) {
+      report(options.log, `could not remove ${temp}: ${errorText(error)}`);
+    }
+  }
+}
+
+/** The message of `error` with each URL in it cut to its host. */
+const errorText = (error: unknown): string => redactUrls(error instanceof Error ? error.message : String(error));
+
+/** One line to `log`, if there is one; a log that throws must not fail what it reports on. */
+function report(log: ((line: string) => void) | undefined, line: string): void {
+  try {
+    log?.(line);
+  } catch {
+    // Nothing is left to report to.
+  }
+}
+
+/**
+ * Creates `dir` if it is missing, and puts a `.gitignore` in it that ignores everything, if it has none: the folder
+ * holds the agent's key, and a repository around it (a `STINT_DEMO_HOME` inside a project) must never commit it. A
+ * `.gitignore` that is there is never replaced. One that cannot be written is reported to `log` and does not stop the
+ * start.
+ */
+export function ensureDemoFolder(
+  dir: string,
+  log?: (line: string) => void,
+  write: (path: string, contents: string) => void = (path, contents) => writeFileSync(path, contents, { flag: "wx" }),
+): void {
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, IGNORE_FILE);
+  try {
+    write(path, "*\n");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") report(log, `could not write ${path}: ${errorText(error)}`);
   }
 }
 
@@ -89,7 +136,7 @@ function publish(path: string, contents: string): boolean {
  * one key: the one whose link succeeds keeps it, and the others read its file. A key file that is there but not yet complete (one made
  * by an older version or another tool) is read a few times, about 0.4 s in all, before it is called invalid.
  */
-export async function loadOrCreateWallet(dir: string, policy: Pick<Policy, "networks">): Promise<Wallet> {
+export async function loadOrCreateWallet(dir: string, policy: Pick<Policy, "networks">, options: WalletOptions = {}): Promise<Wallet> {
   mkdirSync(dir, { recursive: true });
   const path = join(dir, WALLET_FILE);
   if (existsSync(path)) return { signer: await readWhenWritten(path), path, created: false };
@@ -99,6 +146,6 @@ export async function loadOrCreateWallet(dir: string, policy: Pick<Policy, "netw
   const privateKey = crypto.getRandomValues(new Uint8Array(32));
   const signer = await createKeyPairSignerFromPrivateKeyBytes(privateKey);
   const bytes = [...privateKey, ...getAddressEncoder().encode(signer.address)];
-  if (!publish(path, JSON.stringify(bytes))) return { signer: await readWhenWritten(path), path, created: false };
+  if (!publish(path, JSON.stringify(bytes), options)) return { signer: await readWhenWritten(path), path, created: false };
   return { signer, path, created: true };
 }
