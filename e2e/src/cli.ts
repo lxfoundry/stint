@@ -2,6 +2,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { catalogue, exitCodeFor, renderReport, runScenarios, writeReport, type ScenarioContext, type Target } from "@lxfoundry/stint-conformance";
 import { loadDevnetConfig } from "./devnet/config.js";
+import { parseOnly } from "./only.js";
 import { REPO_ROOT, REPORT_DIR } from "./paths.js";
 import { redactOutcomes } from "./redact.js";
 import { cleanDevnet, devnetFunds, startDevnetStack } from "./targets/devnet.js";
@@ -42,12 +43,20 @@ async function start(name: string, forced: boolean): Promise<Running> {
   throw new Error(`Unknown target "${name}": use local or devnet`);
 }
 
-// `pnpm e2e:devnet [mode] [--force]`: the flags are taken out first, so that their position does not matter.
-// `--force` goes on when the start-up clean-up fails (see `startDevnetStack`).
+// `pnpm e2e:devnet [mode] [--force] [--only=4,34]`: the flags are taken out first, so that their position does not
+// matter. `--force` goes on when the start-up clean-up fails (see `startDevnetStack`). `--only` limits a run to the
+// scenarios it names.
 const args = process.argv.slice(2);
 const force = args.includes("--force");
 const [targetName = "local", mode = "run"] = args.filter((arg) => !arg.startsWith("--"));
 const MODES = ["run", "serve", "funds", "clean"];
+let only: Set<number> | undefined;
+try {
+  only = parseOnly(args, catalogue.map((scenario) => scenario.id));
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(2);
+}
 if (!MODES.includes(mode)) {
   console.error(`Unknown mode "${mode}": use ${MODES.join(", ")}`);
   process.exit(2);
@@ -56,6 +65,11 @@ if (force && targetName !== "devnet") {
   console.error("--force exists only for the devnet target");
   process.exit(2);
 }
+if (only && mode !== "run") {
+  console.error("--only exists only for a run of the scenarios");
+  process.exit(2);
+}
+const scenarios = only ? catalogue.filter((scenario) => only.has(scenario.id)) : catalogue;
 
 // `pnpm e2e:devnet funds` prints the funding key's address and balances; `pnpm e2e:devnet clean` does the
 // clean-up alone. Neither starts a service.
@@ -123,12 +137,12 @@ if (mode === "serve") {
     throw error;
   }
 } else {
-  // `pnpm e2e:local` and `pnpm e2e:devnet`: runs every scenario on the target, writes the report, and
-  // exits 1 when a required scenario fails (spec section 12.2). Kora's logs are kept with a failing
+  // `pnpm e2e:local` and `pnpm e2e:devnet`: runs every scenario on the target, or those `--only` names, writes the
+  // report, and exits 1 when a required scenario fails (spec section 12.2). Kora's logs are kept with a failing
   // run's report.
   try {
     // A failing service can quote the RPC URL, key included, in the error a scenario reports: URLs are reduced to their host.
-    const outcomes = redactOutcomes(await runScenarios(catalogue, stack.target, () => stack.context(), undefined, { timeoutMs: SCENARIO_TIMEOUT_MS }));
+    const outcomes = redactOutcomes(await runScenarios(scenarios, stack.target, () => stack.context(), undefined, { timeoutMs: SCENARIO_TIMEOUT_MS }));
     writeReport(REPORT_DIR, outcomes);
     process.stdout.write(renderReport(outcomes));
     process.exitCode = exitCodeFor(outcomes);
