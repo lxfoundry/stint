@@ -5,6 +5,7 @@ import { topUpBeforeAndAfterExpiry } from "./scenarios/04-top-up.js";
 import { paymentRefusals } from "./scenarios/05-payment-refusals.js";
 import { failedPayment } from "./scenarios/06-failed-payment.js";
 import { unilateralClose } from "./scenarios/07-unilateral-close.js";
+import { tokenRefusals } from "./scenarios/08-token-refusals.js";
 import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
 import { mismatchedPayload } from "./scenarios/13-mismatched-payload.js";
 import { samePaymentTwice } from "./scenarios/14-same-payment-twice.js";
@@ -50,7 +51,7 @@ export const catalogue: readonly Scenario[] = [
   required(5, "Payment with wrong terms, a wrong amount, or a Memo instruction", paymentRefusals),
   required(6, "Failed payment", failedPayment),
   required(7, "Unilateral on-chain close", unilateralClose),
-  pending(8, "Token: expired, wrong aud, wrong purpose, replayed"),
+  required(8, "Token: expired, wrong aud, wrong purpose, replayed", tokenRefusals),
   required(9, "Disconnect past the grace period; reconnect within it; never connect", disconnectAndGrace),
   pending(10, "Resource outage", ["stack"], "ownStack"),
   pending(11, "Two gate instances, reconnecting elsewhere", ["stack"], "ownStack"),
