@@ -7,7 +7,7 @@ import { startLocalStack, type LocalStack } from "../src/targets/local.js";
  * The required scenarios, all passing on `local`. Together they take a little over three minutes, scenarios 4 and 34
  * about 30 s each and every other one under 20 s, so the test's limit of nine minutes is generous.
  */
-const REQUIRED = [1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 32, 34];
+const REQUIRED = [1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 32, 34, 35];
 
 describe("local target", () => {
   let stack: LocalStack;

@@ -20,6 +20,7 @@ import { gateAndFacilitatorUnreachableAtClose } from "./scenarios/25-gate-and-fa
 import { expiredSessionNobodyCloses } from "./scenarios/26-expired-session-nobody-closes.js";
 import { durationsOutOfBounds } from "./scenarios/32-durations-out-of-bounds.js";
 import { topUpWhileClosingAtExpiry } from "./scenarios/34-top-up-while-closing.js";
+import { adoptedSession } from "./scenarios/35-adopted-session.js";
 import type { Capability, IsolationGroup, Scenario } from "./types.js";
 
 /** The scenarios of spec section 12.7. Each is pending until a stage builds it. */
@@ -78,5 +79,5 @@ export const catalogue: readonly Scenario[] = [
   required(32, "Durations out of bounds", durationsOutOfBounds),
   pending(33, "A settlement reply lost after the transaction lands", ["stack"], "ownStack"),
   required(34, "A top-up lands while the gate is closing at expiry", topUpWhileClosingAtExpiry, ["stack"], "ownStack"),
-  pending(35, "A session opened on-chain with the gate's terms is adopted"),
+  required(35, "A session opened on-chain with the gate's terms is adopted", adoptedSession),
 ];
