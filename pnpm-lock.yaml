@@ -398,6 +398,9 @@ importers:
       '@lxfoundry/stint-program-client':
         specifier: workspace:*
         version: link:../program-client
+      '@lxfoundry/stint-subscriptions-client':
+        specifier: workspace:*
+        version: link:../subscriptions-client
       '@solana-program/compute-budget':
         specifier: 0.20.0
         version: 0.20.0(@solana/kit@8.5.0(typescript@7.0.2))

@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@lxfoundry/stint-program-client": "workspace:*",
+    "@lxfoundry/stint-subscriptions-client": "workspace:*",
     "@solana-program/compute-budget": "0.20.0",
     "@solana-program/token": "0.18.0",
     "@solana/kit": "8.5.0",
