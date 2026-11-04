@@ -107,15 +107,22 @@ building the panel at start. `pnpm --filter @lxfoundry/stint-claude-demo test` r
 - **If you run the `.cjs` with a Node.js installed inside WSL**, use a folder on the Linux side (such as
   `~/stint-wallet`), not one on a Windows drive (`/mnt/c/...`): WSL reads back every mode there as 777, so the key file
   is not private.
+- When the server creates the `stint-demo` folder, or finds it without a `.gitignore`, it writes one that holds `*`, so
+  that a wallet folder inside a git repository never commits the key. An existing `.gitignore` is left as it is; one
+  that cannot be written is reported on stderr and does not stop the start.
 - A crash or a kill between writing the key and publishing it can leave an `agent.json.<pid>.<uuid>.tmp` file in that
   folder. It holds a key that was never shown or funded (mode 0600), and is never read as the wallet. It can be deleted.
+  A temporary file that cannot be removed (Windows can refuse while another program holds it) stays the same way, and
+  is reported on stderr; the start goes on.
 - It needs devnet USDC only: the seller's facilitator pays the fees, so the agent holds no SOL. Copy its address from the
   panel, get USDC at Circle's faucet, `https://faucet.circle.com/` (choose Solana Devnet and paste the address), then press
   **Refresh**. The panel's faucet link asks Claude Desktop to open it; if it will not, the panel shows the page's
   address to copy.
 - Its limits, enforced by the client's policy whatever the seller offers or the model asks: at most 1000 base units a
   second (0.001 USDC/s), at most 0.300 USDC per session (an open and two top-ups), at most 2.000 USDC an hour across
-  sessions, counted as it is paid in, refunds or not; devnet and devnet USDC only.
+  sessions, counted as it is paid in, refunds or not; devnet and devnet USDC only. The 2.000 USDC an hour is
+  counted by the client of the copy that holds the state: when another copy takes over, or the server restarts, the
+  new client starts a fresh window.
 
 ## How it works
 
@@ -134,10 +141,15 @@ building the panel at start. `pnpm --filter @lxfoundry/stint-claude-demo test` r
 - Every action goes through the client's session tools, so every payment passes the client's policy checks. The x402
   exchange the panel shows is recorded from the client's own requests to the gate, by one wrapper around `fetch` in the
   owner.
+- Some of the text the model reads comes from the seller: the gate's error text, and the first 200 characters of the
+  body of a failed response, appear in the exchange rows of the state that the tools return. The client's policy caps
+  what can be spent in code, whatever the model is shown or asked.
 - The panel reads the state every 2 s, every 0.5 s while an action runs, one read at a time, and redraws the time left
   every 250 ms, its clock corrected by the server's. A state stamped before the one drawn is ignored. The owner follows
   the session at each read: it counts the stream's messages and notes the connection's close code. A session that ends
-  without Close now has its close looked up on the chain (at most every 4 s), for the amounts paid and refunded.
+  without Close now has its close looked up on the chain (at most every 4 s), for the amounts paid and refunded. A read
+  of the state waits at most 5 s for the chain (the balance and the close lookup together): when the node is slow it
+  answers with what it has, the read still running carries on, and the next read shows its result.
 - A session ends in one of three ways: **closed** (Close now, or the model's `stint_demo_close`), **expired** (its paid
   time ran out, and the seller was paid in full) or **ended** (the gate or another party closed it before its end, such as
   the gate's idle close).
@@ -147,6 +159,9 @@ building the panel at start. `pnpm --filter @lxfoundry/stint-claude-demo test` r
   process is killed first, nothing runs in it: the stream connection drops, and the gate's idle close, about 60 s later,
   closes the session and refunds the rest the same way. A session with less than 60 s left then runs to its end, and the
   seller is paid in full.
+- While the previous owner closes its sessions on the way out (up to 90 s), copies started meanwhile, as by restarting
+  Claude Desktop, may forward to it, and a launch answers "The demo is shutting down: no session can be opened". It
+  recovers by itself once that process exits.
 - Stdout carries the protocol; everything for a person goes to stderr, one line per tool call, prefixed
   `stint-claude-demo: `, in each copy that handles the call (a forwarder logs `<tool> forwarded`, the owner
   `<tool> ok in <n> ms`), but for the panel's state reads, which are logged only when they fail. Claude Desktop keeps each

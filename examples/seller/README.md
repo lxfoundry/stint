@@ -4,7 +4,8 @@ One Node process that sells the example stream (`examples/solana-stream`) on dev
 the facilitator with its sweeper, and the stream with the gate mounted. The stream listens on `$HOST:$PORT`, the
 facilitator on 127.0.0.1. Kora 2.0.5 has no bind option and listens on every interface, at a port picked at start;
 it refuses every request but `GET /liveness` without its API key, which only this process holds, and on Fly.io only
-the stream's port is public.
+the stream's port is public. Other machines in the same Fly.io organization can reach every port over its private
+network, and Kora refuses them without its API key.
 
 The offer: 1000 base units of devnet USDC a second (0.001 USDC/s), sessions from 5 s to 300 s, 100 s when a request
 names no duration (0.100 USDC), and a session that nobody connects to for 60 s is closed by the gate.

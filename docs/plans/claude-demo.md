@@ -67,9 +67,9 @@ the two examples is stated in this plan: no spec section describes them, and non
 - Rule 8 of `CLAUDE.md` concerns behaviours the spec's scenarios cover. No scenario covers the examples; the stream's
   new setting is optional, and `pnpm e2e:local` must still pass after Task 1.
 
-## Deviations from the brief
+## Design changes the code base required
 
-What the design asked for that the code base made this plan change, each kept as small as it could be:
+Where the code base made this plan depart from the design it started from, each kept as small as it could be:
 
 1. **The offers' `closeUrl` names the facilitator's internal address.** `startFacilitator` publishes
    `closeUrl: ${url}/close` from the address it listens on (`apps/facilitator/src/server.ts:91`), and only the stream's
@@ -126,9 +126,9 @@ What the design asked for that the code base made this plan change, each kept as
     (its `GET /health` in `examples/solana-stream/src/server.ts`) and does not probe Kora, since the stream may change
     only by its origin. Kora's output is kept as a 64 KiB tail, not for the life of the process.
 18. **Kora listens on `0.0.0.0`**: Kora 2.0.5 has no bind option (`kora rpc start --help` lists only `--port`), and a
-    run in WSL showed it listening on `0.0.0.0`. On Fly.io only the declared service (the stream's 8080) is public,
-    and Kora refuses a request without its API key (measured: `401` without the key, `200` with it; `/liveness`
-    answers either way).
+    run in WSL showed it listening on `0.0.0.0`. On Fly.io only the declared service (the stream's 8080) is public.
+    Other machines in the same Fly.io organization can reach every port over its private network, and Kora refuses
+    them without its API key (measured: `401` without the key, `200` with it; `/liveness` answers either way).
 19. **The image installs the seller's dependency graph alone** (`pnpm install --frozen-lockfile --filter
     @lxfoundry/stint-example-seller...`), not the whole workspace. Measured with pnpm 12.14.0 on a copy of this
     workspace (with `@lxfoundry/stint-example-stream...`): the frozen, filtered install is accepted ("Scope: 4 of 11
@@ -163,7 +163,9 @@ The code differs from the code this plan shows in these ways, each a behaviour o
 - **`agent.json` is published atomically.** The key is written whole to a private temporary file beside it (mode 0600),
   which is linked to `agent.json`, and the link fails if the name is taken. The name never exists half written, copies
   that start at once make one key, and a file that is there but incomplete is read for about 0.4 s before it is called
-  invalid. A crash can leave an `agent.json.*.tmp` file, and the folder needs a file system with hard links.
+  invalid. A crash can leave an `agent.json.*.tmp` file, and the folder needs a file system with hard links. A removal of
+  the temporary file that fails is logged and changes nothing else. The server also writes a `.gitignore` holding `*`
+  into the `stint-demo` folder when it has none, so that a repository around the folder never commits the key.
 - **The Explorer link checks never throw.** `isSignature` and `isAddress` throw on text of the right length that holds
   a character outside base58, with an error that quotes the text. Any throw means "not valid": no link is made and
   nothing of the text is kept.
@@ -179,7 +181,9 @@ The code differs from the code this plan shows in these ways, each a behaviour o
 - **A stream connection, a shutdown and a slow node do not hold the session.** The stream subscription is not awaited,
   and a session has at most one in flight, so a connection that never opens holds neither a launch, a close nor a state
   read. A launch checks for shutdown again after it reads the balance, so that no session opens after a shutdown. Every
-  request to the node gives up after 10 s, and a read that failed is made again at the next state read.
+  request to the node gives up after 10 s, and a read that failed is made again at the next state read. A state read
+  waits at most 5 s for the balance and the close lookup together, so that a forwarded read is answered within its 15 s:
+  a read still running carries on, none is started beside it, and its result is seen at a later state read.
 - **Every tool has a strict input schema.** An argument that a tool does not name is a tool error that names it, never
   dropped. The launch description tells the model to open the panel first.
 - **The panel**: the used part of a closed capsule is drawn in the text colour, inside its Signal outline; its hairlines
@@ -4718,8 +4722,9 @@ One HTML file, its script inlined: the host loads it as the `ui://stint-demo/pan
 frame, and talks to it through `App` from `@modelcontextprotocol/ext-apps`. The colours are the brand's
 (`brand/README.md`: Ink `#111318`, Paper `#F4F5F2`, Signal `#2ED18B`, Deep `#0B6B45`, Slate `#5E636C`, Mist
 `#A9AEB6`), under the host's own CSS variables when it sets them. The capsule: solid is the time used, outline the
-time left; a closed session shows its returned part in Signal; an expired one is fully solid. Signal is never text on
-a light background. At most two primary buttons show at a time: Launch with Refresh, or Top up with Close now.
+time left; a closed session has a Signal outline, with its used part drawn in the text colour; an expired one is fully
+solid. Signal is never text on a light background. At most two primary buttons show at a time: Launch with Refresh, or
+Top up with Close now.
 
 **Files:**
 - Create: `examples/claude-demo/app/panel.html`, `examples/claude-demo/app/panel.ts`, `examples/claude-demo/scripts/panel.ts`
@@ -5736,8 +5741,9 @@ fine the first time), and keep the default gate URL. In a new chat, ask: "Start 
 Expected: Claude calls `stint_demo` and the panel mounts. It shows the agent's address, `0.000 USDC`,
 `needs 0.100 USDC`, the faucet link, Launch (disabled) and Refresh. `agent.json` and `owner.json` are in the wallet
 folder's new `stint-demo` folder.
-Both log files (`%LOCALAPPDATA%\Claude\Logs\mcp-server-*.log`) show the server's start lines: one copy says it holds
-the state, the other that it forwards.
+The log files (`%LOCALAPPDATA%\Claude\Logs\mcp-server-*.log`) show the server's start lines: one copy says it holds
+the state, the other that it forwards. The extension's copies may share one log file, so both lines can be in the same
+one.
 
 - [ ] **Step 3: Fund the wallet**
 
@@ -5756,9 +5762,9 @@ fills as the time drains, and the time left counts down from about 100 s. On Exp
 Kora's.
 
 After about 30 s, press Close now.
-Expected: `Closed: paid 0.0… USDC, refunded 0.0… USDC`, the two adding up to 0.100 USDC; the capsule stops, its
-returned part in Signal; the close link on Explorer shows the refund to the agent's USDC account and the payment to
-the seller's.
+Expected: `Closed: paid 0.0… USDC, refunded 0.0… USDC`, the two adding up to 0.100 USDC; the capsule stops, with
+an outline in Signal and its used part in the text colour; the close link on Explorer shows the refund to the agent's
+USDC account and the payment to the seller's.
 
 - [ ] **Step 5: Top up, from the panel and from the chat**
 
@@ -5770,9 +5776,10 @@ the session watches (optional part).
 
 Type in the chat: "top up".
 Expected: Claude calls `stint_demo_top_up`, which acts on the panel's session: within 2 s the panel shows a second
-top-up's rows, the session reaches 300 s, and Top up is disabled with `A session runs at most 300 s: …`. The log of
-the copy that received Claude's call shows `stint_demo_top_up forwarded`, and the other's
-`stint_demo_top_up ok in … ms`: the model's call and the panel's reached different copies, and one state served both.
+top-up's rows, the session reaches 300 s, and Top up is disabled with `A session runs at most 300 s: …`. The owner's
+log shows `stint_demo_top_up ok in … ms`, and, if Claude's call reached the other copy, that copy's log shows
+`stint_demo_top_up forwarded`. The model's call and the panel's may reach different copies, or the same one; one state
+serves both.
 Then type "close it", and check that the panel shows the close.
 
 - [ ] **Step 6: Let a session expire**
