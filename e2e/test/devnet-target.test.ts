@@ -4,7 +4,7 @@ import {
   getCreateAssociatedTokenIdempotentInstructionAsync,
   getTransferCheckedInstruction,
 } from "@solana-program/token";
-import { catalogue, runScenarios, type Target } from "@lxfoundry/stint-conformance";
+import { catalogue, runScenarios, type AllowanceGrant, type Target } from "@lxfoundry/stint-conformance";
 import { createSessionTools, createStintClient } from "@lxfoundry/stint-client";
 import {
   CloseKind,
@@ -14,6 +14,7 @@ import {
   getCloseInstruction,
   getOpenInstruction,
 } from "@lxfoundry/stint-program-client";
+import { allowanceAccounts, fetchMaybeRecurringDelegation, fetchMaybeSubscriptionAuthority } from "@lxfoundry/stint-subscriptions-client";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import type { Address } from "@solana/kit";
 import { fetchSysvarClock } from "@solana/sysvars";
@@ -540,6 +541,67 @@ describe("the devnet target, run against the local network", () => {
       await running?.stop();
       await provider.close();
     }
+  }, 120_000);
+
+  /** Whether a grant's delegation, and its owner's Subscription Authority, are still on the chain. */
+  const allowanceOnChain = async (grant: AllowanceGrant) => {
+    const { subscriptionAuthority } = await allowanceAccounts({
+      owner: grant.owner.signer.address,
+      agent: grant.agent.address,
+      mint: USDC_DEVNET_MINT,
+      nonce: grant.nonce,
+    });
+    const options = { commitment: "confirmed" } as const;
+    return {
+      delegation: (await fetchMaybeRecurringDelegation(chain.network.rpc, grant.delegation, options)).exists,
+      authority: (await fetchMaybeSubscriptionAuthority(chain.network.rpc, subscriptionAuthority, options)).exists,
+    };
+  };
+  const grantAllowance = (running: DevnetStack) =>
+    running.context().allowance!.grant({ usdc: 100_000n, perPeriod: 50_000n, periodSeconds: 3_600 });
+
+  it("revokes an allowance that a run granted and left, and returns what its keys held, at the end of the run", async () => {
+    const { seed, funding, fundingUsdc } = await fundedSeed();
+    const lamportsOf = async (account: Address) => (await chain.network.rpc.getBalance(account, { commitment: "confirmed" }).send()).value;
+    const fundingBefore = await lamportsOf(funding);
+    const running = await start(seed);
+    // Nothing revokes it, as when a scenario fails before its own revoke.
+    const grant = await grantAllowance(running);
+    expect(await allowanceOnChain(grant)).toEqual({ delegation: true, authority: true });
+    // Both keys are the pool's, so that the clean-up covers what they hold.
+    const pool = (await deriveKeys(seed)).buyers.map((key) => key.signer.address);
+    expect(pool).toContain(grant.owner.signer.address);
+    expect(pool).toContain(grant.agent.address);
+
+    await running.stop();
+
+    expect(await allowanceOnChain(grant)).toEqual({ delegation: false, authority: false });
+    // The rent that the revoke returned to the owner went back with the rest, so the keys end with nothing.
+    expect(await lamportsOf(grant.owner.signer.address)).toBe(0n);
+    expect(await lamportsOf(grant.agent.address)).toBe(0n);
+    expect((await chain.network.rpc.getAccountInfo(grant.owner.usdcAccount, { commitment: "confirmed", encoding: "base64" }).send()).value).toBeNull();
+    expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC);
+    expect(fundingBefore - (await lamportsOf(funding))).toBeLessThan(5_000_000n);
+  }, 120_000);
+
+  it("reports the allowances it could not find when the scan endpoint fails, and revokes them once it answers", async () => {
+    const { seed, fundingUsdc } = await fundedSeed();
+    const dying = await start(seed);
+    const grant = await grantAllowance(dying);
+    await dying.services.stop();
+    const provider = await nodeThatCannotListProgramAccounts();
+    try {
+      const problems = await cleanDevnet({ rpcUrl: chain.network.rpcUrl, scanRpcUrl: provider.url, seed, preflight: false, pollMs: 100 });
+
+      expect(problems.filter((problem) => problem.startsWith(`revoking the allowances of ${grant.owner.signer.address}: `))).toHaveLength(1);
+      expect(await allowanceOnChain(grant)).toEqual({ delegation: true, authority: true });
+    } finally {
+      await provider.close();
+    }
+
+    expect(await cleanDevnet({ rpcUrl: chain.network.rpcUrl, seed, preflight: false, pollMs: 100 })).toEqual([]);
+    expect(await allowanceOnChain(grant)).toEqual({ delegation: false, authority: false });
+    expect(await usdcOf(fundingUsdc)).toBe(FUNDING_USDC);
   }, 120_000);
 
   it("refuses a scan endpoint that is not devnet's before it cleans up anything", async () => {

@@ -1,6 +1,6 @@
 import { fetchMaybeToken } from "@solana-program/token";
 import { createSolanaRpc, type Rpc, type SolanaRpcApi } from "@solana/kit";
-import { describeError, type ScenarioContext, type StackControl, type Target } from "@lxfoundry/stint-conformance";
+import { describeError, type Buyer, type ScenarioContext, type StackControl, type Target } from "@lxfoundry/stint-conformance";
 import { createFacilitatorClient } from "@lxfoundry/stint-gate";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import { assertDevnet, assertProgramDeployed } from "../devnet/config.js";
@@ -180,6 +180,21 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
     if (!key) throw new Error(`The run used all ${keys.buyers.length} buyer keys: raise BUYER_POOL in e2e/src/devnet/keys.ts`);
     return key;
   };
+  /**
+   * A buyer made of the next key of the pool, with `usdc` lent to its USDC account from the funding key. What the run has lent is
+   * checked and counted before anything is awaited, so that buyers made at the same time cannot all pass.
+   */
+  const lendToBuyer = async (usdc: bigint): Promise<Buyer> => {
+    if (lent + usdc > MINIMUM_FUNDS.usdc) {
+      throw new Error(
+        `The run has lent ${lent} USDC base units and this buyer asks for ${usdc} more: a run must stay within ${MINIMUM_FUNDS.usdc}, the least that a start-up requires. Fund a buyer with what its session costs.`,
+      );
+    }
+    lent += usdc;
+    const key = takeKey();
+    const usdcAccount = await fundUsdcAccount(rpc, funding, key.signer.address, usdc, send);
+    return { signer: key.signer, usdcAccount };
+  };
   const control: StackControl = {
     rentPayer: services.facilitator.rentPayer,
     stopGate: () => services.stopGate(),
@@ -211,18 +226,7 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
       target,
       gateUrl: services.stream.url,
       rpc,
-      newBuyer: async (usdc) => {
-        // Checked and counted before anything is awaited, so that buyers made at the same time cannot all pass.
-        if (lent + usdc > MINIMUM_FUNDS.usdc) {
-          throw new Error(
-            `The run has lent ${lent} USDC base units and this buyer asks for ${usdc} more: a run must stay within ${MINIMUM_FUNDS.usdc}, the least that a start-up requires. Fund a buyer with what its session costs.`,
-          );
-        }
-        lent += usdc;
-        const key = takeKey();
-        const usdcAccount = await fundUsdcAccount(rpc, funding, key.signer.address, usdc, send);
-        return { signer: key.signer, usdcAccount };
-      },
+      newBuyer: lendToBuyer,
       sendUsdc: (from, to, amount) => sendUsdc(rpc, funding.signer, from, to, amount, send),
       subscriptionSettleMs: SUBSCRIPTION_SETTLE_MS,
       readRetry: READ_RETRY,
@@ -233,12 +237,9 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
         rpc,
         send,
         newOwner: async (usdc) => {
-          if (lent + usdc > MINIMUM_FUNDS.usdc) throw new Error(`The run has lent ${lent} USDC base units and this owner asks for ${usdc} more`);
-          lent += usdc;
-          const key = takeKey();
-          const usdcAccount = await fundUsdcAccount(rpc, funding, key.signer.address, usdc, send);
-          await sendSol(rpc, funding.signer, key.signer.address, GRANT_LAMPORTS, send);
-          return { signer: key.signer, usdcAccount };
+          const owner = await lendToBuyer(usdc);
+          await sendSol(rpc, funding.signer, owner.signer.address, GRANT_LAMPORTS, send);
+          return owner;
         },
         newAgent: async () => takeKey().signer,
       }),
