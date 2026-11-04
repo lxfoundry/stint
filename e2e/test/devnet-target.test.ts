@@ -130,6 +130,7 @@ describe("the devnet target, run against the local network", () => {
     // payer; 19 calls the facilitator's API; 22 sends USDC; 25 funds a key with SOL, and stops and starts the gate and the
     // facilitator; 34 tops a session up straight on the program, and starts the gate with options. A scenario that comes
     // to use a part that none of these uses joins the list. `pnpm e2e:devnet` runs every scenario on devnet itself.
+    // That every scenario together fits what a devnet run lends and its key pool is checked by `pnpm e2e:local`, which counts both.
     // The local network reports a subscription's slot, not the change's (T6): scenario 22 asserts on the slot only when the
     // target is named devnet, so the scenarios run here under the local name. Together they take about a minute.
     const covering = [15, 19, 22, 25, 34];

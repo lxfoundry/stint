@@ -1,11 +1,13 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { catalogue, exitCodeFor, renderReport, runScenarios, writeReport, type ScenarioContext, type Target } from "@lxfoundry/stint-conformance";
+import { overrun, tallyRun } from "./budget.js";
 import { loadDevnetConfig } from "./devnet/config.js";
+import { BUYER_POOL } from "./devnet/keys.js";
 import { parseOnly } from "./only.js";
 import { REPO_ROOT, REPORT_DIR } from "./paths.js";
 import { redactOutcomes } from "./redact.js";
-import { cleanDevnet, devnetFunds, startDevnetStack } from "./targets/devnet.js";
+import { MINIMUM_FUNDS, cleanDevnet, devnetFunds, startDevnetStack } from "./targets/devnet.js";
 import { startLocalStack } from "./targets/local.js";
 
 /**
@@ -50,6 +52,12 @@ const args = process.argv.slice(2);
 const force = args.includes("--force");
 const [targetName = "local", mode = "run"] = args.filter((arg) => !arg.startsWith("--"));
 const MODES = ["run", "serve", "funds", "clean"];
+// A flag that is not one of these would be ignored, and a mistyped `--onyl=4` would run every scenario.
+const unknownFlags = args.filter((arg) => arg.startsWith("--") && arg !== "--force" && arg !== "--only" && !arg.startsWith("--only="));
+if (unknownFlags.length > 0) {
+  console.error(`Unknown flag ${unknownFlags.join(", ")}: use --force or --only=4,34`);
+  process.exit(2);
+}
 let only: Set<number> | undefined;
 try {
   only = parseOnly(args, catalogue.map((scenario) => scenario.id));
@@ -141,11 +149,25 @@ if (mode === "serve") {
   // report, and exits 1 when a required scenario fails (spec section 12.2). Kora's logs are kept with a failing
   // run's report.
   try {
+    // On the local target, a run of every scenario also counts what its buyers take from the funding key and the key pool that a
+    // devnet run has, so that a scenario that would not fit a devnet run fails here, where it is cheap to find.
+    const tally = targetName === "local" && !only ? tallyRun() : undefined;
+    const contextOf = () => (tally ? tally.watch(stack.context()) : stack.context());
     // A failing service can quote the RPC URL, key included, in the error a scenario reports: URLs are reduced to their host.
-    const outcomes = redactOutcomes(await runScenarios(scenarios, stack.target, () => stack.context(), undefined, { timeoutMs: SCENARIO_TIMEOUT_MS }));
+    const outcomes = redactOutcomes(await runScenarios(scenarios, stack.target, contextOf, undefined, { timeoutMs: SCENARIO_TIMEOUT_MS }));
     writeReport(REPORT_DIR, outcomes);
     process.stdout.write(renderReport(outcomes));
     process.exitCode = exitCodeFor(outcomes);
+    if (only && outcomes.every((outcome) => outcome.result === "not applicable")) {
+      console.error(`--only: none of the scenarios named runs on the ${targetName} target`);
+      process.exitCode = 1;
+    }
+    if (tally) {
+      console.error(`the scenarios lend ${tally.lent} of the ${MINIMUM_FUNDS.usdc} USDC base units and take ${tally.keys} of the ${BUYER_POOL} keys that a devnet run has`);
+      const problems = overrun(tally, { usdc: MINIMUM_FUNDS.usdc, keys: BUYER_POOL });
+      for (const problem of problems) console.error(problem);
+      if (problems.length > 0) process.exitCode = 1;
+    }
     if (process.exitCode !== 0) writeFileSync(join(REPORT_DIR, "kora.log"), stack.logs());
   } finally {
     await stack.stop();
