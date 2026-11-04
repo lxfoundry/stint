@@ -27,11 +27,11 @@ connections once it has looked the close up (within about 2 s); the sweeper clos
 closed, if it names the facilitator's own rent payer. A buyer can top up a session before its paid time runs out,
 which moves its end; a session whose paid time has run out cannot be extended. The facilitator refuses a payment that
 does not match its offer with its reason before anything is signed, and keeps a record of each settlement, so that a
-payment sent twice is settled once and answered twice. Twenty-one of the 35 end-to-end scenarios of the
-[specification](docs/specs/stint-system.md) (section 12.7) pass on a local network and on devnet, and the run report
-lists the other 14 as pending. Not built yet: a store for settlement records that survives a restart of the
-facilitator (it keeps them in memory), the gate's watch of a payment whose settlement is pending, the facilitator's
-rate limits, and resilience across restarts.
+payment sent twice is settled once and answered twice. Twenty-two of the 35 end-to-end scenarios of the
+[specification](docs/specs/stint-system.md) (section 12.7) pass on a local network, and the run report lists the
+other 13 as pending; the ones that pass on devnet are listed under "Running the scenarios on devnet". Not built yet:
+a store for settlement records that survives a restart of the facilitator (it keeps them in memory), the gate's watch
+of a payment whose settlement is pending, the facilitator's rate limits, and resilience across restarts.
 The [plans](docs/plans/README.md) list the stages that remain.
 
 ## Development
@@ -65,6 +65,8 @@ by environment variables, and refuses to start without the caps:
 | `STINT_BUDGET_AMOUNT`, `STINT_BUDGET_PERIOD_SECONDS` | The most locked across sessions per period. Required |
 | `STINT_MAX_MIN_SECONDS` | The highest minimum charge accepted. Default 300 |
 | `STINT_SELLERS`, `STINT_PROGRAMS`, `STINT_NETWORKS`, `STINT_ASSETS` | Optional allowlists, comma-separated (`mint:decimals` for assets) |
+| `STINT_ALLOWANCE_OWNER`, `STINT_ALLOWANCE_NONCE` | Optional. The address of an owner whose allowance funds every session ([Allowance funding](#allowance-funding)), and the nonce that names its delegation (default 0). The nonce needs the owner |
+| `STINT_RPC_URL` | Optional. A Solana node's http or https URL. With it the client reads the chain: it checks an allowance before it signs, and `stint_allowance` reports it. The URL may carry an API key, so it is never printed |
 
 Every limit is enforced by the client's code, whatever a seller offers or the model asks. The agent's
 key holds USDC and no SOL. When the host disconnects, or the process is stopped, every session still
@@ -97,6 +99,44 @@ agent stops once it has worked out the last payment from two consecutive message
 `STINT_KEYPAIR_PATH` names a keypair file made for the agent that holds devnet USDC and nothing else: do not
 point it at the key that deploys the program or at the harness's funding key. Every spending limit is enforced by the client's policy in code. The stream's messages reach the model as
 data and cannot raise one. Every session is closed before the agent returns, whatever happened.
+
+## Allowance funding
+
+An owner can fund an agent's sessions from a budget instead of putting USDC on the agent's key. The owner grants the
+agent's key a recurring delegation on the Solana Foundation's Subscriptions & Allowances program: an amount per
+period, a period length and an expiry, which the program enforces on-chain. The agent then pays each open and top-up
+by pulling from the owner's USDC account, in the same transaction as the open or the top-up, and holds no USDC or SOL
+itself. When a session closes early, the unused part goes back to the owner's account.
+
+The owner grants, checks and revokes with `pnpm stint allowance`, from the repository root (inside WSL on Windows).
+The node is read from `STINT_RPC_URL`, not from the arguments, because an RPC URL may carry an API key; the command
+prints no part of it. It works on devnet only: it checks the node's genesis hash before it sends anything. The owner's
+keypair is given by its absolute path (`~` is not expanded; the shell expands `$HOME`):
+
+    export STINT_RPC_URL=https://api.devnet.solana.com
+    # 0.3 USDC (300000 base units) every hour, until the expiry
+    pnpm stint allowance grant --keypair "$HOME/.config/stint/owner.json" --agent <agent address> --per-period 300000 --period 3600 --expires 2030-01-01T00:00:00Z
+    pnpm stint allowance status --owner <owner address> --agent <agent address>
+    pnpm stint allowance revoke --keypair "$HOME/.config/stint/owner.json" --agent <agent address> --close-authority
+
+`status` prints how much of the period's cap has been pulled, how much is left, when the period ends (Unix seconds)
+and the owner's USDC balance, or `no such allowance`. To fund an agent from the allowance, give the MCP server or the
+example agent `STINT_ALLOWANCE_OWNER` (and `STINT_ALLOWANCE_NONCE` if the grant named one) and `STINT_RPC_URL`; the
+client library takes `allowance: { owner, nonce? }`. Every spending limit of the client's policy still applies on top
+of the allowance's cap.
+
+What an owner needs to know:
+- The owner pays about 0.004 SOL once, for the transaction's fee and the rent of two accounts, a Subscription Authority
+  and the delegation. Revoking closes the delegation and `--close-authority` the Subscription Authority too: their rent
+  returns to the owner. Leave `--close-authority` out to revoke one allowance and keep the others, since closing the
+  Subscription Authority ends every allowance the owner granted for USDC.
+- A dedicated owner wallet is recommended. SPL Token allows one delegate per token account, and the allowance uses the
+  owner's associated USDC account, of which a wallet has one: it takes that account's delegate slot, and refunds
+  return to that account too.
+- Refunds come back to the owner but do not restore the period's allowance: the program counts what was pulled, so
+  the cap bounds what can be locked per period.
+- The agent's key can pull up to the period's cap, to any account and not only to a session, until the delegation is
+  revoked or expires. Choose the cap, the period and the expiry for what the owner is willing to lose if that key leaks.
 
 ## Deploying to devnet
 
@@ -150,9 +190,9 @@ come back to it.
 Scenarios 1, 2, 3, 4, 5, 6, 7, 9, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 32 and 34 pass on devnet.
 
 A run checks that the endpoint is devnet and that the program is deployed, then cleans up: it closes
-every session that the seed's keys have open and returns what they hold to the funding key. On a first
-run there is nothing to do; after a run that was killed it repairs what that run left. Then it funds the
-keys it needs from the funding key, runs the scenarios, and cleans up again. `pnpm e2e:devnet clean`
+every session that the seed's keys have open, revokes the allowances they granted, and returns what they hold to
+the funding key. On a first run there is nothing to do; after a run that was killed it repairs what that run left.
+Then it funds the keys it needs from the funding key, runs the scenarios, and cleans up again. `pnpm e2e:devnet clean`
 does the clean-up alone. Run one at a time per seed: the clean-up closes every session that the seed's
 keys have open, whichever run opened it. A session that an outside key opened, naming the seed's seller
 as its receiver, is reported and left alone. If the start-up clean-up fails, the run does not start; `pnpm e2e:devnet --force` goes
