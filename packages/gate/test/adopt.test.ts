@@ -2,6 +2,7 @@ import { generateKeyPairSigner, type Address } from "@solana/kit";
 import type { Session } from "@lxfoundry/stint-program-client";
 import { createSessionToken, inspectTransaction, readElapsedPayload } from "@lxfoundry/stint-x402";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { WebSocket } from "ws";
 import { NOW_MS, helpers, startHarness, type Harness } from "./harness.js";
 
 describe("the gate's adoption of a session it does not track (spec §7.3)", () => {
@@ -156,7 +157,8 @@ describe("the gate's adoption of a session it does not track (spec §7.3)", () =
   it.each<[string, (stored: Session) => Session | undefined]>([
     ["finds the account gone", () => undefined],
     ["finds another session at the address", (stored) => ({ ...stored, startedAt: stored.startedAt + 1n })],
-  ])("refuses with 404, and adopts nothing, when the second read %s: a close just before the connect", async (_, later) => {
+    ["finds the same session on terms the gate does not offer", (stored) => ({ ...stored, rate: stored.rate + 1n })],
+  ])("refuses with 404, and adopts nothing, when the second read %s", async (_, later) => {
     const session = await onChain();
     const read = h.chain.readSession.bind(h.chain);
     let reads = 0;
@@ -218,6 +220,68 @@ describe("the gate's adoption of a session it does not track (spec §7.3)", () =
     expect((await answer).status).toBe(503);
     expect(h.calls.provision).toEqual([]);
     expect(h.calls.watch).toEqual([]);
+  });
+
+  it("adopts nothing for a buyer whose connection dropped while the connect waited: no provision, no subscription, no timer", async () => {
+    const session = await onChain();
+    const read = h.chain.readSession.bind(h.chain);
+    let reads = 0;
+    let reached!: () => void;
+    const second = new Promise<void>((resolve) => (reached = resolve));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    h.chain.readSession = async (address) => {
+      if (reads++ === 1) {
+        reached();
+        await held;
+      }
+      return read(address);
+    };
+
+    const client = new WebSocket(`${h.url.replace("http", "ws")}/sessions/${session}/ws`, {
+      headers: { authorization: `Bearer ${await token(session, "connect")}` },
+    });
+    client.on("error", () => {}); // terminated before it opened
+    await second;
+    client.terminate();
+    await settleDown(); // the gate's side of the connection sees it close
+    release();
+    await settleDown();
+
+    expect(reads).toBe(2);
+    expect(h.calls.provision).toEqual([]);
+    expect(h.calls.watch).toEqual([]);
+    expect(h.timers.pending).toEqual([]);
+  });
+
+  it("refuses with 404, and adopts nothing more, a connect that waits while another adopts the session and the gate ends it", async () => {
+    const session = await onChain();
+    const read = h.chain.readSession.bind(h.chain);
+    let reads = 0;
+    let reached!: () => void;
+    const second = new Promise<void>((resolve) => (reached = resolve));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    h.chain.readSession = async (address) => {
+      // The first connect's second read is held, and shows the account as the node still has it once released.
+      if (reads++ === 1) {
+        reached();
+        await held;
+      }
+      return read(address);
+    };
+
+    const waiting = connect(session, await token(session, "connect"));
+    await second;
+    const adopted = await connect(session, await token(session, "connect"));
+    expect(adopted.socket).toBeDefined();
+    expect((await closeWith(session)).status).toBe(200);
+    expect(h.calls.provision).toHaveLength(1);
+    release();
+
+    expect((await waiting).status).toBe(404);
+    expect(h.calls.provision).toHaveLength(1);
+    expect(h.calls.watch).toEqual([session]);
   });
 
   it("refuses with 402, and adopts nothing, a session whose paid_until the session clock reaches while the connect waits", async () => {

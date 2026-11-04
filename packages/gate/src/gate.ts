@@ -940,10 +940,11 @@ export function createGate<U>(config: GateConfig<U>): Gate {
    * against the account as the chain stores it: the token (checks 1 to 3, `401`), the terms, the mint and the receiver
    * authorizer included (check 4, `403`), and the margin (check 5, `402`). An address that holds no session, or holds one
    * this gate has ended, is `404`. Before anything is provisioned, the account is read once more, after the gate's bound
-   * on a node's lag: gone, or holding another session, it is `404`. A connect refused here adopts nothing. Returns the
-   * tracked session, or the status the upgrade is refused with.
+   * on a node's lag: gone, or holding another session, it is `404`. A connect refused here adopts nothing, and neither
+   * does one whose buyer has gone by the end of that wait. Returns the tracked session, the status the upgrade is
+   * refused with, or `undefined` when nobody is left to answer.
    */
-  async function adopt(session: Address, token: string): Promise<Tracked<U> | number> {
+  async function adopt(session: Address, token: string, socket: Duplex): Promise<Tracked<U> | number | undefined> {
     const stored = await upstream(() => config.chain.readSession(session));
     if (!stored) return 404;
     if (!(await authenticate(token, session, stored.authority, "connect"))) return 401;
@@ -962,9 +963,12 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     if (Number(paidUntil(again)) * 1000 - sessionClock() <= marginMs) return 402;
     // No `await` from here to `track`'s registration. A gate stopped meanwhile would set no timer to end the session, so
     // it adopts nothing. A session this gate ended before the connect, while its token was checked or during the wait,
-    // is not adopted again (the tracked path has the same guard).
+    // is not adopted again (the tracked path has the same guard). A buyer whose connection dropped during the wait
+    // is not adopted either: nothing would connect to the session, and its idle timer would have to end it.
     if (stopped) return 503;
     if (hasEnded(session, stored.startedAt)) return 404;
+    // The server keeps an upgrade socket half-open when its peer closes, so a socket that ended is as gone as one destroyed.
+    if (socket.destroyed || socket.readableEnded) return undefined;
     if (!sessions.has(session) && !provisioning.has(session)) log({ event: "adopt", session });
     return track(session, again);
   }
@@ -979,7 +983,9 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       if (!(await authenticate(token, session, known.stored.authority, "connect"))) return refuseUpgrade(socket, 401);
       tracked = known;
     } else {
-      const adopted = await adopt(session, token);
+      const adopted = await adopt(session, token, socket);
+      // The buyer is gone: only its half-open end is left, and nothing else would close it.
+      if (!adopted) return void socket.destroy();
       if (typeof adopted === "number") return refuseUpgrade(socket, adopted);
       tracked = adopted;
     }
