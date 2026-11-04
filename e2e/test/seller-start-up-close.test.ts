@@ -37,18 +37,24 @@ describe("the example seller's start-up close, on the local stack", () => {
       signer: buyer.signer,
       policy: { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { amount: 1_000_000n, periodSeconds: 3_600 } },
     });
-    const openedAt = Date.now();
-    const expiring = await client.open(context.gateUrl, { seconds: 5 });
     const paidFor = await client.open(context.gateUrl, { seconds: 60 });
-    // The gate closes a session nobody connects to 10 s after its open, here: the earlier process stops before that. With
-    // the facilitator stopped, no sweep closes the expired session either.
-    expect(Date.now() - openedAt, "both opens took less than 7 s").toBeLessThan(7_000);
+    const expiring = await client.open(context.gateUrl, { seconds: 5 });
+    // While they run, the gate closes a session at its paid time (5 s after the second open) and one nobody connects to 10 s
+    // after its open, and the sweeper (every 2 s here) closes an expired one: the earlier process stops at once. Were the
+    // stops late, the stack itself would have closed a session, which is said here rather than blamed on the start-up.
     await control.stopGate();
     await control.stopFacilitator();
+    for (const [session, what] of [
+      [paidFor, "the 60 s session"],
+      [expiring, "the 5 s session"],
+    ] as const) {
+      const read = await fetchMaybeSession(rpc, session.id, { commitment: "confirmed" });
+      expect(read.exists, `${what} is still open once the gate and the facilitator have stopped: they stopped in time`).toBe(true);
+    }
     // The start-up decides on the chain's clock, as the program does.
     const deadline = Date.now() + 30_000;
     while ((await fetchSysvarClock(rpc, { commitment: "confirmed" })).unixTimestamp < BigInt(expiring.paidUntil)) {
-      expect(Date.now(), "the chain's clock reaches the first session's paid_until").toBeLessThan(deadline);
+      expect(Date.now(), "the chain's clock reaches the 5 s session's paid_until").toBeLessThan(deadline);
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     const before = await fetchMaybeSession(rpc, paidFor.id, { commitment: "confirmed" });

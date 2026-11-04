@@ -34,6 +34,8 @@ interface Result {
 
 interface RunningDemo {
   readonly buyer: Buyer;
+  /** The client's session tools the demo runs on. */
+  readonly tools: SessionTools;
   call(name: string, args?: Record<string, unknown>): Promise<Result>;
   stop(): Promise<void>;
 }
@@ -79,6 +81,7 @@ describe("the Claude Desktop example on the local stack", () => {
     await client.connect(clientTransport);
     running = {
       buyer,
+      tools,
       async call(name, args = {}) {
         const result = await client.callTool({ name, arguments: args });
         return { isError: result.isError === true, text: (result.content as { text: string }[])[0]!.text, state: result.structuredContent as unknown as DemoState };
@@ -169,7 +172,7 @@ describe("the Claude Desktop example on the local stack", () => {
     expect((await demo.call(TOOL.close)).isError).toBe(false);
   });
 
-  it("ends a session left to its paid time, with the seller paid in full and the gate's close found on the chain", async () => {
+  it("ends a session left to its paid time, its stream connection closed by the gate (4402), the seller paid in full and the close found on the chain", async () => {
     const demo = await startDemo(6);
     const launched = await demo.call(TOOL.launch);
     expect(launched.isError, launched.text).toBe(false);
@@ -190,8 +193,13 @@ describe("the Claude Desktop example on the local stack", () => {
     // Either the gate's close of the connection at the paid time (4402) is seen first, or the close on the chain, found by
     // a state read after paid_until, is: then no close code is kept.
     expect([4402, undefined]).toContain(state!.session.closeCode);
+    // The demo opened the session's stream connection (the subscription to the agent's USDC account), and the gate closed
+    // it at the paid time: the client keeps that close code whichever path the demo took.
+    await vi.waitFor(() => expect(demo.tools.closeCode(id)).toBe(4402), { timeout: 10_000, interval: 200 });
     const found = await findClose(stack.network.rpc, id as Address, READ_RETRY);
     expect(signatureIn(state!.session.links.close)).toBe(found!.signature);
+    // At the paid time, whichever of the gate and the sweeper closed it.
+    expect(found!.event.kind).toBe(CloseKind.AtExpiry);
     expect(found!.event.claimed + found!.event.owed).toBe(6_000n);
     expect(found!.event.refunded + found!.event.redirected).toBe(0n);
   }, 60_000);
