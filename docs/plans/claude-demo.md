@@ -38,7 +38,8 @@ the two examples is stated in this plan: no spec section describes them, and non
   `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`. The demo's policy allows devnet alone, and it creates a key only for
   such a policy.
 - **Scope:** nothing changes in `packages/`, `apps/`, `programs/`, `conformance/` or `e2e/`. The one change to existing
-  code is in `examples/solana-stream/` (Task 1). Docs that change: `README.md` (one section), `docs/plans/README.md`
+  code is in `examples/solana-stream/` (Task 1). (Since then, under As built: `e2e/` gains the two examples as
+  dependencies in its `package.json` and a test file for each, and nothing else in it changes.) Docs that change: `README.md` (one section), `docs/plans/README.md`
   (one paragraph), `docs/specs/stint-system.md` §3.3 (two lines). `pnpm-lock.yaml` changes through installs only.
 - New packages import the product libraries through `workspace:*` and their `package.json` exports only. Nothing
   imports `@lxfoundry/stint-e2e`: its only export, `e2e/src/index.ts`, loads `@solana/surfpool` (through
@@ -5831,7 +5832,8 @@ If a step fails:
 ## Done when
 
 - `pnpm typecheck` and `pnpm test` pass locally in WSL and in continuous integration, `pnpm e2e:local` still passes,
-  and `git diff --stat main -- packages apps programs conformance e2e` is empty.
+  and `git diff --stat main -- packages apps programs conformance` is empty; in `e2e`, the same diff lists
+  `e2e/package.json`, `e2e/test/seller-start-up-close.test.ts` and `e2e/test/claude-demo.test.ts` only.
 - The seller runs on Fly.io as one always-on machine: `/health` answers, and `POST /sessions?seconds=100` answers
   `402` with the terms of this plan at the public origin.
 - In Claude Desktop on Windows, the `.mcpb` installs, creates a wallet, and Task 15's steps 2 to 7 pass, each with
