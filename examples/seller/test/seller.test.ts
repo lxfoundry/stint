@@ -45,7 +45,7 @@ describe("the seller's offer", () => {
     stream = undefined;
   });
 
-  it("is 100 s at 0.001 USDC a second, from 5 s to 300 s, at the public origin, with a 60 s idle close", async () => {
+  it("is 100 s at 0.001 USDC a second, from 5 s to 1000 s, at the public origin, with a 30 s idle close", async () => {
     const seller = (await generateKeyPairSigner()).address;
     const receiverAuthorizer = await generateKeyPairSigner();
     stream = await startStream({
@@ -66,10 +66,11 @@ describe("the seller's offer", () => {
       rate: "1000",
       seconds: 100,
       minSeconds: 5,
-      maxSeconds: 300,
+      maxSeconds: 1000,
       receiverAuthorizer: receiverAuthorizer.address,
-      idleCloseSeconds: IDLE_CLOSE_SECONDS,
+      idleCloseSeconds: 30,
     });
-    expect(SELLER_TERMS).toEqual({ rate: 1_000n, minSeconds: 5, maxSeconds: 300 });
+    expect(SELLER_TERMS).toEqual({ rate: 1_000n, minSeconds: 5, maxSeconds: 1000 });
+    expect(IDLE_CLOSE_SECONDS).toBe(30);
   });
 });
