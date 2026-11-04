@@ -7,7 +7,7 @@ import { startLocalStack, type LocalStack } from "../src/targets/local.js";
  * The required scenarios, all passing on `local`. Together they take a little over three minutes, scenarios 4 and 34
  * about 30 s each and every other one under 20 s, so the test's limit of nine minutes is generous.
  */
-const REQUIRED = [1, 2, 3, 4, 5, 6, 7, 9, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 32, 34];
+const REQUIRED = [1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 32, 34];
 
 describe("local target", () => {
   let stack: LocalStack;
@@ -36,7 +36,7 @@ describe("local target", () => {
     for (const id of REQUIRED) {
       expect(outcomes.find((outcome) => outcome.id === id), `scenario ${id}`).toMatchObject({ status: "required", result: "pass" });
     }
-    // Every scenario that is not required is pending, scenario 12 included until it is written.
+    // Every scenario that is not required is pending.
     expect(outcomes.filter((outcome) => outcome.result === "pending")).toHaveLength(35 - REQUIRED.length);
     expect(exitCodeFor(outcomes)).toBe(0);
   }, 540_000);
