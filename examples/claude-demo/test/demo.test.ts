@@ -17,7 +17,8 @@ import type {
 import type { ElapsedRequirements } from "@lxfoundry/stint-x402";
 import { describe, expect, it } from "vitest";
 import type { DemoChain, FoundClose } from "../src/chain.js";
-import { CLOSE_LOOKUP_EVERY_MS, STATE_READ_CAP_MS, createDemo, type Demo } from "../src/demo.js";
+import { ledgerLine } from "../app/model.js";
+import { CLOSE_LOOKUP_EVERY_MS, LEDGER_LIMIT, STATE_READ_CAP_MS, createDemo, type Demo } from "../src/demo.js";
 import { explorerAddress, explorerTx } from "../src/links.js";
 import { READ_CALL_TIMEOUT_MS } from "../src/owner.js";
 import { AGENT_USDC, FEE_PAYER, SELLER, SESSION, offer, signatureOf } from "./fixtures.js";
@@ -54,6 +55,8 @@ interface Behave {
   openFails?: Error;
   topUpFails?: Error;
   closeFails?: Error;
+  /** The close answers with its transaction alone, as when its amounts could not be read. */
+  closeWithoutAmounts?: boolean;
   receiveFails?: Error;
   balanceFails?: Error;
   lookupFails?: Error;
@@ -111,7 +114,7 @@ function setup(options: { balance?: bigint; stateReadCapMs?: number; launchSecon
         counts.close++;
         await behave.holdClose;
         if (behave.closeFails) throw behave.closeFails;
-        return { paid: "12000", refunded: "88000", transaction: CLOSE_TX };
+        return behave.closeWithoutAmounts ? { transaction: CLOSE_TX } : { paid: "12000", refunded: "88000", transaction: CLOSE_TX };
       }),
     },
     closeCode: (sessionId) => closeCodes.get(sessionId),
@@ -175,7 +178,7 @@ describe("the demo's session", () => {
       startedAt: t.paidUntil() - 100,
       deposited: "100000",
       rate: "1000",
-      maxSeconds: 300,
+      maxSeconds: 1_000,
       topUpMarginSeconds: 10,
       frames: 0,
     });
@@ -225,9 +228,10 @@ describe("the demo's session", () => {
     let state = await t.demo.topUp();
     expect(state.session).toMatchObject({ paidUntil: t.paidUntil(), deposited: "200000" });
     expect(state.session.links.topUps).toEqual([explorerTx(TOP_UP_TX)]);
-    state = await t.demo.topUp();
-    expect(state.session.deposited).toBe("300000");
-    await expect(t.demo.topUp()).rejects.toThrow(/at most 300 s/);
+    for (let more = 0; more < 8; more++) state = await t.demo.topUp();
+    expect(state.session.deposited).toBe("1000000");
+    await expect(t.demo.topUp()).rejects.toThrow(/at most 1000 s/);
+    expect(t.counts.topUp).toBe(9);
     const late = setup();
     await late.demo.launch();
     late.advance(87_000);
@@ -281,12 +285,117 @@ describe("the demo's session", () => {
     const t = setup();
     await t.demo.launch();
     expect(await t.demo.shutdown()).toEqual({ closed: [SESSION], failed: [] });
+    expect(t.logs).toEqual([`closing session ${SESSION}`]);
     await expect(t.demo.launch()).rejects.toThrow(/shutting down/);
     const over = setup();
     await over.demo.launch();
     over.advance(100_000);
     expect(await over.demo.shutdown()).toEqual({ closed: [], failed: [] });
     expect(over.counts.closeAll).toBe(0);
+    expect(over.logs).toEqual([]);
+  });
+});
+
+describe("the wallet's log", () => {
+  it("chains each movement from the balance the launch read: the launch, each top-up, the close, with their links", async () => {
+    const t = setup();
+    await t.demo.launch();
+    await t.demo.topUp();
+    t.advance(12_000);
+    const state = await t.demo.close();
+    expect(state.ledger.map(ledgerLine)).toEqual([
+      "[launch] 1.000 - 0.100 = 0.900 USDC",
+      "[top-up] 0.900 - 0.100 = 0.800 USDC",
+      "[close] 0.800 + 0.088 = 0.888 USDC",
+    ]);
+    expect(state.ledger.map((entry) => entry.link)).toEqual([explorerTx(OPEN_TX), explorerTx(TOP_UP_TX), explorerTx(CLOSE_TX)]);
+    expect(state.ledger.map((entry) => entry.sessionId)).toEqual([SESSION, SESSION, SESSION]);
+    expect(state.ledger[2]?.at).toBe(START_MS + 12_000);
+  });
+
+  it("starts each session from the balance its own launch reads", async () => {
+    const t = setup();
+    await t.demo.launch();
+    await t.demo.close();
+    t.setBalance(5_000_000n);
+    const state = await t.demo.launch();
+    expect(state.ledger.map(ledgerLine)).toEqual([
+      "[launch] 1.000 - 0.100 = 0.900 USDC",
+      "[close] 0.900 + 0.088 = 0.988 USDC",
+      "[launch] 5.000 - 0.100 = 4.900 USDC",
+    ]);
+  });
+
+  it("logs an expiry once, the seller paid in full, and adds the close's link when the chain shows it", async () => {
+    const t = setup();
+    await t.demo.launch();
+    t.advance(100_000);
+    t.closeCodes.set(SESSION, 4402);
+    let state = await t.demo.state();
+    expect(state.ledger.map(ledgerLine)).toEqual([
+      "[launch] 1.000 - 0.100 = 0.900 USDC",
+      "[expired] 0.900 + 0.000 = 0.900 USDC: the seller was paid in full",
+    ]);
+    expect(state.ledger[1]?.link).toBeUndefined();
+    t.closes.set(SESSION, { signature: CLOSE_TX, at: t.paidUntil() + 2, paidUntil: t.paidUntil(), paid: "100000", refunded: "0" });
+    t.advance(4_000);
+    await t.demo.state();
+    t.advance(4_000);
+    state = await t.demo.state();
+    expect(state.ledger).toHaveLength(2);
+    expect(state.ledger[1]).toMatchObject({ kind: "expired", amount: "0", after: "900000", link: explorerTx(CLOSE_TX) });
+  });
+
+  it("logs an expiry found on the chain alone, and the refund of a session the seller closed before its end", async () => {
+    const expired = setup();
+    await expired.demo.launch();
+    expired.advance(100_000);
+    expired.closes.set(SESSION, { signature: CLOSE_TX, at: expired.paidUntil() + 1, paidUntil: expired.paidUntil(), paid: "100000", refunded: "0" });
+    expect((await expired.demo.state()).ledger.map(ledgerLine).at(-1)).toBe("[expired] 0.900 + 0.000 = 0.900 USDC: the seller was paid in full");
+    const t = setup();
+    await t.demo.launch();
+    t.advance(61_000);
+    t.closeCodes.set(SESSION, 4410);
+    t.closes.set(SESSION, { signature: CLOSE_TX, at: t.paidUntil() - 39, paidUntil: t.paidUntil(), paid: "61000", refunded: "39000" });
+    const state = await t.demo.state();
+    expect(state.ledger.map(ledgerLine)).toEqual(["[launch] 1.000 - 0.100 = 0.900 USDC", "[ended by the seller] 0.900 + 0.039 = 0.939 USDC"]);
+    expect(state.ledger[1]?.link).toBe(explorerTx(CLOSE_TX));
+    t.advance(4_000);
+    expect((await t.demo.state()).ledger).toHaveLength(2);
+  });
+
+  it("gives the amounts alone when the launch could not read the balance, and a close whose refund was not reported", async () => {
+    const t = setup();
+    t.behave.balanceFails = new Error("the node is down");
+    await t.demo.launch();
+    await t.demo.topUp();
+    t.behave.closeWithoutAmounts = true;
+    const state = await t.demo.close();
+    expect(state.ledger.map(ledgerLine)).toEqual([
+      "[launch] -0.100 USDC",
+      "[top-up] -0.100 USDC",
+      "[close] the refund was not reported: see the close transaction",
+    ]);
+    expect(state.ledger[2]?.link).toBe(explorerTx(CLOSE_TX));
+  });
+
+  it("logs nothing for an action that failed", async () => {
+    const t = setup();
+    t.behave.openFails = new Error("402 refused");
+    await expect(t.demo.launch()).rejects.toThrow(/402 refused/);
+    expect((await t.demo.state()).ledger).toEqual([]);
+  });
+
+  it(`keeps the last ${LEDGER_LIMIT} movements`, async () => {
+    const t = setup();
+    for (let session = 0; session < 11; session++) {
+      await t.demo.launch();
+      await t.demo.close();
+    }
+    const state = await t.demo.state();
+    expect(state.ledger).toHaveLength(LEDGER_LIMIT);
+    expect(state.ledger.at(-1)).toMatchObject({ kind: "close" });
+    expect(state.ledger[0]).toMatchObject({ kind: "launch" });
   });
 });
 
@@ -482,7 +591,7 @@ describe("what the state links to", () => {
     expect(state.session.state).toBe("open");
     expect(state.session.rate).toBeUndefined();
     expect(state.session.startedAt).toBeUndefined();
-    expect(state.session).toMatchObject({ deposited: "100000", maxSeconds: 300 });
+    expect(state.session).toMatchObject({ deposited: "100000", maxSeconds: 1_000 });
     await expect(t.demo.topUp().then((next) => next.session.deposited)).resolves.toBe("200000");
   });
 

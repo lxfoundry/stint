@@ -1,9 +1,9 @@
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { TOP_UP_MARGIN_SECONDS, redactUrls } from "@lxfoundry/stint-x402";
-import { formatUsdc } from "../app/model.js";
+import { formatUsdc, ledgerLine } from "../app/model.js";
 import type { Demo } from "./demo.js";
 import type { CallHandler } from "./owner.js";
-import { LAUNCH_AMOUNT, LAUNCH_SECONDS, TOOL, TOP_UP_SECONDS, type DemoState, type ToolName } from "./state.js";
+import { LAUNCH_AMOUNT, LAUNCH_SECONDS, TOOL, TOP_UP_SECONDS, type DemoState, type LedgerKind, type ToolName } from "./state.js";
 
 /** A top-up is refused with this many seconds of paid time left or fewer: the facilitator's margin and 3 s more, as `topUpRefusal` has it. */
 const TOP_UP_REFUSED_WITHIN_SECONDS = TOP_UP_MARGIN_SECONDS + 3;
@@ -23,11 +23,26 @@ export const INSTRUCTIONS = [
   "This server shows a Stint session in a panel: an agent rents time on a live Solana account stream, pays in devnet USDC over x402, and gets back what it does not use.",
   `${TOOL.demo} shows the panel: call it when the person asks to start or see the Stint demo.`,
   `The panel's buttons and the tools ${TOOL.launch}, ${TOOL.topUp} and ${TOOL.close} act on the same session, so a result saying that a session is already running, is closed or has ended may mean that the person used the panel: say what the result says.`,
+  "The first line of a launch, top-up or close that succeeds is its line of the wallet's log: the balance before, the amount paid or refunded, and the balance after. Tell the person what the action did and quote it as it is. The state's ledger lists every movement, those made with the panel's buttons included.",
   "The panel shows the time left as it runs: do not poll for it.",
 ].join(" ");
 
 export function stateResult(state: DemoState): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(state) }], structuredContent: state as unknown as Record<string, unknown> };
+}
+
+/** The movement each action logs. */
+const ACTION_KINDS: Readonly<Partial<Record<string, LedgerKind>>> = { [TOOL.launch]: "launch", [TOOL.topUp]: "top-up", [TOOL.close]: "close" };
+
+/**
+ * An action's result: its line of the wallet's log first, for the model to quote, then the state. The line is the latest
+ * movement, if the action logged it: of its kind, and of the session the state holds.
+ */
+export function actionResult(name: string, state: DemoState): CallToolResult {
+  const result = stateResult(state);
+  const latest = state.ledger.at(-1);
+  if (!latest || latest.kind !== ACTION_KINDS[name] || latest.sessionId !== state.session.sessionId) return result;
+  return { ...result, content: [{ type: "text", text: ledgerLine(latest) }, ...result.content] };
 }
 
 export function errorResult(message: string, state: DemoState): CallToolResult {
@@ -48,11 +63,11 @@ export function createCallHandler(demo: Demo, log: (line: string) => void): Call
       case TOOL.state:
         return stateResult(await demo.state({ refreshBalance: args.refreshBalance === true }));
       case TOOL.launch:
-        return stateResult(await demo.launch());
+        return actionResult(name, await demo.launch());
       case TOOL.topUp:
-        return stateResult(await demo.topUp());
+        return actionResult(name, await demo.topUp());
       case TOOL.close:
-        return stateResult(await demo.close());
+        return actionResult(name, await demo.close());
       default:
         throw new Error(`Unknown tool ${name}`);
     }

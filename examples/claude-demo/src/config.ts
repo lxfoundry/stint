@@ -10,15 +10,15 @@ export const DEFAULT_RPC_URL = "https://api.devnet.solana.com";
 export const DEMO_DIR = "stint-demo";
 
 /**
- * The limits every action passes (spec §9.2): the example seller's rate, a session of the 100 s an open buys and two
- * top-ups of 100 s each, and 2.000 USDC an hour across sessions; devnet and devnet USDC only, and the Stint program
- * (the default).
+ * The limits every action passes (spec §9.2): the example seller's rate, a session of the 100 s an open buys and nine
+ * top-ups of 100 s each (the example seller's longest session, 1000 s), and 2.000 USDC an hour across sessions; devnet
+ * and devnet USDC only, and the Stint program (the default).
  */
 export const DEMO_POLICY: Policy = {
   networks: [SOLANA_DEVNET],
   assets: [USDC_DEVNET],
   maxRate: 1_000n,
-  maxPerSession: 300_000n,
+  maxPerSession: 1_000_000n,
   budget: { amount: 2_000_000n, periodSeconds: 3_600 },
 };
 

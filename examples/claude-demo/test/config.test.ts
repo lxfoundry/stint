@@ -44,7 +44,7 @@ describe("the demo's configuration", () => {
       networks: [SOLANA_DEVNET],
       assets: [USDC_DEVNET],
       maxRate: 1_000n,
-      maxPerSession: 300_000n,
+      maxPerSession: 1_000_000n,
       budget: { amount: 2_000_000n, periodSeconds: 3_600 },
     });
   });
