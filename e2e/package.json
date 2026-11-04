@@ -14,8 +14,10 @@
     "serve:devnet": "tsx src/cli.ts devnet serve"
   },
   "dependencies": {
+    "@lxfoundry/stint-claude-demo": "workspace:*",
     "@lxfoundry/stint-client": "workspace:*",
     "@lxfoundry/stint-conformance": "workspace:*",
+    "@lxfoundry/stint-example-seller": "workspace:*",
     "@lxfoundry/stint-example-stream": "workspace:*",
     "@lxfoundry/stint-facilitator": "workspace:*",
     "@lxfoundry/stint-gate": "workspace:*",

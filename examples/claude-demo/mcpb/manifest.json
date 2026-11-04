@@ -1,0 +1,49 @@
+{
+  "manifest_version": "0.3",
+  "name": "stint-claude-demo",
+  "display_name": "Stint demo",
+  "version": "0.1.0",
+  "description": "Shows a Stint session in a panel: rent 100 s of a live Solana account stream over x402 on devnet, top it up, close it early and get the rest back.",
+  "author": { "name": "LX Foundry" },
+  "license": "MIT",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "server/claude-demo.cjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/claude-demo.cjs"],
+      "env": {
+        "STINT_DEMO_HOME": "${user_config.wallet_dir}",
+        "STINT_DEMO_GATE_URL": "${user_config.gate_url}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "stint_demo", "description": "Shows the Stint demo panel" },
+    { "name": "stint_demo_state", "description": "The demo's state, for the panel" },
+    { "name": "stint_demo_launch", "description": "Opens a 100 s session, paid over x402" },
+    { "name": "stint_demo_top_up", "description": "Buys 100 s more on the running session" },
+    { "name": "stint_demo_close", "description": "Closes the session now, refunding the rest" }
+  ],
+  "user_config": {
+    "wallet_dir": {
+      "type": "directory",
+      "title": "Wallet folder",
+      "description": "The agent's devnet key (agent.json) is kept in a stint-demo folder inside the one you pick, made if missing.",
+      "required": true,
+      "default": "${HOME}"
+    },
+    "gate_url": {
+      "type": "string",
+      "title": "Gate URL",
+      "description": "The seller's gate: the example seller deployment by default.",
+      "required": false,
+      "default": "https://stint-demo.lxfoundry.ai"
+    }
+  },
+  "compatibility": {
+    "platforms": ["win32", "darwin", "linux"],
+    "runtimes": { "node": ">=22" }
+  }
+}

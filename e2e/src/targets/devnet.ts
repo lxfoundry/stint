@@ -12,7 +12,7 @@ import { createDirectChain } from "./direct.js";
 import { TEST_TERMS, startServices, type ServiceKeys, type Services } from "./services.js";
 
 /** What the funding key must hold to start: fees and rent for the stack, and the buyers' USDC. */
-const MINIMUM_FUNDS = { lamports: 500_000_000n, usdc: 5_000_000n };
+export const MINIMUM_FUNDS = { lamports: 500_000_000n, usdc: 5_000_000n };
 /** What each key of the stack that spends SOL is given: Kora's fee payer and the rent payer. */
 const STACK_LAMPORTS = 50_000_000n;
 /**

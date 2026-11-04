@@ -44,13 +44,16 @@ The toolchain is pinned in `CLAUDE.md` (section "Toolchain") and checked by
     pnpm install
     pnpm generate:client                      # regenerate the program client after an interface change
     scripts/fetch-subscriptions-program.sh    # fetch and check the Subscriptions program copy, once
-    pnpm test                                 # unit and integration tests
+    pnpm test                                 # unit and integration tests of every package but e2e
+    pnpm test:e2e                             # the e2e package's tests, each file starting a local network
     pnpm e2e:local                            # end-to-end scenarios on the local target
+    pnpm e2e:local --only=4,34                # only the scenarios named
     pnpm e2e:devnet                           # the same scenarios on devnet (needs .env.devnet and a deployed program)
     pnpm e2e:devnet funds                     # the address to fund for it, and what that address holds
     pnpm e2e:devnet clean                     # the clean-up alone
 
-The end-to-end report is written to `e2e/report/report.md`.
+The end-to-end report is written to `e2e/report/report.md`; after a run with `--only`, it lists only the
+scenarios named.
 
 ## MCP server
 
@@ -97,6 +100,13 @@ agent stops once it has worked out the last payment from two consecutive message
 `STINT_KEYPAIR_PATH` names a keypair file made for the agent that holds devnet USDC and nothing else: do not
 point it at the key that deploys the program or at the harness's funding key. Every spending limit is enforced by the client's policy in code. The stream's messages reach the model as
 data and cannot raise one. Every session is closed before the agent returns, whatever happened.
+
+## Examples: a seller deployment, and a session in Claude Desktop
+
+[`examples/seller`](examples/seller/README.md) runs Kora, the facilitator with its sweeper and the example stream with
+its gate in one process, deployable on Fly.io as one always-on machine that sells the stream on devnet.
+[`examples/claude-demo`](examples/claude-demo/README.md) is an MCP server whose panel shows a Stint session in Claude
+Desktop: the agent's wallet, the x402 exchange, the paid time draining, a top-up, and an early close with its refund.
 
 ## Deploying to devnet
 
