@@ -1,10 +1,13 @@
-import { expectEqual, expectTrue } from "../assert.js";
+import { expectEqual, expectTrue, sleep } from "../assert.js";
 import { buyerClient, sessionSeconds } from "../helpers.js";
 import { closeCodeOf, connectWith, tokenFor } from "../tokens.js";
 import type { ScenarioContext } from "../types.js";
 
 /** Longer ago than a token's longest life (120 s) plus the gate's 30 s of tolerance for clock skew (spec §7.2). */
 const LONG_AGO_MS = 200_000;
+
+/** How long after the close is confirmed the gate has to drop the accepted connection (scenario 7's bound). */
+const DROP_WITHIN_MS = 5_000;
 
 /**
  * Scenario 8 (spec §12.7): a connect with an expired token, with one for another audience, with one for another purpose,
@@ -26,13 +29,18 @@ export async function tokenRefusals(context: ScenarioContext): Promise<void> {
   const once = await sign("connect");
   const accepted = await connectWith(context.gateUrl, session.id, once);
   expectTrue(accepted.socket, "a connect with a fresh token is accepted");
-  const dropped = closeCodeOf(accepted.socket);
-  await refused(once, "a connect with a token already used is refused");
+  try {
+    const dropped = closeCodeOf(accepted.socket);
+    await refused(once, "a connect with a token already used is refused");
 
-  const receipt = await session.close();
-  expectEqual(receipt.via, "gate", "the buyer's close goes through the gate");
-  const { paid, refunded } = receipt;
-  expectTrue(paid !== undefined && refunded !== undefined, "the gate reported the close's amounts");
-  expectEqual(paid + refunded, session.cost, "paid and refunded add up to the deposit");
-  expectEqual(await dropped, 4410, "the accepted connection is dropped with 4410 once the close is confirmed");
+    const receipt = await session.close();
+    expectEqual(receipt.via, "gate", "the buyer's close goes through the gate");
+    const { paid, refunded } = receipt;
+    expectTrue(paid !== undefined && refunded !== undefined, "the gate reported the close's amounts");
+    expectEqual(paid + refunded, session.cost, "paid and refunded add up to the deposit");
+    const code = await Promise.race([dropped, sleep(DROP_WITHIN_MS).then(() => undefined)]);
+    expectEqual(code, 4410, "the accepted connection is dropped with 4410 within 5 s of the close's confirmation");
+  } finally {
+    accepted.socket.terminate();
+  }
 }
