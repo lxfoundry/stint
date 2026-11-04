@@ -33,16 +33,16 @@ Build the extension in WSL or on Linux, from the repository root:
     pnpm --filter @lxfoundry/stint-claude-demo run build
     pnpm --filter @lxfoundry/stint-claude-demo run mcpb
 
-Both commands run under WSL or on Linux: the pack script runs the `mcpb` shim in `node_modules/.bin` as a program. They
-write
+Both commands run under WSL or on Linux: `build` runs the `tsx` shim and `mcpb` runs the `mcpb` shim, both from
+`node_modules/.bin`, where the repository's Linux install (WSL, on Windows) makes them as shell scripts. They write
 
 - `examples/claude-demo/dist/claude-demo.cjs` (about 2 MB): the server and every dependency in one script, with the
   panel's HTML inside it;
 - `examples/claude-demo/dist/stint-claude-demo.mcpb` (about 450 KB): that script, the manifest and an icon, as one
   Claude Desktop extension.
 
-The two files run on any Node.js from 22, with no repository, no `node_modules` and no WSL: Claude Desktop's own Node.js
-runs the extension, on Windows and on macOS.
+The `.cjs` runs on any Node.js from 22, with no repository, no `node_modules` and no WSL. The `.mcpb` is an archive that
+Claude Desktop installs and runs with its own bundled Node.js, on Windows and on macOS.
 
 Copy the `.mcpb` to the machine that runs Claude Desktop (from WSL, for instance to `/mnt/c/Users/<you>/Downloads/`) and
 open it with Claude Desktop: double-click it, or use Settings → Extensions → Advanced settings → Install Extension.
@@ -59,9 +59,9 @@ call, and the panel appears once you do.
 ## Run it without the extension
 
 Claude Desktop's configuration file, `claude_desktop_config.json`, can run the bundle with Node.js 22 or later, which
-must be on the `PATH` of the account that runs Claude Desktop. The file is opened from Settings → Developer → Edit Config
-(`%APPDATA%\Claude\claude_desktop_config.json` on Windows, `~/Library/Application Support/Claude/claude_desktop_config.json`
-on macOS). Add the server, with the absolute path of the bundle (`dist/claude-demo.cjs`, which can be copied anywhere):
+must be on the `PATH` of the account that runs Claude Desktop. Settings → Developer → Edit Config opens the file; its
+folder differs by installer, so open it from there. Add the server, with the absolute path of the bundle
+(`dist/claude-demo.cjs`, which can be copied anywhere):
 
 ```json
 {
@@ -86,6 +86,9 @@ On macOS the paths are POSIX paths, such as `/Users/you/claude-demo.cjs` and `/U
 An empty gate or RPC value is the default. A variable that is missing or malformed is named, with every other one that is,
 on stderr, and the server exits with status 1.
 
+Restart Claude Desktop after saving the file. Then ask Claude to start the Stint demo: the first time the panel shows,
+Claude Desktop asks you to allow the call.
+
 `pnpm --filter @lxfoundry/stint-claude-demo run dev` runs the server from source instead, with the same variables,
 building the panel at start. `pnpm --filter @lxfoundry/stint-claude-demo test` runs the package's tests.
 
@@ -99,9 +102,11 @@ building the panel at start. `pnpm --filter @lxfoundry/stint-claude-demo test` r
   and copies that start at once make one key. **`STINT_DEMO_HOME` must therefore be a folder on a file system with hard
   links**: NTFS, APFS or ext4, not FAT or exFAT. On a file system without them the first start fails, with no key made.
 - **On Windows**, Claude Desktop runs the server natively, and file modes mean nothing there: the folder is protected by
-  the permissions of your user profile, so keep it inside the profile (the default, your home folder, is).
-- **Under WSL**, on the plain-node route, use a folder on the Linux side (such as `~/stint-wallet`), not one on a Windows
-  drive (`/mnt/c/...`): WSL reads back every mode there as 777, so the key file is not private.
+  the permissions of your user profile, so keep it inside the profile. The extension's default, your home folder, is; on
+  the plain-node route `STINT_DEMO_HOME` is required, so give it a folder in your profile.
+- **If you run the `.cjs` with a Node.js installed inside WSL**, use a folder on the Linux side (such as
+  `~/stint-wallet`), not one on a Windows drive (`/mnt/c/...`): WSL reads back every mode there as 777, so the key file
+  is not private.
 - A crash or a kill between writing the key and publishing it can leave an `agent.json.<pid>.<uuid>.tmp` file in that
   folder. It holds a key that was never shown or funded (mode 0600), and is never read as the wallet. It can be deleted.
 - It needs devnet USDC only: the seller's facilitator pays the fees, so the agent holds no SOL. Copy its address from the
@@ -145,4 +150,6 @@ building the panel at start. `pnpm --filter @lxfoundry/stint-claude-demo test` r
 - Stdout carries the protocol; everything for a person goes to stderr, one line per tool call, prefixed
   `stint-claude-demo: `, in each copy that handles the call (a forwarder logs `<tool> forwarded`, the owner
   `<tool> ok in <n> ms`), but for the panel's state reads, which are logged only when they fail. Claude Desktop keeps each
-  server's stderr in `%LOCALAPPDATA%\Claude\Logs\mcp-server-<name>.log` on Windows.
+  server's stderr in a file in its log folder (`%LOCALAPPDATA%\Claude\Logs` on the Windows Store build): for the
+  extension, `mcp-server-Stint demo.log`, named by the display name in its manifest; for an entry of
+  `claude_desktop_config.json`, `mcp-server-<its key>.log`, such as `mcp-server-stint-demo.log` for the entry above.

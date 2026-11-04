@@ -183,16 +183,14 @@ The code differs from the code this plan shows in these ways, each a behaviour o
 - **Every tool has a strict input schema.** An argument that a tool does not name is a tool error that names it, never
   dropped. The launch description tells the model to open the panel first.
 - **The panel**: the used part of a closed capsule is drawn in the text colour, inside its Signal outline; its hairlines
-  come from the palette alone (Mist on a light surface, Slate on a dark one); the page's surface is marked dark or light
-  from the colour it is painted, and Signal is text or fill only on a dark one; the funding row shows only while no
-  session runs; state reads go one at a time, and a state stamped before the one drawn is ignored.
+  use the host's border colour when it sets one, and Mist (light surface) or Slate (dark surface) otherwise; the page's
+  surface is marked dark or light from the colour it is painted, and Signal is text or fill only on a dark one; the
+  funding row shows only while no session runs; state reads go one at a time, and a state stamped before the one drawn
+  is ignored.
 - **One `fetch` wrapper per process, and every built state is closed at shutdown.** The exchange recorder is installed
   on the `fetch` the process had at the start, so that a later state's recorder replaces an earlier one's and never
   wraps it. On the way out, the sessions of every state the copy built are closed, those of states it dropped included,
   and a state built while it leaves opens nothing.
-- **The demo's guide is its own text.** `examples/claude-demo/README.md` is the source of truth for what it states, and
-  differs from the text Task 14 shows: it adds the wallet folder's requirements (hard links, file modes on Windows and
-  under WSL), the install routes, the sizes of the bundle and the `.mcpb`, and what quitting Claude Desktop does.
 
 ## What this plan builds, and what it leaves
 
@@ -5634,98 +5632,17 @@ git commit -m "Bundle the Claude Desktop example into one script and an MCP bund
 
 - [ ] **Step 1: Write the demo's guide**
 
-Create `examples/claude-demo/README.md`:
+The guide is `examples/claude-demo/README.md`, and that file is the source of truth for its text: the plan does not copy
+it, so that the two cannot differ. It states:
 
-````markdown
-# Example: a Stint session in Claude Desktop
-
-An MCP server whose panel shows a Stint session in Claude Desktop. Ask Claude to start the Stint demo: it calls
-`stint_demo`, and the panel shows
-
-- the agent's wallet on devnet and its USDC, with a link to Circle's faucet while it holds less than 0.100 USDC;
-- **Launch**: a 100 s session at the seller's gate, paid 0.100 USDC over x402, with the exchange as it happens
-  (`POST /sessions?seconds=100`, `402 Payment Required` and its terms, `PAYMENT-SIGNATURE`, then `201 Created` and the
-  settled transaction), the paid time draining, and a count of the stream's messages about the agent's own USDC
-  account, which arrive when its money moves;
-- **Top up +100 s** and **Close now**: the same exchange for a top-up, or the close with what was paid and refunded;
-- at the end of the paid time, the gate closing the session and the seller paid in full.
-
-Each step links to devnet's Explorer. The model acts on the same session: "top up" or "close it" in the chat calls
-`stint_demo_top_up` or `stint_demo_close`.
-
-## Install it in Claude Desktop
-
-Build the extension, in WSL, from the repository root:
-
-    pnpm --filter @lxfoundry/stint-claude-demo run build
-    pnpm --filter @lxfoundry/stint-claude-demo run mcpb
-
-This writes `examples/claude-demo/dist/stint-claude-demo.mcpb`: the manifest and the server, bundled into one script
-that runs on the Node.js Claude Desktop ships, on Windows, macOS or Linux, with no repository and no WSL. Copy it to
-the machine that runs Claude Desktop (from WSL, for instance to `/mnt/c/Users/<you>/Downloads/`) and open it with
-Claude Desktop: double-click it, or drop it on the Extensions page of Claude Desktop's settings. Claude Desktop asks
-for:
-
-| Setting | Meaning |
-|---|---|
-| Wallet folder | The folder in which the server keeps a `stint-demo` folder of its own, made if it is missing, for the agent's key (`agent.json`) and `owner.json`. The default, your home folder, is fine |
-| Gate URL | The seller's gate. Default `https://stint-demo.lxfoundry.ai`, the example seller deployment (`examples/seller`) |
-
-## Run it without the extension
-
-Claude Desktop's configuration file (`%APPDATA%\Claude\claude_desktop_config.json` on Windows) can run the bundle:
-
-```json
-{
-  "mcpServers": {
-    "stint-demo": {
-      "command": "node",
-      "args": ["C:\\path\\to\\claude-demo.cjs"],
-      "env": { "STINT_DEMO_HOME": "C:\\Users\\you" }
-    }
-  }
-}
-```
-
-| Variable | Meaning |
-|---|---|
-| `STINT_DEMO_HOME` | An absolute path. The server keeps its files in its `stint-demo` folder (here `C:\Users\you\stint-demo`), and creates both if they are missing. Required |
-| `STINT_DEMO_GATE_URL` | The seller's gate. Default `https://stint-demo.lxfoundry.ai` |
-| `STINT_DEMO_RPC_URL` | Where the balance and a session's close are read. Default `https://api.devnet.solana.com` |
-
-`pnpm --filter @lxfoundry/stint-claude-demo run dev` runs the server from source instead, building the panel at start.
-
-## The agent's wallet
-
-- At its first start, the server writes a new key to `stint-demo/agent.json` in the wallet folder: a Solana CLI keypair
-  file (a JSON array of 64 bytes), readable by its owner only. It never overwrites that file, and makes a key only for
-  a policy that allows devnet alone. Its address is on stderr, and in the panel.
-- It needs devnet USDC only: Kora pays the fees, so it holds no SOL. Get some at `https://faucet.circle.com/` (choose
-  Solana Devnet and paste the address), then press **Refresh**.
-- Its limits, enforced by the client's policy whatever the seller offers or the model asks: at most 1000 base units a
-  second, at most 0.300 USDC per session (an open and two top-ups), at most 2.000 USDC an hour across sessions,
-  counted as it is paid in, refunds or not; devnet and devnet USDC only.
-
-## How it works
-
-- Claude Desktop starts two copies of the server. The first to create `stint-demo/owner.json` in the wallet folder
-  holds the key, the client and the session; the other forwards each call to it over HTTP on 127.0.0.1, with the
-  Bearer token that file holds. If the holder goes away, the other takes over, with a fresh state. A launch, top-up or
-  close that was under way when the holder went is not sent again: the tool answers that it may or may not have
-  happened, and the panel shows what did.
-- Every action goes through the client's session tools, so every payment passes the client's policy checks. The x402
-  exchange the panel shows is recorded from the client's own requests to the gate.
-- The panel reads the state every 2 s, every 0.5 s while an action runs, and redraws the time left every 250 ms, its
-  clock corrected by the server's.
-- When the server's standard input closes, as when Claude Desktop quits and lets its servers finish, the server
-  closes the session if it is still paid for, so that the unused part of the deposit comes back; it waits at most
-  90 s. If Claude Desktop ends the server without that, nothing runs in it: the stream connection drops, and the
-  gate's idle close, 60 s later, closes the session and refunds the rest the same way. A session with less than 60 s
-  left then runs to its end, and the seller is paid in full.
-- Claude Desktop keeps each server's stderr in `%LOCALAPPDATA%\Claude\Logs\mcp-server-<name>.log` on Windows: one
-  line per tool call, in each copy that handles it, but for the panel's state reads, which are logged only when they
-  fail.
-````
+- what the panel shows and the five tools, with their strict input schemas;
+- how to build the bundle and the `.mcpb` (under WSL or on Linux), their sizes, and what runs them;
+- the two install routes: the `.mcpb` in Claude Desktop, and an entry of `claude_desktop_config.json` that runs the
+  bundle with Node.js, with its variables (`STINT_DEMO_HOME`, `STINT_DEMO_GATE_URL`, `STINT_DEMO_RPC_URL`);
+- the agent's wallet: the file system its folder needs (hard links), the file modes on Windows and under WSL, the
+  `agent.json.*.tmp` file a crash can leave, funding at Circle's faucet, and the client policy's limits;
+- how it works: the two copies Claude Desktop starts and the owner's `owner.json`, forwarding and its timeouts, the
+  panel's reads, the three ways a session ends, what quitting Claude Desktop does, and where the logs are.
 
 - [ ] **Step 2: Point to the examples from the repository's README**
 
