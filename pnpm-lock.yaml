@@ -220,12 +220,18 @@ importers:
 
   e2e:
     dependencies:
+      '@lxfoundry/stint-claude-demo':
+        specifier: workspace:*
+        version: link:../examples/claude-demo
       '@lxfoundry/stint-client':
         specifier: workspace:*
         version: link:../packages/client
       '@lxfoundry/stint-conformance':
         specifier: workspace:*
         version: link:../conformance
+      '@lxfoundry/stint-example-seller':
+        specifier: workspace:*
+        version: link:../examples/seller
       '@lxfoundry/stint-example-stream':
         specifier: workspace:*
         version: link:../examples/solana-stream

@@ -102,7 +102,7 @@ describe("the exchange recorder", () => {
         kind: "payment-required",
         at: 1_000,
         label: "402 Payment Required",
-        detail: `elapsed · 0.001 USDC/s · 100 s · min 5 s · max 300 s · seller ${shortened(SELLER)}`,
+        detail: `elapsed · 0.001 USDC/s · 100 s · min 5 s · max 1000 s · seller ${shortened(SELLER)}`,
         link: `https://explorer.solana.com/address/${SELLER}?cluster=devnet`,
       },
       { kind: "payment", at: 1_000, label: "PAYMENT-SIGNATURE", detail: "one transaction: 0.100 USDC → vault + open" },

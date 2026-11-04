@@ -14,6 +14,7 @@ import {
   type DemoSession,
   type DemoState,
   type ExchangeRow,
+  type LedgerEntry,
 } from "./state.js";
 
 export class DemoError extends Error {
@@ -32,6 +33,11 @@ export interface DemoOptions {
   readonly log?: (line: string) => void;
   /** Milliseconds a state read waits for the chain before it answers without it. Default `STATE_READ_CAP_MS`. */
   readonly stateReadCapMs?: number;
+  /**
+   * How long a launch buys, for a seller whose longest session leaves no room for `TOP_UP_SECONDS` after
+   * `LAUNCH_SECONDS`. Default `LAUNCH_SECONDS`, which the tools' descriptions and the panel name.
+   */
+  readonly launchSeconds?: number;
 }
 
 export interface Demo {
@@ -56,11 +62,22 @@ export const CLOSE_LOOKUP_EVERY_MS = 4_000;
 export const STATE_READ_CAP_MS = 5_000;
 /** How often, at most, the stream subscription is sent again while a session runs. */
 export const RESUBSCRIBE_EVERY_MS = 15_000;
+/** How many of the wallet's movements the state keeps, the latest: a session of the longest the demo buys logs 11. */
+export const LEDGER_LIMIT = 20;
 const REASON = "The Stint demo: watch the agent's own USDC account on the example stream";
 
 type Mutable<T> = { -readonly [Key in keyof T]: T[Key] };
 type Links = Mutable<Omit<DemoSession["links"], "topUps">> & { topUps: string[] };
 type Session = Mutable<Omit<DemoSession, "links">> & { links: Links };
+/** A movement to log: the balance after is worked out from the one before. */
+interface Movement {
+  readonly kind: LedgerEntry["kind"];
+  readonly sessionId: string;
+  readonly direction: LedgerEntry["direction"];
+  readonly amount: string | undefined;
+  readonly before: string | undefined;
+  readonly link: string | undefined;
+}
 
 const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 /**
@@ -83,6 +100,9 @@ export function createDemo(options: DemoOptions): Demo {
   const now = options.now ?? Date.now;
   const { tools, chain } = options;
   const emit = options.log ?? toStderr;
+  const launchSeconds = options.launchSeconds ?? LAUNCH_SECONDS;
+  /** What a launch needs in the wallet: `launchSeconds` at the rate `LAUNCH_AMOUNT` buys `LAUNCH_SECONDS` at. */
+  const launchAmount = ((BigInt(LAUNCH_AMOUNT) * BigInt(launchSeconds)) / BigInt(LAUNCH_SECONDS)).toString();
   /** One line, each URL in it cut to its host. A log that fails must not fail what it reports on, and has nowhere left to say so. */
   const say = (line: string): void => {
     try {
@@ -102,6 +122,7 @@ export function createDemo(options: DemoOptions): Demo {
   /** The balance read that a state read waits for, while it runs: a state read starts none beside it. */
   let balanceReading: Promise<void> | undefined;
   let session = blank();
+  let ledger: LedgerEntry[] = [];
   let current: ExchangeRow[] = [];
   let last: { action: DemoAction; rows: ExchangeRow[] } | undefined;
   let busy: DemoAction | undefined;
@@ -151,6 +172,54 @@ export function createDemo(options: DemoOptions): Demo {
       balanceReading = undefined;
     }));
 
+  /** The entry for a movement, stamped now, with no field for what is not known. */
+  function entryOf(movement: Movement): LedgerEntry {
+    const { kind, sessionId, direction, amount, before, link } = movement;
+    const after =
+      amount === undefined || before === undefined ? undefined : (direction === "out" ? BigInt(before) - BigInt(amount) : BigInt(before) + BigInt(amount)).toString();
+    return {
+      kind,
+      sessionId,
+      at: now(),
+      direction,
+      ...(amount === undefined ? {} : { amount }),
+      ...(before === undefined ? {} : { before }),
+      ...(after === undefined ? {} : { after }),
+      ...(link === undefined ? {} : { link }),
+    };
+  }
+
+  /** Logs a movement of the wallet's USDC; past `LEDGER_LIMIT`, the oldest goes. */
+  function logMovement(movement: Movement): void {
+    ledger.push(entryOf(movement));
+    if (ledger.length > LEDGER_LIMIT) ledger = ledger.slice(-LEDGER_LIMIT);
+  }
+
+  /** The balance after the session's latest movement: the one its next movement starts from. */
+  const balanceAfter = (id: string): string | undefined => ledger.findLast((entry) => entry.sessionId === id)?.after;
+
+  /**
+   * Logs how a session that this server did not close ended, once it is `expired` or `ended` with its refund known: the
+   * refund is what comes back. An end already logged for the session is replaced, from the same balance and at the same
+   * time, as when the chain's figures and the close's link follow the stream's report of an expiry.
+   */
+  function logEnd(id: string): void {
+    const kind = session.state === "expired" || session.state === "ended" ? session.state : undefined;
+    if (!kind || session.refunded === undefined) return;
+    const index = ledger.findIndex((entry) => entry.sessionId === id && (entry.kind === "expired" || entry.kind === "ended"));
+    const logged = index >= 0 ? ledger[index] : undefined;
+    const movement: Movement = {
+      kind,
+      sessionId: id,
+      direction: "in",
+      amount: session.refunded,
+      before: logged ? logged.before : balanceAfter(id),
+      link: session.links.close,
+    };
+    if (logged) ledger[index] = { ...entryOf(movement), at: logged.at };
+    else logMovement(movement);
+  }
+
   function snapshot(): DemoState {
     return {
       wallet: { address: options.address, ...wallet },
@@ -158,6 +227,7 @@ export function createDemo(options: DemoOptions): Demo {
       faucetUrl: FAUCET_URL,
       session: { ...session, links: { ...session.links, topUps: [...session.links.topUps] } },
       exchange: { current: [...current], ...(last ? { last: { action: last.action, rows: [...last.rows] } } : {}) },
+      ledger: ledger.map((entry) => ({ ...entry })),
       now: now(),
       ...(busy ? { busy } : {}),
       ...(failure ? { error: { ...failure } } : {}),
@@ -254,6 +324,7 @@ export function createDemo(options: DemoOptions): Demo {
     session.endedAt = found.at;
     if (found.at >= found.paidUntil) session.state = "expired";
     else if (session.state !== "closed") session.state = "ended";
+    logEnd(id);
     await refreshBalance();
   }
 
@@ -286,6 +357,7 @@ export function createDemo(options: DemoOptions): Demo {
       session.endedAt = session.paidUntil;
       session.paid ??= session.deposited;
       session.refunded ??= "0";
+      logEnd(id);
       return lookUpClose(true);
     }
     if (session.paidUntil !== undefined && now() >= session.paidUntil * 1000) return lookUpClose(false);
@@ -302,9 +374,11 @@ export function createDemo(options: DemoOptions): Demo {
     await refreshBalance();
     // A shutdown during the balance read found no session to close: nothing may open after it. No await from here to the open.
     refuseWhenLeaving();
-    if (wallet.usdc !== undefined && BigInt(wallet.usdc) < BigInt(LAUNCH_AMOUNT)) {
+    // The balance the wallet's log starts this session from: none if this read failed, rather than an older one.
+    const before = balanceStale ? undefined : wallet.usdc;
+    if (wallet.usdc !== undefined && BigInt(wallet.usdc) < BigInt(launchAmount)) {
       throw new DemoError(
-        `The wallet holds ${formatUsdc(wallet.usdc)} and a launch needs ${formatUsdc(LAUNCH_AMOUNT)}: get devnet USDC for ${options.address} at ${FAUCET_URL}`,
+        `The wallet holds ${formatUsdc(wallet.usdc)} and a launch needs ${formatUsdc(launchAmount)}: get devnet USDC for ${options.address} at ${FAUCET_URL}`,
       );
     }
     openOffer = undefined;
@@ -314,7 +388,7 @@ export function createDemo(options: DemoOptions): Demo {
     session = { ...blank(), state: "opening" };
     let opened: OpenOutput;
     try {
-      opened = await tools.tools.stint_open_session.run({ url: options.gateUrl, seconds: LAUNCH_SECONDS, reason: REASON });
+      opened = await tools.tools.stint_open_session.run({ url: options.gateUrl, seconds: launchSeconds, reason: REASON });
     } catch (error) {
       session = blank();
       throw error;
@@ -339,6 +413,7 @@ export function createDemo(options: DemoOptions): Demo {
         seller: offered ? explorerAddress(offered.payTo) : undefined,
       },
     };
+    logMovement({ kind: "launch", sessionId: opened.sessionId, direction: "out", amount: opened.cost, before, link: session.links.open });
     void subscribe(true);
   }
 
@@ -359,6 +434,7 @@ export function createDemo(options: DemoOptions): Demo {
     session.deposited = (BigInt(session.deposited ?? "0") + BigInt(receipt.cost)).toString();
     const link = settled.topUp === undefined ? undefined : explorerTx(settled.topUp);
     if (link) session.links.topUps.push(link);
+    logMovement({ kind: "top-up", sessionId: id, direction: "out", amount: receipt.cost, before: balanceAfter(id), link });
   }
 
   async function close(): Promise<void> {
@@ -373,6 +449,7 @@ export function createDemo(options: DemoOptions): Demo {
       if (receipt.paid !== undefined) session.paid = receipt.paid;
       if (receipt.refunded !== undefined) session.refunded = receipt.refunded;
       session.links.close = explorerTx(receipt.transaction);
+      logMovement({ kind: "close", sessionId: id, direction: "in", amount: receipt.refunded, before: balanceAfter(id), link: session.links.close });
     } catch (error) {
       if (session.state === "closing") session.state = "open";
       // The session may have ended meanwhile, closed by the gate or another party: the chain says.
@@ -409,6 +486,7 @@ export function createDemo(options: DemoOptions): Demo {
       leaving = true;
       const paidFor = session.paidUntil === undefined || now() < session.paidUntil * 1000;
       if (!isRunning(session) || !paidFor) return { closed: [], failed: [] };
+      say(session.sessionId ? `closing session ${session.sessionId}` : "closing the session being opened");
       return tools.closeAll();
     },
   };

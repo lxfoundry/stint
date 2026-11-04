@@ -21,12 +21,12 @@ export function offer(action: "open" | "topUp"): ElapsedRequirements {
     asset: USDC_DEVNET.mint,
     payTo: SELLER,
     receiverAuthorizer: RECEIVER_AUTHORIZER,
-    terms: { rate: 1_000n, minSeconds: 5, maxSeconds: 300 },
+    terms: { rate: 1_000n, minSeconds: 5, maxSeconds: 1_000 },
     seconds: 100,
     facilitator: { feePayer: FEE_PAYER, rentPayer: RENT_PAYER, programId: PROGRAM, closeUrl: "http://127.0.0.1:9/close" },
     lifetime: { blockhash: "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N", lastValidBlockHeight: 100n },
     maxTimeoutSeconds: 30,
-    idleCloseSeconds: 60,
+    idleCloseSeconds: 30,
     closeOnOutage: true,
   };
   return action === "open" ? buildOpenOffer(input) : buildTopUpOffer({ ...input, session: SESSION });

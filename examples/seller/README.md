@@ -7,8 +7,8 @@ it refuses every request but `GET /liveness` without its API key, which only thi
 the stream's port is public. Other machines in the same Fly.io organization can reach every port over its private
 network, and Kora refuses them without its API key.
 
-The offer: 1000 base units of devnet USDC a second (0.001 USDC/s), sessions from 5 s to 300 s, 100 s when a request
-names no duration (0.100 USDC), and a session that nobody connects to for 60 s is closed by the gate.
+The offer: 1000 base units of devnet USDC a second (0.001 USDC/s), sessions from 5 s to 1000 s, 100 s when a request
+names no duration (0.100 USDC), and a session that nobody connects to for 30 s is closed by the gate.
 
 ## Configuration
 
@@ -139,7 +139,7 @@ From the repository root, with `flyctl` signed in:
        curl -s -X POST 'https://stint-demo.lxfoundry.ai/sessions?seconds=100'
 
    The last answers `402` with one offer: `amount` `"100000"`, `extra.rate` `"1000"`, `extra.seconds` 100,
-   `extra.minSeconds` 5, `extra.maxSeconds` 300, `extra.idleCloseSeconds` 60, and `resource.url`
+   `extra.minSeconds` 5, `extra.maxSeconds` 1000, `extra.idleCloseSeconds` 30, and `resource.url`
    `https://stint-demo.lxfoundry.ai/sessions`. `fly logs -a stint-demo` shows the process's log.
 
 ## In operation
