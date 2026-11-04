@@ -11,10 +11,11 @@ another mint with `403`, and adopts nothing. Scenarios 8, 20 and 35 pass on `loc
 devnet.
 
 **Architecture:** No change to the program. In the gate, a connect for a session it does not track reads the account,
-checks the token against the account's `authority` (checks 1 to 3), the terms (check 4) and the margin (check 5), then
-provisions the session through the same join as a retried open, so that two connects, or a connect and an open,
-provision it once. A subscription reports changes only, so the gate then reads the account once more, after its bound
-on a node's lag, and treats an account gone as a session another party closed. The gate remembers the sessions it has
+checks the token against the account's `authority` (checks 1 to 3), the terms (check 4) and the margin (check 5). A
+subscription reports changes only, so the gate then reads the account once more, after its bound on a node's lag, and
+refuses the connect with `404` if the account is gone by then. Only then does it provision the session, through the
+same join as a retried open, so that two connects, or a connect and an open, provision it once, and no timer of the
+session runs while the connect waits. The gate remembers the sessions it has
 ended for ten minutes, so that a node which still shows a closed account cannot bring one back, through a connect or
 an open paid again. The conformance library gains connects and closes through the gate with tokens a
 scenario signs itself. The harness's direct chain can name the gate's receiver authorizer, and open a session in a
@@ -41,8 +42,8 @@ answers to a connect), 7.2 (the session token and the gate's five checks), 7.3 (
 - `u64` values on the wire are decimal strings; `u32` values are JSON numbers (spec section 5.1). Amounts are `bigint`
   in TypeScript, never `number`.
 - **No secrets, ever, in any commit.** Never print a key's contents or the devnet seed; an RPC URL may carry an API key.
-- **A token is never logged** (spec section 7.2), and a connect refused before the upgrade adopts nothing: no
-  `provision()`, no subscription, no timer.
+- **A token is never logged** (spec section 7.2), and a connect refused by a check of the adoption (Task 1), the
+  second read included, adopts nothing: no `provision()`, no subscription, no timer.
 - `GateConfig`, `GateChain`, `ScenarioContext` and the client's options gain no required member: tests build them from
   literals.
 - Scenario statuses follow the ratchet of spec section 12.2: a scenario is made `required` in the commit where it first
@@ -74,7 +75,7 @@ Not built, and not to be built here:
   failing or passing.
 - **A second read for a session the gate opened itself.** Adoption reads the account from a node that may lag, and
   the subscription that follows reports changes only. So it reads the account once more, after the gate's bound on a
-  node's lag (Task 1). An open reads the account right after its settlement and subscribes once `provision()` returns. A
+  node's lag, before it provisions anything (Task 1). An open reads the account right after its settlement and subscribes once `provision()` returns. A
   close that lands in between is found by the end timer's re-read, at `paid_until`.
 
 ## Before you start: what a person must prepare
@@ -98,6 +99,7 @@ example.
 | File | Change |
 |---|---|
 | `packages/gate/src/gate.ts` | `authenticate` takes the authority; `track` (from the open path); `adopt`; the memory of ended sessions; `connect` adopts; `502` on an upstream failure during an upgrade |
+| `packages/gate/src/types.ts` | `readRetry`'s docstring: the adoption's wait |
 | `packages/gate/test/adopt.test.ts` | New: the adoption's cases, on the gate's test harness |
 | `conformance/src/tokens.ts` | New: `tokenFor`, `connectWith`, `closeCodeOf`, `closeWith` |
 | `conformance/test/tokens.test.ts` | New |
@@ -119,16 +121,17 @@ example.
 
 **Files:**
 - Modify: `packages/gate/src/gate.ts`
+- Modify: `packages/gate/src/types.ts` (`readRetry`'s docstring)
 - Create: `packages/gate/test/adopt.test.ts`
 - Modify: `docs/specs/stint-system.md` (sections 7.1 and 7.3)
 
 **Interfaces:**
 - Consumes: the gate's test harness (`packages/gate/test/harness.ts`): `startHarness`, `helpers(...)` with `open`,
-  `prepareOpen`, `closeWith`, `connect`, `token`, `settleDown`; `NOW_MS`.
+  `send`, `prepareOpen`, `closeWith`, `connect`, `token`, `settleDown`; `NOW_MS`.
 - Produces: no exported name changes. Inside `createGate`:
   - `authenticate(token: string | undefined, session: Address, authority: Address, purpose: TokenPurpose): Promise<boolean>`;
   - `track(session: Address, stored: Session): Promise<Tracked<U>>`;
-  - `adopt(session: Address, token: string | undefined): Promise<Tracked<U> | number>`.
+  - `adopt(session: Address, token: string): Promise<Tracked<U> | number>`, called once `connect` has a token.
   - The gate logs `{ event: "adopt", session }` when it adopts a session.
 
 What the connect does for a session the gate does not track, in this order (spec sections 7.2 and 7.3):
@@ -138,16 +141,22 @@ What the connect does for a session the gate does not track, in this order (spec
 | No token at all, before anything is read | `401` |
 | Read the account at `confirmed`; it holds no session | `404` |
 | Checks 1 to 3: the token against the account's `authority` | `401` |
-| The account holds a session this gate has ended (same address and `started_at`, within the last ten minutes). Checked after the token, with no `await` from here to `track`, so that a session ended while the token was checked is caught too | `404` |
+| The account holds a session this gate has ended (same address and `started_at`, within the last ten minutes) | `404` |
 | Check 4: the terms, the mint and the receiver authorizer included (`sessionMatches`) | `403` |
 | Check 5: `paid_until` more than the margin away | `402` |
+| The session is tracked by now, through an open or another connect that got there while the token was checked: join it (`track`), with no second wait | — |
+| Wait the gate's bound on a node's lag (`readRetry.attempts × readRetry.delayMs`), then read the account again. A subscription reports changes only, so a close that landed just before the connect, read from a node that lagged, would never be heard of. Refused if the account is gone, or holds another session (another `started_at`, or other terms) | `404` |
+| Check 5 again, on the second read: on devnet the wait lasts 10 s | `402` |
+| The gate has stopped meanwhile: it would set no timer to end the session | `503` |
+| The gate has ended the session meanwhile. Checked with no `await` from here to `track`, so that a session ended while the token was checked, or during the wait, is caught too | `404` |
 | Provision it as an open that just settled (`track`) | — |
-| Wait the gate's bound on a node's lag (`readRetry.attempts × readRetry.delayMs`), then read the account again. A subscription reports changes only, so a close that landed before it started, read from a node that lagged, would never be heard of. An account gone, or holding another session, goes to `closedElsewhere`, as the subscription's notification would | `404` (the session is ending) |
 | Accept the connection | — |
 
-A read that fails is `502`. A connect refused before `track` adopts nothing. The open path gets the same memory check:
-an open paid again after this gate ended the session, read from a node that still shows the account, is `404`, not a
-second `provision()`.
+A read that fails is `502`. Every refusal comes before `track`, so a refused connect adopts nothing. The wait comes
+before `track` too: `provision()` arms the idle timer, and only an accepted connection disarms it, so a wait after
+`track` would let the idle timer run out on a target whose bound is as long as its idle timeout. The open path gets
+the same memory check: an open paid again after this gate ended the session, read from a node that still shows the
+account, is `404`, not a second `provision()`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -309,20 +318,86 @@ describe("the gate's adoption of a session it does not track (spec §7.3)", () =
     expect(h.calls.provision).toHaveLength(1);
   });
 
-  it("ends, and refuses with 404, an adopted session whose account the second read finds gone: closed before the subscription started", async () => {
+  it.each<[string, (stored: Session) => Session | undefined]>([
+    ["finds the account gone", () => undefined],
+    ["finds another session at the address", (stored) => ({ ...stored, startedAt: stored.startedAt + 1n })],
+  ])("refuses with 404, and adopts nothing, when the second read %s: a close just before the connect", async (_, later) => {
     const session = await onChain();
     const read = h.chain.readSession.bind(h.chain);
     let reads = 0;
-    // The first read, from a node that lags, still shows the account; the second, a moment later, does not.
-    h.chain.readSession = async (address) => (reads++ === 0 ? read(address) : undefined);
+    // The first read, from a node that lags, still shows the session; the second, a moment later, does not.
+    h.chain.readSession = async (address) => {
+      const stored = await read(address);
+      return reads++ === 0 || !stored ? stored : later(stored);
+    };
 
     expect((await connect(session, await token(session, "connect"))).status).toBe(404);
 
     expect(reads).toBe(2);
-    expect(h.calls.provision).toHaveLength(1);
-    expect(h.calls.attach).toEqual([]);
-    await expect.poll(() => h.calls.teardown).toEqual(["closedElsewhere"]);
-    await expect.poll(() => h.unwatched).toEqual([session]);
+    expect(h.calls.provision).toEqual([]);
+    expect(h.calls.watch).toEqual([]);
+    expect(h.timers.pending).toEqual([]);
+  });
+
+  it("reads the account a second time after the gate's bound on a node's lag, before it provisions anything", async () => {
+    const session = await onChain();
+    const read = h.chain.readSession.bind(h.chain);
+    const reads: { atMs: number; provisioned: number; timers: number }[] = [];
+    h.chain.readSession = async (address) => {
+      reads.push({ atMs: performance.now(), provisioned: h.calls.provision.length, timers: h.timers.pending.length });
+      return read(address);
+    };
+
+    const { socket } = await connect(session, await token(session, "connect"));
+
+    expect(socket).toBeDefined();
+    expect(reads).toHaveLength(2);
+    // The harness's bound is 3 reads 5 ms apart, 15 ms; a timer can fire a little early.
+    expect(reads[1]!.atMs - reads[0]!.atMs).toBeGreaterThanOrEqual(10);
+    // Nothing is provisioned, and no timer is armed, while the connect waits.
+    expect(reads[1]).toMatchObject({ provisioned: 0, timers: 0 });
+    socket!.close();
+  });
+
+  it("refuses with 503, and adopts nothing, a connect whose wait outlasts the gate: it would set no timer to end the session", async () => {
+    const session = await onChain();
+    const read = h.chain.readSession.bind(h.chain);
+    let reads = 0;
+    let reached!: () => void;
+    const second = new Promise<void>((resolve) => (reached = resolve));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    h.chain.readSession = async (address) => {
+      if (reads++ === 1) {
+        reached();
+        await held;
+      }
+      return read(address);
+    };
+
+    const answer = connect(session, await token(session, "connect"));
+    await Promise.race([second, answer]); // the connect is at its second read, or, before Task 1, already refused
+    await h.gate.close();
+    release();
+
+    expect((await answer).status).toBe(503);
+    expect(h.calls.provision).toEqual([]);
+    expect(h.calls.watch).toEqual([]);
+  });
+
+  it("refuses with 402, and adopts nothing, a session whose paid_until the session clock reaches while the connect waits", async () => {
+    const session = await onChain(); // paid until NOW + 30 s
+    const read = h.chain.readSession.bind(h.chain);
+    let reads = 0;
+    h.chain.readSession = async (address) => {
+      if (reads++ === 1) h.clock.now = NOW_MS + 30_000; // by the second read, the paid time is up
+      return read(address);
+    };
+
+    expect((await connect(session, await token(session, "connect"))).status).toBe(402);
+
+    expect(reads).toBe(2);
+    expect(h.calls.provision).toEqual([]);
   });
 
   it("adopts a new session opened at the address of one it has ended", async () => {
@@ -384,11 +459,11 @@ describe("the gate's adoption of a session it does not track (spec §7.3)", () =
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `pnpm --filter @lxfoundry/stint-gate test adopt.test.ts`
-Expected: FAIL, 19 of the 20 cases. Every connect for a session the gate does not track answers `404` today
+Expected: FAIL, 23 of the 24 cases. Every connect for a session the gate does not track answers `404` today
 (`if (!tracked) return refuseUpgrade(socket, 404)` in `connect`), so every case that expects a socket, `401`, `402`,
-`403` or `502` fails. So do these:
+`403`, `502` or `503` fails. So do these:
 - "remembers … for ten minutes": its `402` half;
-- "ends, and refuses with 404, an adopted session…": nothing is provisioned today;
+- both "refuses with 404, and adopts nothing, when the second read …": the account is not read today, so `reads` is 0;
 - "answers 404 to an open paid again…": today the open provisions a second time and answers `201`.
 
 The one case that passes is "answers 404, and adopts nothing, for a session it has ended…": its `404` still comes from
@@ -557,34 +632,42 @@ Above `connect`, add:
    * the seller's gates. It is adopted, as if its open had just settled, only once it passes every check of spec §7.2
    * against the account as the chain stores it: the token (checks 1 to 3, `401`), the terms, the mint and the receiver
    * authorizer included (check 4, `403`), and the margin (check 5, `402`). An address that holds no session, or holds one
-   * this gate has ended, is `404`. A connect refused before `track` adopts nothing. Once adopted, the account is read
-   * once more, after the gate's bound on a node's lag: an account gone then is a session another party closed. Returns
-   * the tracked session, or the status the upgrade is refused with.
+   * this gate has ended, is `404`. Before anything is provisioned, the account is read once more, after the gate's bound
+   * on a node's lag: gone, or holding another session, it is `404`. A connect refused here adopts nothing. Returns the
+   * tracked session, or the status the upgrade is refused with.
    */
   async function adopt(session: Address, token: string): Promise<Tracked<U> | number> {
     const stored = await upstream(() => config.chain.readSession(session));
     if (!stored) return 404;
     if (!(await authenticate(token, session, stored.authority, "connect"))) return 401;
-    // After the token's check, with no `await` from here to `track`'s registration: a session this gate ended before
-    // the connect, or while its token was checked, is not adopted again (the tracked path has the same guard).
     if (hasEnded(session, stored.startedAt)) return 404;
     if (!sessionMatches(stored, seller)) return 403;
     if (Number(paidUntil(stored)) * 1000 - sessionClock() <= marginMs) return 402;
-    if (!sessions.has(session) && !provisioning.has(session)) log({ event: "adopt", session });
-    const tracked = await track(session, stored);
-    // The account was read before the subscription started, and a subscription reports changes only: a close that
-    // landed just before, read from a node that lagged, would never be heard of. One more read, once a node has had
-    // the time the gate gives it to catch up (`readRetry`), decides: an account gone, or holding another session, is a
-    // session another party closed (spec §7.3), and the connect then finds it ending.
+    // Tracked by now, through an open or another connect that got there while the token was checked: join it.
+    if (sessions.has(session) || provisioning.has(session)) return track(session, stored);
+    // The account may come from a node that lags, and the subscription that adoption starts reports changes only: a
+    // close that landed just before the connect would never be heard of. So the account is read once more, once a node
+    // has had the time the gate gives it to catch up (`readRetry`). The wait comes before `track`: `provision()` arms
+    // the idle timer, which only an accepted connection disarms, and it must not run while the connect waits.
     await sleep(readRetry.attempts * readRetry.delayMs);
     const again = await upstream(() => config.chain.readSession(session));
-    if (!sameSession(tracked, again)) closedElsewhere(tracked);
-    return tracked;
+    if (!again || again.startedAt !== stored.startedAt || !sessionMatches(again, seller)) return 404;
+    if (Number(paidUntil(again)) * 1000 - sessionClock() <= marginMs) return 402;
+    // No `await` from here to `track`'s registration. A gate stopped meanwhile would set no timer to end the session, so
+    // it adopts nothing. A session this gate ended before the connect, while its token was checked or during the wait,
+    // is not adopted again (the tracked path has the same guard).
+    if (stopped) return 503;
+    if (hasEnded(session, stored.startedAt)) return 404;
+    if (!sessions.has(session) && !provisioning.has(session)) log({ event: "adopt", session });
+    return track(session, again);
   }
 ```
 
 `sleep` is the module's own (`const sleep = (ms: number) => …`). It is not one of the gate's `timers`, so the wait does
-not show among a test's pending timers. With the harness's `readRetry` of 3 reads 5 ms apart, it lasts 15 ms.
+not show among a test's pending timers. With the harness's `readRetry` of 3 reads 5 ms apart, it lasts 15 ms. On the
+devnet target, 20 reads 500 ms apart, it lasts 10 s, as long as the test stack's idle timeout
+(`TEST_IDLE_CLOSE_SECONDS` in `e2e/src/targets/services.ts`). `stopped` is the flag `close()` sets; once it is set,
+`arm` and `follow` start nothing, and `ws` answers an upgrade `503` itself.
 
 Replace the first lines of `connect`:
 
@@ -615,9 +698,9 @@ with:
     }
 ```
 
-The rest of `connect` is unchanged. The checks on `tracked.ended`, `tracked.endingElsewhere`, the terms and the margin
-also run for an adopted session. They pass unless the second read handed the session to `closedElsewhere`, which sets
-`endingElsewhere` at once, and then the connect is refused with `404`.
+The rest of `connect` is unchanged. Its checks on `tracked.ended`, `tracked.endingElsewhere`, the terms and the margin
+also run for an adopted session. They pass unless the session ended, or the gate heard of a close by another party,
+while it was provisioned; the connect is then refused with `404`.
 
 In `handleUpgrade`, replace:
 
@@ -636,6 +719,24 @@ with:
         // As on the HTTP routes: a failure of the chain or the facilitator is 502, any other error 500.
         refuseUpgrade(socket, error instanceof UpstreamError ? 502 : 500);
       });
+```
+
+In `packages/gate/src/types.ts`, at the end of `readRetry`'s docstring, replace:
+
+```ts
+   * gate whose node can lag by more than that needs a larger bound.
+   */
+  readonly readRetry?: RetryOptions;
+```
+
+with:
+
+```ts
+   * gate whose node can lag by more than that needs a larger bound. It is also the gate's bound on a node's lag when a
+   * connect adopts a session (spec §7.3): that connect waits `attempts × delayMs`, 1 s by default, before it reads the
+   * account a second time, so a larger bound makes every such connect wait longer.
+   */
+  readonly readRetry?: RetryOptions;
 ```
 
 - [ ] **Step 7: Run the tests to verify they pass**
@@ -661,7 +762,7 @@ In `docs/specs/stint-system.md`, section 7.3, replace the row:
 with:
 
 ```markdown
-| Connect for a session this gate does not track (opened directly on-chain, or through another of the seller's gates) | Answer `401` to a connect with no token, before anything is read. Otherwise read the session at `confirmed`, and answer `404` if the address holds none. Run checks 1 to 3 of section 7.2 against the account (`401`), then answer `404` if it holds a session this gate has ended: a node can still show a closed account for a moment, so the gate remembers the sessions it ended, for ten minutes. Then check 4 (`403`, the mint and the receiver authorizer included) and check 5 (`402`). A connect refused so far adopts nothing. A session that passes them is adopted as if its open had just settled (`provision()`, the subscription, the idle and end timers; a retried open or a second connect joins that provisioning). Since a subscription reports changes only, the gate then reads the account once more, after its bound on a node's lag. An account gone, or holding another session, is a session another party closed (the row "Account closed by another party"), and the connect is answered `404`. Otherwise the connection is accepted. Each such connect reads the chain before the token's signature can be checked, so a deployment rate-limits the route, as it does the status route | — |
+| Connect for a session this gate does not track (opened directly on-chain, or through another of the seller's gates) | Answer `401` to a connect with no token, before anything is read. Otherwise read the session at `confirmed`, and answer `404` if the address holds none. Run checks 1 to 3 of section 7.2 against the account (`401`), then answer `404` if it holds a session this gate has ended: a node can still show a closed account for a moment, so the gate remembers the sessions it ended, for ten minutes. Then check 4 (`403`, the mint and the receiver authorizer included) and check 5 (`402`). Since a subscription reports changes only, the gate then reads the account once more, after its bound on a node's lag, so every such connect waits that long: an account gone, or holding another session, is answered `404`, and check 5 is made again. A gate that stops meanwhile answers `503`. A connect refused at any of these steps adopts nothing. A session that passes them all is adopted as if its open had just settled (`provision()`, the subscription, the idle and end timers; a retried open or a second connect joins that provisioning), and the connection is accepted. Each such connect reads the chain before the token's signature can be checked, so a deployment rate-limits the route, as it does the status route | — |
 ```
 
 In the same table, in the row `Open settled`, replace:
@@ -691,7 +792,7 @@ with:
 - [ ] **Step 9: Commit**
 
 ```bash
-git add packages/gate/src/gate.ts packages/gate/test/adopt.test.ts docs/specs/stint-system.md
+git add packages/gate/src/gate.ts packages/gate/src/types.ts packages/gate/test/adopt.test.ts docs/specs/stint-system.md
 git commit -m "Adopt a session opened directly on-chain when its buyer connects, once it passes the token and terms checks"
 ```
 
@@ -1443,6 +1544,9 @@ In `createDirectChain`, below the `partiesOnce` definition, add:
     }));
 ```
 
+`reclaim`'s second attempt is for a node that lags, which a local network does not do. The local tests check that an
+account holding a balance is closed, and where its rent goes; only the devnet runs exercise the retry.
+
 In `open`, replace the signature line and the lines from `const { rentPayer, receiverAuthorizer } = await partiesOnce();`
 to the end of the `return { … };`:
 
@@ -1710,7 +1814,7 @@ Create `conformance/src/scenarios/35-adopted-session.ts`:
 import { address, type Address } from "@solana/kit";
 import type { Session } from "@lxfoundry/stint-program-client";
 import { lamportBalances, type ElapsedRequirements } from "@lxfoundry/stint-x402";
-import { expectEqual, expectTrue } from "../assert.js";
+import { expectEqual, expectTrue, sleep } from "../assert.js";
 import { sessionSeconds } from "../helpers.js";
 import { openOffers } from "../payments.js";
 import { readUntil } from "../reads.js";
@@ -1738,9 +1842,9 @@ export function connectOnceSeen(context: ScenarioContext, sign: () => Promise<st
 
 /**
  * Scenario 35 (spec §12.7): a session opened directly on-chain with the gate's terms, mint and receiver authorizer, and a
- * harness key as rent payer, then a connect. The gate adopts it (spec §7.3): it accepts the connection, and the buyer's
- * close through the gate settles the session, refunded as in scenario 1, with the rent returned to the harness's rent
- * payer.
+ * harness key as rent payer, then a connect. The gate adopts it (spec §7.3): it accepts the connection and keeps it
+ * open, it reports the session's status, and the buyer's close through the gate settles the session, refunded as in
+ * scenario 1, with the rent returned to the harness's rent payer.
  */
 export async function adoptedSession(context: ScenarioContext): Promise<void> {
   const direct = context.direct;
@@ -1758,6 +1862,12 @@ export async function adoptedSession(context: ScenarioContext): Promise<void> {
   const connected = await connectOnceSeen(context, () => sign("connect"), opened.session);
   expectTrue(connected.socket, `the gate accepts a connect for a session it never sold, and adopts it (status ${connected.status})`);
   const dropped = closeCodeOf(connected.socket);
+  // The connection stays up, and the session is the gate's: none of its timers ran out while the connect waited.
+  const early = await Promise.race([dropped, sleep(2_000).then(() => undefined)]);
+  expectEqual(early, undefined, "the gate keeps the adopted session's connection open");
+  const status = await fetch(`${context.gateUrl}/sessions/${opened.session}`);
+  await status.text();
+  expectEqual(status.status, 200, "the gate reports the status of the adopted session");
 
   const close = await closeWith(context.gateUrl, opened.session, await sign("close"));
   expectEqual(close.status, 200, "the gate closes the adopted session on the buyer's request");
@@ -1806,6 +1916,7 @@ the run exits 0. If it fails:
 |---|---|
 | "the gate accepts a connect … (status 404)" | Task 1's `adopt` is not reached: `connect` still refuses an untracked session before reading the account |
 | "… (status 403)" | The session's terms differ from the gate's: compare the assertions of `expectOfferTerms`, which pass, with `sessionMatches` (`packages/x402/src/checks.ts`) |
+| "the gate keeps the adopted session's connection open: expected undefined, got 4410" | The gate provisioned the session before its second read, and the idle timer ran out while the connect waited: in Task 1's `adopt`, the wait and the second read come before `track` |
 | "the gate closes the adopted session …: expected 200, got 502" | The facilitator refused the close: read its log for the reason (a close of a session with a harness rent payer is checked by `checkCloseTransaction` only, which does not look at the rent payer) |
 
 - [ ] **Step 2: Make it `required`**
@@ -2019,8 +2130,9 @@ Replace the file's import `import { deriveKeys } from "../src/devnet/keys.js";` 
 
 Run: `pnpm --filter @lxfoundry/stint-e2e test devnet-target.test.ts`
 Expected: PASS. Scenario 20 runs here with the devnet target's second mint, derived from the test's seed and created on
-the local network at its first use. Without the edit above, the lamports test fails with "expected 5475880 to be less
-than 5000000" (the fees and the kept rent together).
+the local network at its first use. Without the edit above, the lamports test fails with "expected … to be less than
+5000000", the figure about 5.5 million: the kept rent, 3,500,880, and about 2 million of fees, which vary from run to
+run.
 
 - [ ] **Step 2: The whole suite, and the program**
 
@@ -2042,7 +2154,8 @@ If a run fails:
 | Symptom | Likely cause | What to do |
 |---|---|---|
 | Scenario 35 or 20: "… (status 404)" after the connect's retries | The gate's node still does not show the account the direct open created | Rerun once. If it repeats, the devnet target's `readRetry` (`e2e/src/targets/devnet.ts`) is too short for the provider |
-| Scenario 35: the connect takes about 10 s | Expected: an adopted session is read again after the gate's bound on a node's lag, which the devnet target sets at 20 reads 500 ms apart | Nothing |
+| Scenario 35: the connect takes about 10 s | Expected: before it adopts a session, the gate reads its account again after its bound on a node's lag, which the devnet target sets at 20 reads 500 ms apart | Nothing |
+| Scenario 35: "the gate keeps the adopted session's connection open: expected undefined, got 4410" | The gate's idle timer (10 s on the test stack) ran out while the connect waited for the second read | Check that Task 1's `adopt` waits and reads again before `track`, then rerun |
 | Scenario 20: the second mint's creation fails for want of SOL | The funding key is low | `pnpm e2e:devnet funds`, then fund it |
 | Scenario 8: "a connect with an expired token is refused: expected 401, got 101" | The gate's clock is 110 to 230 s behind the scenario's: the token was issued 200 s ago for 60 s, and the gate allows 30 s of skew either side | Check the machine's clock; the two run on the same machine on devnet |
 | The clean-up reports a session of another mint | A run stopped inside scenario 20 before its own close | It does not stop a run. From its `paid_until` on, anyone can close it: the buyer's key is gone, so it stays until someone does |
@@ -2110,10 +2223,10 @@ git commit -m "Record the scenarios of session tokens and adoption that pass on 
 - Scenarios 8, 20 and 35 are `required`, and pass on `local` and on devnet with every earlier required scenario.
 - A connect with a token that is expired, for another audience or purpose, or used before, is refused with `401`
   before the upgrade.
-- A connect for a session the gate does not track adopts the session once the account passes checks 1 to 5, as an open
-  that just settled. It provisions the session once however many connects or opens arrive together, and refuses it with
-  `404` when a second read, after the gate's bound on a node's lag, finds the account gone. A connect refused before
-  `track` (`401`, `402`, `403`, `404`) adopts nothing.
+- A connect for a session the gate does not track adopts the session, as an open that just settled, once the account
+  passes checks 1 to 5 and a second read, after the gate's bound on a node's lag, still shows it. It provisions the
+  session once however many connects or opens arrive together. A connect refused at any step (`401`, `402`, `403`,
+  `404`, `502`, `503`) adopts nothing, and nothing is provisioned while a connect waits for its second read.
 - A session the gate has ended is not brought back while a node still shows its account, neither by a connect nor by
   an open paid again.
 - `git diff --stat main -- programs/` is empty.
@@ -2123,8 +2236,8 @@ git commit -m "Record the scenarios of session tokens and adoption that pass on 
 
 - Section 7.1, `GET /sessions/:id/ws`: `502` when the chain cannot be read for a session the gate does not track (Task 1).
 - Section 7.3, the adoption row: `401` for a connect with no token before anything is read; the order of the checks
-  and what each refusal answers; the memory of ended sessions; the second read after the gate's bound on a node's lag;
-  the rate-limit note. The row `Open settled`: the memory of ended sessions (Task 1).
+  and what each refusal answers; the memory of ended sessions; the second read, before the session is adopted, after
+  the gate's bound on a node's lag; the rate-limit note. The row `Open settled`: the memory of ended sessions (Task 1).
 - Section 12.2: the sessions the harness opens directly on-chain, with the gate's receiver authorizer and in a second
   mint (Task 4).
 - Section 12.6: the devnet target's second mint, derived from the seed and kept (Task 4).
