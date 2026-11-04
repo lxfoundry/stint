@@ -20,7 +20,8 @@ which pays the seller for the time used, or for the whole paid time once it has 
 x402 `elapsed` scheme; the facilitator with its sweeper and its sponsored close (a buyer with no SOL closes its
 session through the facilitator when the gate cannot), the gate with its timers, the client library, which falls back
 on the facilitator's sponsored close, then on a close of its own when it has a node and SOL, an MCP server and an
-example agent.
+example agent, and funding from an allowance: an agent's opens and top-ups pulled from an owner's recurring
+delegation, which `pnpm stint allowance` grants, checks and revokes.
 A session ends by itself: the gate drops its connection with `4402` when the paid time runs out, closes a session
 that nobody connects to, and for a session that another party closed, stops forwarding at once and drops its
 connections once it has looked the close up (within about 2 s); the sweeper closes an expired session that nobody
@@ -69,9 +70,9 @@ by environment variables, and refuses to start without the caps:
 | `STINT_RPC_URL` | Optional. A Solana node's http or https URL. With it the client reads the chain: it checks an allowance before it signs, and `stint_allowance` reports it. The URL may carry an API key, so its user info, path, query and fragment are never printed; an error may still name its scheme and host |
 
 Every limit is enforced by the client's code, whatever a seller offers or the model asks. The agent's
-key holds USDC and no SOL. When the host disconnects, or the process is stopped, every session still
-open (and any open still in flight) is closed first, so the unused part of each deposit comes back. The server
-waits at most 90 s for that, and then exits with an error.
+key holds USDC and no SOL; funded from an allowance, it needs no USDC. When the host disconnects, or the process
+is stopped, every session still open (and any open still in flight) is closed first, so the unused part of each
+deposit comes back. The server waits at most 90 s for that, and then exits with an error.
 
 Register it with an MCP host as a command, from the repository root. For Claude Code:
 
@@ -96,17 +97,18 @@ payment arrives. It takes the same `STINT_*` variables as the MCP server, plus `
 `serve` prints `gateUrl` and `watchedAccount`: copy them into `STINT_GATE_URL` and `STINT_WATCH_ACCOUNT`. The
 agent stops once it has worked out the last payment from two consecutive messages about the account.
 
-`STINT_KEYPAIR_PATH` names a keypair file made for the agent that holds devnet USDC and nothing else: do not
-point it at the key that deploys the program or at the harness's funding key. Every spending limit is enforced by the client's policy in code. The stream's messages reach the model as
-data and cannot raise one. Every session is closed before the agent returns, whatever happened.
+`STINT_KEYPAIR_PATH` names a keypair file made for the agent that holds devnet USDC and nothing else, or nothing
+when an allowance funds it: do not point it at the key that deploys the program or at the harness's funding key.
+Every spending limit is enforced by the client's policy in code. The stream's messages reach the model as data and
+cannot raise one. Every session is closed before the agent returns, whatever happened.
 
 ## Allowance funding
 
 An owner can fund an agent's sessions from a budget instead of putting USDC on the agent's key. The owner grants the
 agent's key a recurring delegation on the Solana Foundation's Subscriptions & Allowances program: an amount per
 period, a period length and an expiry, which the program enforces on-chain. The agent then pays each open and top-up
-by pulling from the owner's USDC account, in the same transaction as the open or the top-up, and holds no USDC or SOL
-itself. When a session closes early, the unused part goes back to the owner's account.
+by pulling from the owner's USDC account, in the same transaction as the open or the top-up, and its key needs no USDC
+or SOL. When a session closes early, the unused part goes back to the owner's account.
 
 The owner grants, checks and revokes with `pnpm stint allowance`, from the repository root (inside WSL on Windows).
 The node is read from `STINT_RPC_URL`, not from the arguments, because an RPC URL may carry an API key; the command
@@ -122,22 +124,26 @@ absolute path (`~` is not expanded; the shell expands `$HOME`):
 
 `status` prints how much of the period's cap has been pulled, how much is left, when the period ends (Unix seconds)
 and the owner's USDC balance, or `no such allowance`. To fund an agent from the allowance, give the MCP server or the
-example agent `STINT_ALLOWANCE_OWNER` (and `STINT_ALLOWANCE_NONCE` if the grant named one) and `STINT_RPC_URL`; the
-client library takes `allowance: { owner, nonce? }`. Every spending limit of the client's policy still applies on top
-of the allowance's cap.
+example agent `STINT_ALLOWANCE_OWNER` (and `STINT_ALLOWANCE_NONCE` if the grant named one); the client library takes
+`allowance: { owner, nonce? }`. With `STINT_RPC_URL` (the library's `rpc`) the client checks the allowance before it
+signs; without it, a payment the allowance cannot fund is refused by the facilitator instead. Every spending limit of
+the client's policy still applies on top of the allowance's cap.
 
 What an owner needs to know:
-- The owner pays about 0.004 SOL once, for the transaction's fee and the rent of two accounts, a Subscription Authority
-  and the delegation. Revoking closes the delegation and `--close-authority` the Subscription Authority too: their rent
-  returns to the owner. Leave `--close-authority` out to revoke one allowance and keep the others, since closing the
-  Subscription Authority ends every allowance the owner granted for USDC.
+- The owner pays the grant's fee and the rent of the accounts it creates: about 0.004 SOL for a first grant, which
+  creates two, a Subscription Authority and the delegation. When the owner's Subscription Authority for USDC already
+  exists, a grant creates the delegation alone, and the owner pays only its rent. Revoking closes the delegation and
+  `--close-authority` the Subscription Authority too: their rent returns to the owner. Leave `--close-authority` out to
+  revoke one allowance and keep the others, since closing the Subscription Authority ends every allowance the owner
+  granted for USDC.
 - A dedicated owner wallet is recommended. SPL Token allows one delegate per token account, and the allowance uses the
   owner's associated USDC account, of which a wallet has one: it takes that account's delegate slot, and refunds
   return to that account too.
 - Refunds come back to the owner but do not restore the period's allowance: the program counts what was pulled, so
   the cap bounds what can be locked per period.
-- The agent's key can pull up to the period's cap, to any account and not only to a session, until the delegation is
-  revoked or expires. Choose the cap, the period and the expiry for what the owner is willing to lose if that key leaks.
+- The agent's key can pull up to the period's cap into any USDC account, not only a session's vault, until the
+  delegation is revoked or expires. Choose the cap, the period and the expiry for what the owner is willing to lose if
+  that key leaks.
 
 ## Deploying to devnet
 
