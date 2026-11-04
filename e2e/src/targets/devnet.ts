@@ -235,6 +235,7 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
       facilitator: facilitatorApi,
       allowance: createAllowanceControl({
         rpc,
+        readRetry: READ_RETRY,
         send,
         newOwner: async (usdc) => {
           const owner = await lendToBuyer(usdc);

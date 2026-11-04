@@ -101,6 +101,7 @@ export async function startLocalStack(): Promise<LocalStack> {
         facilitator: facilitatorApi,
         allowance: createAllowanceControl({
           rpc: chain.network.rpc,
+          readRetry: READ_RETRY,
           newOwner: async (usdc) => {
             const owner = await newBuyer(chain.network.rpc, chain.keys.mintAuthority.signer, usdc);
             // A cheatcode sets the balance; the next slot makes it visible.
