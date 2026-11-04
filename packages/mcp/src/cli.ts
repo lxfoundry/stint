@@ -1,4 +1,4 @@
-import { createSessionTools, createStintClient } from "@lxfoundry/stint-client";
+import { createNodeRpc, createSessionTools, createStintClient } from "@lxfoundry/stint-client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { ConfigError, loadConfig } from "./config.js";
 import { createMcpServer } from "./server.js";
@@ -16,7 +16,12 @@ const CLOSE_LIMIT_MS = 90_000;
  */
 async function main(): Promise<void> {
   const config = await loadConfig(process.env);
-  const client = createStintClient({ signer: config.signer, policy: config.policy });
+  const client = createStintClient({
+    signer: config.signer,
+    policy: config.policy,
+    ...(config.allowance ? { allowance: config.allowance } : {}),
+    ...(config.rpcUrl ? { rpc: createNodeRpc(config.rpcUrl) } : {}),
+  });
   const { tools, closeAll } = createSessionTools(client);
 
   let leaving: Promise<void> | undefined;

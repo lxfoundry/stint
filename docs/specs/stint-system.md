@@ -268,6 +268,7 @@ sequenceDiagram
 ```
 programs/stint/            on-chain program (Anchor)
 packages/program-client/   generated client (Codama, @solana/kit)
+packages/subscriptions-client/  generated client of the Subscriptions & Allowances program (Codama, from its vendored IDL)
 packages/x402/             the elapsed scheme mechanism
 packages/gate/             gate middleware and core
 packages/client/           session runtime, tools, CLI
@@ -710,7 +711,10 @@ been submitted, so its payload is verified as any other.
 - **Simulation** (including inner instructions):
   - the transaction succeeds;
   - the fee payer is debited only the fee;
-  - the rent payer funds only the session and vault accounts, or a recreated `receiver_token`.
+  - the rent payer funds only the session and vault accounts, or a recreated `receiver_token`;
+  - for an open or a top-up, the vault receives exactly `amount` (`invalid_amount` otherwise): the token transfers into
+    it, less those out of it, among the instructions the transaction executes and those its programs invoke. A pull from
+    an allowance moves its tokens in an inner instruction (section 10.2).
 - **Blockhash:** still valid.
 - **Requirements:** compared with the requirements **issued by the resource server**, never with
   the client's echo of them.
@@ -1184,7 +1188,7 @@ The node's endpoint and key are configured in `.env`.
 | `store` (a `StateStore`: in-memory by default; file or custom) | Period budgets that survive restarts; sponsored recovery of sessions left open by a crash; a local audit log |
 | `rpc` | Checking refunds on-chain after close; finding orphaned sessions at startup; unilateral close |
 | SOL on the authority key | Unilateral close, independent of the gate and the facilitator |
-| Allowance funding (section 10) | Period caps enforced on-chain |
+| Allowance funding (section 10) | Period caps enforced on-chain; with `rpc`, the client checks the allowance before signing |
 
 ### 9.2 Policy
 
@@ -1289,13 +1293,16 @@ since a fee payer may not drop below it.
 ### 9.4 API
 
 ```ts
-const stint = createStintClient({ signer, policy, store?, rpc? });
+const stint = createStintClient({ signer, policy, store?, rpc?, allowance? });
 await using session = await stint.open(url, { seconds });
 const ws = await session.connect();
 await session.topUp({ seconds });
 const status = await session.status();   // from the gate's status endpoint, or the chain with `rpc`
 const receipt = await session.close();
 ```
+
+`allowance: { owner, nonce? }` funds every payment from that owner's allowance (section 10); `stint.funding` says which,
+and `stint.allowance()` reads it with `rpc`.
 
 ### 9.5 Tools
 
@@ -1307,6 +1314,7 @@ server.
 | `stint_open_session` | `url`, `seconds?`, `reason` | `sessionId`, `paidUntil`, cost, remaining budget |
 | `stint_session_status` | `sessionId` | `paidUntil`, `timeLeftSeconds`, `spent` (what closing now would pay the seller, the minimum included), `refundable` (what it would return) |
 | `stint_top_up` | `sessionId`, `seconds` | `paidUntil`, cost |
+| `stint_allowance` | — | what the agent pays with; for an allowance, the cap per period, pulled this period, left, when the period ends, the expiry, the owner's balance |
 | `stint_close_session` | `sessionId` | paid, refunded, transaction |
 | `stint_send` | `sessionId`, `message` | ok |
 | `stint_receive` | `sessionId`, `max?`, `timeoutSeconds`, `match?` | messages, or a timeout |
@@ -1322,7 +1330,11 @@ server.
 ### 9.6 MCP server
 
 `stint-mcp` serves the tools in section 9.5 over stdio. It is configured by environment variables:
-the key path, caps and allowlists.
+the key path, caps and allowlists, and optionally an allowance's owner and nonce
+(`STINT_ALLOWANCE_OWNER`, `STINT_ALLOWANCE_NONCE`) and a node (`STINT_RPC_URL`). A node's URL may carry an API key:
+a value that cannot be a node's URL (it is not an http or https URL, or it has user info) is refused without being
+quoted, and the node's errors carry none of the URL's user info, path, query or fragment: an error may still name its
+scheme and host.
 
 ### 9.7 Example agent
 
@@ -1351,14 +1363,25 @@ Foundation's Subscriptions & Allowances program (`De1egAFMkMWZSN5rYXRj9CAdheBamo
 ### 10.1 Setup
 
 ```
-stint allowance grant --agent <pubkey> --per-period <amount> --period <duration> --expires <date>
-stint allowance revoke
+stint allowance grant  --keypair <owner keypair file> --agent <address> --per-period <base units> --period <seconds> --expires <ISO 8601 date> [--nonce <n>]
+stint allowance revoke --keypair <owner keypair file> --agent <address> [--nonce <n>] [--close-authority]
+stint allowance status --owner <address> --agent <address> [--nonce <n>]
 ```
 
-The grant does two things, signed by the owner:
-1. it approves the program's Subscription Authority on the owner's USDC account;
-2. it creates a recurring delegation for the agent's key (amount per period, period length in
-   seconds, overall expiry).
+The grant is one transaction, signed by the owner, who pays its fee and the rent of the accounts it creates: the owner's
+Subscription Authority for the mint and the delegation, about 0.004 SOL together. It holds `initSubscriptionAuthority`,
+unless the owner's Subscription Authority for the mint exists (then the owner pays the delegation's rent alone), then
+`createRecurringDelegation` for the agent's key (amount per period, period length in seconds, an expiry), starting when
+the transaction lands. `revoke` closes the delegation, and `--close-authority` the owner's Subscription Authority too;
+their rent returns to the owner. The grant makes the Subscription Authority the SPL Token delegate of the owner's
+associated token account for the mint, so `--close-authority` closes it with `revokeSubscriptionAuthority` (the
+program's instruction 14), which first removes that approval from the token account and then closes the authority; the
+token account is left with no delegate and a delegated amount of 0, and its one delegate slot is free. Closing the
+authority alone (`closeSubscriptionAuthority`) would leave the approval in place.
+
+The command reads its node from `STINT_RPC_URL`, never from its arguments, since an RPC URL may carry an API key, and it
+prints none of the URL's user info, path, query or fragment: an error may still name its scheme and host. It sends to
+devnet only: it checks the node's genesis hash before any other call to the node.
 
 SPL Token allows one delegate per token account (S8), and refunds return to an associated token
 account, of which a wallet has exactly one per mint (section 4.1, S7). A dedicated owner wallet for
@@ -1367,10 +1390,22 @@ budget, and its single delegate slot serves only the agent.
 
 ### 10.2 Transactions
 
-The funding instruction in `open` and `topUp` (section 5.3) is one pull from the delegation:
+The funding instruction in `open` and `topUp` (section 5.3) is one `transferRecurring` (the program's instruction 5)
+from the delegation, in the same transaction as `stint.open` or `stint.top_up`:
 - from the owner's associated token account into the vault;
 - signed by the authority as delegate;
 - for exactly `amount`.
+
+Its data are the `amount`, the `delegator` (the owner) and the `mint`. Its nine accounts, in order:
+1. `delegationPda` (writable): the recurring delegation;
+2. `subscriptionAuthority`: the owner's Subscription Authority for the mint;
+3. `delegatorAta` (writable): the owner's associated token account;
+4. `receiverAta` (writable): the vault, which exists by then (the open creates it in the instruction before);
+5. `tokenMint`;
+6. `tokenProgram`: SPL Token;
+7. `delegatee` (signer): the session's authority;
+8. `eventAuthority`: the program's event authority, the PDA `["event_authority"]`;
+9. `selfProgram`: the Subscriptions program.
 
 In `open`, `refund_owner` is the owner, so refunds return to the owner's associated token account.
 
@@ -1379,18 +1414,28 @@ Facilitator checks:
 - the delegate is the session authority;
 - the destination is the vault;
 - the amount equals `amount`, in `asset`;
+- its `subscriptionAuthority` and `eventAuthority` are the canonical PDAs for its owner and mint;
+- `tokenProgram` is SPL Token;
+- it has exactly nine accounts;
+- its delegator is `refund_owner` (for a top-up, the stored one);
+- another instruction of the program (a fixed delegation's or a subscription's pull) is refused as
+  `unexpected_instruction`;
 - simulation confirms the vault receives exactly `amount`.
 
 ### 10.3 Behaviour
 
 - **Hard cap:** the per-period cap is enforced on-chain.
 - **Refunds return to the owner** but do not restore the period's allowance, so the cap bounds
-  what can be **locked** per period. The client reports locked and spent amounts per period.
+  what can be **locked** per period. The client reports, per period, the cap, what has been pulled (a refund does not
+  lower it), what is left, and when the period ends (`stint_allowance`).
 - **Revoking** stops new sessions and top-ups. Running sessions continue until they close.
 - **Exposure:** a compromised agent key can pull up to the period's cap, to any destination, until
   the delegation is revoked or expires.
 - **Without an `rpc`,** an exhausted allowance surfaces as a refused payment
   (`simulation_failed`). With an `rpc`, the client checks it before signing.
+- **A refusal by the program** names the cause in the message of the facilitator's `/verify` (the period's cap used up,
+  the delegation expired or not started). Its reason stays `simulation_failed`, which is all a gate passes on to the
+  client, so a client in allowance mode says what that reason can mean.
 
 ## 11. Failure handling
 
@@ -1448,8 +1493,8 @@ run is repeatable.
 
 | Target | What the harness starts | Network | Capabilities | Runs |
 |---|---|---|---|---|
-| `local` | Surfpool (embedded) and Kora, then the facilitator, the gate and the example resource from this repository | Surfpool, offline, with the fixtures of section 12.3 | Chain control, stack control, facilitator API | On every change, and in continuous integration on every push and pull request |
-| `devnet` | Kora, the facilitator, the gate and the example resource | Devnet, with the deployed program and a funding key (section 12.6) | Stack control, facilitator API | On demand. Never a merge gate: the public network is shared and rate-limited, and its faucets cannot be scripted |
+| `local` | Surfpool (embedded) and Kora, then the facilitator, the gate and the example resource from this repository | Surfpool, offline, with the fixtures of section 12.3 | Chain control, stack control, facilitator API, allowance | On every change, and in continuous integration on every push and pull request |
+| `devnet` | Kora, the facilitator, the gate and the example resource | Devnet, with the deployed program and a funding key (section 12.6) | Stack control, facilitator API, allowance | On demand. Never a merge gate: the public network is shared and rate-limited, and its faucets cannot be scripted |
 | `external` | Nothing: `stint-conformance` targets a running gate, and optionally a facilitator (section 12.6) | The target's own | Allowance, when declared (below). Every scenario that needs chain control also needs stack control, so none runs here | Against any implementation |
 
 **Capabilities.**
@@ -1466,9 +1511,9 @@ run is repeatable.
 - **Facilitator API:** the harness can call the facilitator's `/verify` with an API key (section 6.5). Always
   on `local` and `devnet`; on `external` only with `--facilitator` and `--facilitator-key`.
 - **Allowance:** the facilitator accepts an allowance pull as the funding instruction (section
-  10), an optional mode. The `local` and `devnet` targets have it once this repository's
-  facilitator supports allowance funding (section 14, question 3). On `external`,
-  `stint-conformance` assumes it only when given `--allowance`.
+  10), an optional mode. The `local` and `devnet` targets have it: the harness grants an allowance from a new owner
+  to a new agent key, and revokes it after. On `external`, `stint-conformance` assumes it only when given `--allowance`;
+  scenario 12 also needs the harness to grant an allowance (`ScenarioContext.allowance`), with an owner key it can fund.
 
 A scenario states the capabilities it needs (section 12.7). On a target that lacks one, it is
 reported as not applicable, not as failed.
@@ -1556,7 +1601,9 @@ Before the first scenario, the harness writes:
 - the Stint program, built from this repository, at its program ID;
 - the Subscriptions & Allowances program at its devnet address (section 10), from a copy cached
   outside version control. When the cache is empty, the copy is fetched from devnet before the
-  run starts and checked against a pinned hash, so the run itself stays offline;
+  run starts and checked against a pinned hash, so the run itself stays offline. The program's client
+  comes from its vendored IDL, and a real pull runs on the copy (scenario 12), which answers section 14,
+  question 6;
 - the common stack's keys, funded with SOL: Kora's fee payer, the rent payer, the receiver
   authorizer and the seller's wallet, whose associated token account is created. An own stack's
   keys are written the same way when it starts (section 12.2), and so are each scenario's buyer
@@ -1627,7 +1674,9 @@ itself):
   (S14), since some buyers hold no SOL. Before a run, and again after it, the harness cleans up: it
   closes every session still open, of the USDC mint, that one of its keys opened or paid the rent of, including
   those left open when a scenario stopped its stack or a run ended abnormally, and returns what its keys
-  hold to the funding key. A session that names one of its keys only as its receiver is reported and left
+  hold to the funding key. It also revokes the delegations those keys granted and closes their Subscription
+  Authorities, whose rent returns to them before their balances go back to the funding key. A session that
+  names one of its keys only as its receiver is reported and left
   alone: an open is signed by its `authority` and `rent_payer` only (section 4.3), so anyone may name the
   seller, for as long as they choose to pay for, and such a session is its opener's to close. A close is a
   `Standard` close (section 4.3) signed by the session's authority,

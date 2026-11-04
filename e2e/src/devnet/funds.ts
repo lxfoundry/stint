@@ -34,6 +34,7 @@ import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import { fetchSysvarClock } from "@solana/sysvars";
 import { USDC_DECIMALS, USDC_DEVNET_MINT } from "../fixtures/usdc.js";
 import { sendInstructions, type SendOptions } from "../network/transactions.js";
+import { revokeHeldAllowances } from "./allowances.js";
 
 /** The key the harness funds everything from, and its USDC account (spec §12.6). */
 export interface Funding {
@@ -297,8 +298,8 @@ export async function closeSessions(
 
 /**
  * Brings everything the `holders` keys have on the chain back to the funding key: closes their sessions,
- * then returns their USDC and SOL. Safe to run at any time and any number of times, after any run or
- * none. Sessions of a mint other than USDC that name a held key are reported as a note and left alone: they
+ * revokes the allowances they granted, then returns their USDC and SOL. Safe to run at any time and any number
+ * of times, after any run or none. Sessions of a mint other than USDC that name a held key are reported as a note and left alone: they
  * do not stop a start, and closing one would create accounts for a mint the harness does not hold. So are
  * sessions that name a held key only as their receiver: an outside key opened them, and they are its to close.
  * A balance that was read stale, of USDC or SOL, is read again once. Returns what went wrong; throws nothing.
@@ -330,6 +331,9 @@ export async function cleanUp(
     }
     const outcome = await closeSessions(rpc, funding, sessions, holders, options);
     for (const failure of outcome.failed) problems.push(`closing session ${failure.session}: ${failure.error}`);
+  });
+  await attempt("revoking allowances", async () => {
+    problems.push(...(await revokeHeldAllowances(rpc, scanRpc, funding.signer, holders, options)));
   });
   let held: Held[] = [];
   await attempt("reading what the keys hold", async () => {

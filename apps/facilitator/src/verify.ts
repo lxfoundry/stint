@@ -18,6 +18,12 @@ import {
   type Session,
 } from "@lxfoundry/stint-program-client";
 import {
+  SUBSCRIPTIONS_ERROR__AMOUNT_EXCEEDS_PERIOD_LIMIT,
+  SUBSCRIPTIONS_ERROR__DELEGATION_EXPIRED,
+  SUBSCRIPTIONS_ERROR__DELEGATION_NOT_STARTED,
+  SUBSCRIPTIONS_PROGRAM_ADDRESS,
+} from "@lxfoundry/stint-subscriptions-client";
+import {
   TOP_UP_MARGIN_SECONDS,
   X402_VERSION,
   associatedTokenAddress,
@@ -40,6 +46,7 @@ import {
 } from "@lxfoundry/stint-x402";
 import type { KoraClient } from "./kora.js";
 import { checkPayerFunding, executedInstructions, type Funding } from "./payers.js";
+import { vaultReceipt } from "./receipt.js";
 
 export interface FacilitatorContext {
   readonly rpc: Rpc<SolanaRpcApi>;
@@ -100,6 +107,8 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
   let funding: Funding = { destinations: [], budget: 0n };
   // The answer to a top-up past `maxSeconds`, whatever comes after, unless the simulation finds this message processed.
   let pastMaxSeconds: Verified | undefined;
+  // What the simulation must show the vault receiving: the payment's whole amount, from a transfer or a pull (spec §10.2).
+  let receipt: { vault: Address; amount: bigint } | undefined;
   if (elapsed.type === "open") {
     const check = await checkOpenTransaction(tx, requirements, ctx.keys);
     if (!check.ok) return check;
@@ -108,6 +117,7 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
       return refuse("invalid_terms", "payTo has no token account for the asset");
     }
     facts = { payer: check.value.authority, session: check.value.session };
+    receipt = { vault: check.value.vault, amount: BigInt(requirements.amount) };
     const [sessionRent, vaultRent] = await Promise.all([
       ctx.rpc.getMinimumBalanceForRentExemption(BigInt(getSessionSize())).send(),
       ctx.rpc.getMinimumBalanceForRentExemption(BigInt(getTokenSize())).send(),
@@ -131,6 +141,7 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
       pastMaxSeconds = refuse("invalid_amount", "the top-up would take the session past maxSeconds");
     }
     facts = { payer: stored.authority, session };
+    receipt = { vault: check.value.vault, amount: BigInt(requirements.amount) };
   } else {
     const found = await loadMatchingSession(ctx, requirements, "close");
     if (!found.ok) return found;
@@ -143,7 +154,7 @@ export async function verifyPayment(ctx: FacilitatorContext, payload: unknown, r
   const { value: valid } = await ctx.rpc.isBlockhashValid(blockhash(tx.blockhash), { commitment: "confirmed" }).send();
   if (!valid) return pastMaxSeconds ?? refuse("blockhash_expired", "the transaction's blockhash is no longer valid");
 
-  const simulated = await simulate(ctx, tx, funding);
+  const simulated = await simulate(ctx, tx, funding, receipt);
   if (pastMaxSeconds && (simulated.ok || simulated.reason !== "already_processed")) return pastMaxSeconds;
   if (!simulated.ok) return simulated;
   return { ok: true, type: elapsed.type, tx, ...facts };
@@ -174,9 +185,15 @@ async function loadMatchingSession(
  * Program instruction it would execute, its own and those its programs invoke, must respect the
  * payer rules of `checkPayerFunding`. The fee payer and the rent payer are system-owned wallets,
  * so only System Program instructions can debit them, and the fee is implicit. Reading the
- * instructions rather than balances keeps the check independent of concurrent settlements.
+ * instructions rather than balances keeps the check independent of concurrent settlements. It also checks that the vault
+ * receives exactly `amount` (spec §10.2): a pull from an allowance moves its tokens in an inner instruction.
  */
-export async function simulate(ctx: FacilitatorContext, tx: InspectedTransaction, funding: Funding): Promise<Check<null>> {
+export async function simulate(
+  ctx: FacilitatorContext,
+  tx: InspectedTransaction,
+  funding: Funding,
+  receipt?: { readonly vault: Address; readonly amount: bigint },
+): Promise<Check<null>> {
   const { value } = await ctx.rpc
     .simulateTransaction(tx.wire as Base64EncodedWireTransaction, {
       encoding: "base64",
@@ -191,23 +208,42 @@ export async function simulate(ctx: FacilitatorContext, tx: InspectedTransaction
     const message = `${json(value.err)} ${last}`.trim();
     // Only `top_up` raises it, from `paid_until` on (spec §4.3): the chain's clock had reached the end, though the
     // facilitator's had not.
-    if (programError(tx, value.err) === STINT_ERROR__SESSION_EXPIRED) return refuse("session_expired", message);
+    if (customErrorOf(tx, value.err, STINT_PROGRAM_ADDRESS) === STINT_ERROR__SESSION_EXPIRED) return refuse("session_expired", message);
     // The chain has processed this very message (S16): the payment may have landed, and this facilitator holds no record
     // of it, or it would not be verifying it (spec §5.5, "Already processed, with no record").
     if (value.err === "AlreadyProcessed") return refuse("already_processed", message);
+    const allowance = ALLOWANCE_REFUSALS.get(customErrorOf(tx, value.err, SUBSCRIPTIONS_PROGRAM_ADDRESS) ?? -1);
+    if (allowance) return refuse("simulation_failed", `${allowance}: ${message}`);
     return refuse("simulation_failed", message);
   }
-  return checkPayerFunding(executedInstructions(tx, value.innerInstructions), ctx.keys, funding);
+  const payers = checkPayerFunding(executedInstructions(tx, value.innerInstructions), ctx.keys, funding);
+  if (!payers.ok || receipt === undefined) return payers;
+  let received: bigint;
+  try {
+    received = vaultReceipt(tx, value.innerInstructions, receipt.vault);
+  } catch (error) {
+    // What the vault would receive cannot be told: refused, never assumed.
+    return refuse("invalid_amount", `what the vault would receive cannot be told: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (received !== receipt.amount) return refuse("invalid_amount", `the vault would receive ${received}, not ${receipt.amount}`);
+  return payers;
 }
 
 /**
- * The custom error code reported against one of the program's own instructions: its own error, or that of a program it
- * invoked.
+ * The custom error code reported against one of `program`'s instructions in the transaction: its own error, or that of a
+ * program it invoked.
  */
-function programError(tx: InspectedTransaction, err: TransactionError): number | undefined {
+function customErrorOf(tx: InspectedTransaction, err: TransactionError, program: Address): number | undefined {
   if (typeof err !== "object" || !("InstructionError" in err)) return undefined;
   // Kit's RPC returns the index and the code as bigints, though `TransactionError` types them as numbers.
   const [index, error] = err.InstructionError;
-  if (tx.instructions[Number(index)]?.programAddress !== STINT_PROGRAM_ADDRESS) return undefined;
+  if (tx.instructions[Number(index)]?.programAddress !== program) return undefined;
   return typeof error === "object" && "Custom" in error ? Number(error.Custom) : undefined;
 }
+
+/** What a refusal says when the allowance program refuses its pull (spec §10.3). The reason stays `simulation_failed`. */
+const ALLOWANCE_REFUSALS: ReadonlyMap<number, string> = new Map([
+  [SUBSCRIPTIONS_ERROR__AMOUNT_EXCEEDS_PERIOD_LIMIT, "the allowance for this period is used up"],
+  [SUBSCRIPTIONS_ERROR__DELEGATION_EXPIRED, "the allowance has expired"],
+  [SUBSCRIPTIONS_ERROR__DELEGATION_NOT_STARTED, "the allowance has not started yet"],
+]);

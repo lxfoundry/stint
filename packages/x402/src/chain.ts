@@ -108,8 +108,8 @@ export interface RecordedTransaction {
   readonly innerInstructions?: readonly { readonly instructions: readonly RecordedInstruction[] }[];
 }
 
-/** Token instructions that change a balance other than by a transfer, which the sum cannot account for. */
-const UNSUMMED: ReadonlySet<TokenInstruction> = new Set([
+/** Token instructions that change a balance other than by a transfer, which a sum of transfers cannot account for. */
+export const UNSUMMED_TOKEN_INSTRUCTIONS: ReadonlySet<TokenInstruction> = new Set([
   TokenInstruction.MintTo,
   TokenInstruction.MintToChecked,
   TokenInstruction.Burn,
@@ -149,7 +149,7 @@ export function tokenTransferChanges(transaction: RecordedTransaction): Map<Addr
       const parsed = type === TokenInstruction.Transfer ? parseTransferInstruction(instruction) : parseTransferCheckedInstruction(instruction);
       add(parsed.accounts.source.address, -parsed.data.amount);
       add(parsed.accounts.destination.address, parsed.data.amount);
-    } else if (UNSUMMED.has(type)) {
+    } else if (UNSUMMED_TOKEN_INSTRUCTIONS.has(type)) {
       throw new Error(`Token instruction ${TokenInstruction[type]} changes a balance without a transfer`);
     }
   }

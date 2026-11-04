@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
-import { createSessionTools, createStintClient } from "@lxfoundry/stint-client";
+import { createNodeRpc, createSessionTools, createStintClient } from "@lxfoundry/stint-client";
 import { ConfigError, loadConfig } from "@lxfoundry/stint-mcp";
 import { runAgent } from "./agent.js";
 
@@ -15,7 +15,13 @@ async function main(): Promise<void> {
   const missing = ["ANTHROPIC_API_KEY", "STINT_GATE_URL", "STINT_WATCH_ACCOUNT"].filter((name) => !process.env[name]?.trim());
   if (missing.length > 0) throw new Error(`Missing environment variables: ${missing.join(", ")}`);
   const config = await loadConfig(process.env);
-  const { tools, closeAll, closeCode } = createSessionTools(createStintClient({ signer: config.signer, policy: config.policy }));
+  const client = createStintClient({
+    signer: config.signer,
+    policy: config.policy,
+    ...(config.allowance ? { allowance: config.allowance } : {}),
+    ...(config.rpcUrl ? { rpc: createNodeRpc(config.rpcUrl) } : {}),
+  });
+  const { tools, closeAll, closeCode } = createSessionTools(client);
   const result = await runAgent({
     client: new Anthropic(),
     tools: { tools, closeAll, closeCode },

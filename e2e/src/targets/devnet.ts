@@ -1,11 +1,12 @@
 import { fetchMaybeToken } from "@solana-program/token";
 import { createSolanaRpc, type Rpc, type SolanaRpcApi } from "@solana/kit";
-import { describeError, type ScenarioContext, type StackControl, type Target } from "@lxfoundry/stint-conformance";
+import { describeError, type Buyer, type ScenarioContext, type StackControl, type Target } from "@lxfoundry/stint-conformance";
 import { createFacilitatorClient } from "@lxfoundry/stint-gate";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import { assertDevnet, assertProgramDeployed } from "../devnet/config.js";
 import { cleanUp, fundUsdcAccount, sendSol, type Funding } from "../devnet/funds.js";
 import { KEY_INDEX, deriveKey, deriveKeys, type DevnetKeys } from "../devnet/keys.js";
+import { GRANT_LAMPORTS, createAllowanceControl } from "../fixtures/allowance.js";
 import { sendUsdc } from "../fixtures/transfers.js";
 import { USDC_DEVNET_MINT } from "../fixtures/usdc.js";
 import { createDirectChain } from "./direct.js";
@@ -168,7 +169,7 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
   // The facilitator keeps its address when it restarts, so one client serves every context.
   const facilitatorApi = createFacilitatorClient(services.facilitator.url, services.facilitatorApiKey);
 
-  const target: Target = { name: "devnet", capabilities: new Set(["stack", "facilitatorApi"]) };
+  const target: Target = { name: "devnet", capabilities: new Set(["stack", "allowance", "facilitatorApi"]) };
   let nextBuyer = 0;
   let stopping: Promise<void> | undefined;
   /** What the run has lent its buyers from the funding key. It comes back only at the clean-up, so it must fit in what a start-up requires. */
@@ -178,6 +179,21 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
     const key = keys.buyers[nextBuyer++];
     if (!key) throw new Error(`The run used all ${keys.buyers.length} buyer keys: raise BUYER_POOL in e2e/src/devnet/keys.ts`);
     return key;
+  };
+  /**
+   * A buyer made of the next key of the pool, with `usdc` lent to its USDC account from the funding key. What the run has lent is
+   * checked and counted before anything is awaited, so that buyers made at the same time cannot all pass.
+   */
+  const lendToBuyer = async (usdc: bigint): Promise<Buyer> => {
+    if (lent + usdc > MINIMUM_FUNDS.usdc) {
+      throw new Error(
+        `The run has lent ${lent} USDC base units and this buyer asks for ${usdc} more: a run must stay within ${MINIMUM_FUNDS.usdc}, the least that a start-up requires. Fund a buyer with what its session costs.`,
+      );
+    }
+    lent += usdc;
+    const key = takeKey();
+    const usdcAccount = await fundUsdcAccount(rpc, funding, key.signer.address, usdc, send);
+    return { signer: key.signer, usdcAccount };
   };
   const control: StackControl = {
     rentPayer: services.facilitator.rentPayer,
@@ -210,24 +226,24 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
       target,
       gateUrl: services.stream.url,
       rpc,
-      newBuyer: async (usdc) => {
-        // Checked and counted before anything is awaited, so that buyers made at the same time cannot all pass.
-        if (lent + usdc > MINIMUM_FUNDS.usdc) {
-          throw new Error(
-            `The run has lent ${lent} USDC base units and this buyer asks for ${usdc} more: a run must stay within ${MINIMUM_FUNDS.usdc}, the least that a start-up requires. Fund a buyer with what its session costs.`,
-          );
-        }
-        lent += usdc;
-        const key = takeKey();
-        const usdcAccount = await fundUsdcAccount(rpc, funding, key.signer.address, usdc, send);
-        return { signer: key.signer, usdcAccount };
-      },
+      newBuyer: lendToBuyer,
       sendUsdc: (from, to, amount) => sendUsdc(rpc, funding.signer, from, to, amount, send),
       subscriptionSettleMs: SUBSCRIPTION_SETTLE_MS,
       readRetry: READ_RETRY,
       stack: control,
       direct,
       facilitator: facilitatorApi,
+      allowance: createAllowanceControl({
+        rpc,
+        readRetry: READ_RETRY,
+        send,
+        newOwner: async (usdc) => {
+          const owner = await lendToBuyer(usdc);
+          await sendSol(rpc, funding.signer, owner.signer.address, GRANT_LAMPORTS, send);
+          return owner;
+        },
+        newAgent: async () => takeKey().signer,
+      }),
       // From the funding key, to a buyer of the pool, whose SOL the clean-up returns.
       fundSol: async (owner, lamports) => {
         if (!keys.holders.has(owner)) throw new Error(`SOL goes only to a key of the pool, which the clean-up empties: ${owner} is not one`);

@@ -1,4 +1,5 @@
 import type {
+  AllowanceOutput,
   CloseAllOutput,
   CloseInput,
   CloseOutput,
@@ -102,6 +103,7 @@ function setup(options: { balance?: bigint; stateReadCapMs?: number; launchSecon
         paidUntil += 100;
         return { paidUntil, cost: "100000" };
       }),
+      stint_allowance: tool<Record<string, never>, AllowanceOutput>("stint_allowance", async () => ({ funding: "own" })),
       stint_send: tool<SendInput, { ok: true }>("stint_send", async (input) => {
         sent.push(input.message);
         if (behave.hangSend) await new Promise<never>(() => {});
