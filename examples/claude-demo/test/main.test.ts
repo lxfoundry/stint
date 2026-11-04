@@ -45,6 +45,7 @@ function fakeTools(sessionId: string): SessionTools {
       stint_top_up: tool(async () => {
         throw new Error("not used by this test");
       }),
+      stint_allowance: tool(async () => ({ funding: "own" as const })),
       stint_send: tool(async () => ({ ok: true as const })),
       stint_receive: tool(async () => ({ messages: [], timedOut: true })),
       stint_close_session: tool(async () => {
