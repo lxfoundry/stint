@@ -44,8 +44,10 @@ export async function otherMintRefused(context: ScenarioContext): Promise<void> 
 
     // Each connect is tried again while the gate answers 404: its node can answer from behind right after the open.
     const first = await connectOnceSeen(context, () => sign("connect"), session);
+    first.socket?.terminate(); // a connect the gate accepts is not a refusal, and its socket is not left open
     expectEqual(first.status, 403, "a connect for a session in another mint is refused with 403");
     const second = await connectOnceSeen(context, () => sign("connect"), session);
+    second.socket?.terminate();
     expectEqual(second.status, 403, "a second connect is refused with 403 too");
     // The gate tracks a session it adopted, and would answer a close request for it.
     expectEqual((await closeWith(context.gateUrl, session, await sign("close"))).status, 404, "the gate has no such session to close: it adopted nothing");

@@ -19,8 +19,11 @@ export async function tokenRefusals(context: ScenarioContext): Promise<void> {
   const session = await buyerClient(buyer).open(context.gateUrl, { seconds: sessionSeconds(context.target, 20) });
   const sign = (purpose: "connect" | "close", options: { readonly nowMs?: number; readonly audience?: string } = {}) =>
     tokenFor(buyer.signer, context.gateUrl, session.id, purpose, options);
-  const refused = async (token: string, what: string) =>
-    expectEqual((await connectWith(context.gateUrl, session.id, token)).status, 401, what);
+  const refused = async (token: string, what: string) => {
+    const answer = await connectWith(context.gateUrl, session.id, token);
+    answer.socket?.terminate(); // a connect the gate accepts is not a refusal, and its socket is not left open
+    expectEqual(answer.status, 401, what);
+  };
 
   await refused(await sign("connect", { nowMs: Date.now() - LONG_AGO_MS }), "a connect with an expired token is refused");
   await refused(await sign("connect", { audience: "https://elsewhere.invalid" }), "a connect with a token for another audience is refused");
