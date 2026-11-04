@@ -128,13 +128,15 @@ describe("the devnet target, run against the local network", () => {
   it("passes a scenario for each part of the context it provides, with buyers funded from the funding key", async () => {
     // One required scenario for each part of the scenarios' context that the devnet target provides in its own way. Every
     // scenario draws its buyers from the pool; 15 opens and closes sessions straight on the program and reads the rent
-    // payer; 19 calls the facilitator's API; 22 sends USDC; 25 funds a key with SOL, and stops and starts the gate and the
-    // facilitator; 34 tops a session up straight on the program, and starts the gate with options. A scenario that comes
+    // payer; 12 grants and revokes an allowance, whose owner and agent come from the pool; 19 calls the facilitator's API;
+    // 22 sends USDC; 25 funds a key with SOL, and stops and starts the gate and the facilitator; 34 tops a session up
+    // straight on the program, and starts the gate with options. A scenario that comes
     // to use a part that none of these uses joins the list. `pnpm e2e:devnet` runs every scenario on devnet itself.
-    // That every scenario together fits what a devnet run lends and its key pool is checked by `pnpm e2e:local`, which counts both.
+    // That every scenario together fits what a devnet run lends and its key pool is checked by `pnpm e2e:local`, which counts
+    // both, the buyers, the direct sessions and the allowances alike.
     // The local network reports a subscription's slot, not the change's (T6): scenario 22 asserts on the slot only when the
     // target is named devnet, so the scenarios run here under the local name. Together they take about a minute.
-    const covering = [15, 19, 22, 25, 34];
+    const covering = [12, 15, 19, 22, 25, 34];
     const asLocal: Target = { name: "local", capabilities: stack.target.capabilities };
     const outcomes = await runScenarios(
       catalogue.filter((scenario) => covering.includes(scenario.id)),
