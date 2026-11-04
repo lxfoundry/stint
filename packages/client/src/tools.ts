@@ -67,6 +67,22 @@ export interface TopUpOutput {
   readonly cost: string;
 }
 
+/** Amounts in base units; times in Unix seconds, on the chain's clock. */
+export interface AllowanceOutput {
+  readonly funding: "own" | "allowance";
+  readonly owner?: string;
+  /** `none`: the owner has granted no such allowance, or has revoked it. */
+  readonly status?: "active" | "expired" | "notStarted" | "none";
+  readonly perPeriod?: string;
+  /** Pulled in the current period. A refund does not lower it. */
+  readonly pulledThisPeriod?: string;
+  readonly leftThisPeriod?: string;
+  readonly periodEndsAt?: number;
+  /** Absent for an allowance that never expires. */
+  readonly expiresAt?: number;
+  readonly ownerBalance?: string;
+}
+
 export interface CloseAllOutput {
   readonly closed: string[];
   readonly failed: { readonly sessionId: string; readonly error: string }[];
@@ -77,6 +93,7 @@ export interface SessionTools {
     readonly stint_open_session: Tool<OpenInput, OpenOutput>;
     readonly stint_session_status: Tool<StatusInput, StatusOutput>;
     readonly stint_top_up: Tool<TopUpInput, TopUpOutput>;
+    readonly stint_allowance: Tool<Record<string, never>, AllowanceOutput>;
     readonly stint_send: Tool<SendInput, { ok: true }>;
     readonly stint_receive: Tool<ReceiveInput, ReceiveOutput>;
     readonly stint_close_session: Tool<CloseInput, CloseOutput>;
@@ -280,6 +297,30 @@ export function createSessionTools(client: StintClient): SessionTools {
           if (state.closed || state.closing) throw new ToolError("The session is closed");
           const receipt = await state.session.topUp({ seconds: input.seconds });
           return { paidUntil: receipt.paidUntil, cost: receipt.cost.toString() };
+        },
+      },
+      stint_allowance: {
+        name: "stint_allowance",
+        description:
+          "Reports what this agent pays with: its own USDC, or an allowance that an owner granted it on the Solana Foundation's Subscriptions & Allowances program. For an allowance: the cap per period, what has been pulled this period, what is left and when the period ends. The cap is enforced on-chain. Refunds go back to the owner, but do not restore the period's allowance.",
+        inputSchema: strict({}, []),
+        async run() {
+          if (client.funding.kind === "own") return { funding: "own" };
+          const report = await client.allowance();
+          if (!report) return { funding: "allowance", owner: client.funding.owner };
+          const period = report.period;
+          if (!period) return { funding: "allowance", owner: report.owner, status: "none", ownerBalance: report.ownerBalance.toString() };
+          return {
+            funding: "allowance",
+            owner: report.owner,
+            status: period.status,
+            perPeriod: period.perPeriod.toString(),
+            pulledThisPeriod: period.pulled.toString(),
+            leftThisPeriod: period.available.toString(),
+            periodEndsAt: Number(period.periodEnd),
+            ...(period.expiresAt === 0n ? {} : { expiresAt: Number(period.expiresAt) }),
+            ownerBalance: report.ownerBalance.toString(),
+          };
         },
       },
       stint_send: {

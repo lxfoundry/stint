@@ -300,10 +300,19 @@ importers:
       '@lxfoundry/stint-program-client':
         specifier: workspace:*
         version: link:../program-client
+      '@lxfoundry/stint-subscriptions-client':
+        specifier: workspace:*
+        version: link:../subscriptions-client
       '@lxfoundry/stint-x402':
         specifier: workspace:*
         version: link:../x402
+      '@solana-program/token':
+        specifier: 0.18.0
+        version: 0.18.0(@solana/kit@8.5.0(typescript@7.0.2))
       '@solana/kit':
+        specifier: 8.5.0
+        version: 8.5.0(typescript@7.0.2)
+      '@solana/sysvars':
         specifier: 8.5.0
         version: 8.5.0(typescript@7.0.2)
       ws:

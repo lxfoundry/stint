@@ -63,6 +63,7 @@ function fakeTools(calls: string[], failing?: string): SessionTools {
       stint_open_session: tool("stint_open_session", { sessionId: "S1", paidUntil: 1, cost: "120000", remainingBudget: "880000" }),
       stint_session_status: tool("stint_session_status", { paidUntil: 1, timeLeftSeconds: 100, spent: "5000", refundable: "115000" }),
       stint_top_up: tool("stint_top_up", { paidUntil: 2, cost: "10000" }),
+      stint_allowance: tool("stint_allowance", { funding: "own" }),
       stint_send: tool("stint_send", { ok: true }),
       stint_receive: tool("stint_receive", { messages: [{ type: "account", slot: "42" }], timedOut: false }, receiveSchema),
       stint_close_session: tool("stint_close_session", { paid: "5000", refunded: "115000", transaction: "sig" }),
@@ -96,6 +97,7 @@ describe("runAgent", () => {
     expect(first.body.fallbacks).toBe("default");
     expect(first.headers.get("anthropic-beta")).toContain("server-side-fallback-2026-07-01");
     expect(first.body.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
+      "stint_allowance",
       "stint_close_session",
       "stint_open_session",
       "stint_receive",
