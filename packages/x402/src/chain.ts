@@ -255,6 +255,24 @@ export async function readUntilFound<T>(read: () => Promise<T | null | undefined
 }
 
 /**
+ * Whether a transaction is confirmed, from its signature status: true at `confirmed` or `finalized`. Throws
+ * `TransactionFailedError` if it landed with an error, and the RPC's error if the read fails. A node keeps recent
+ * statuses only for a while after the transaction's blockhash; with `searchTransactionHistory`, it also looks in its
+ * transaction history, for a transaction that may have landed longer ago.
+ */
+export async function readConfirmation(
+  rpc: Rpc<SolanaRpcApi>,
+  signature: string,
+  options: { readonly searchTransactionHistory?: boolean } = {},
+): Promise<boolean> {
+  const config = options.searchTransactionHistory ? { searchTransactionHistory: true } : undefined;
+  const { value } = await rpc.getSignatureStatuses([toSignature(signature)], config).send();
+  const status = value[0];
+  if (status?.err) throw new TransactionFailedError(signature, status.err);
+  return status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized";
+}
+
+/**
  * Waits for `confirmed`. Throws `TransactionFailedError` if the transaction failed, and the RPC's
  * error if a read fails. Returns `expired` once its blockhash is no longer valid and one last
  * status read finds nothing (spec §7.1), and `pending` at the timeout.
@@ -265,12 +283,7 @@ export async function waitForConfirmation(
   blockhash: string,
   timeoutMs = 30_000,
 ): Promise<Confirmation> {
-  const read = async () => {
-    const { value } = await rpc.getSignatureStatuses([toSignature(signature)]).send();
-    const status = value[0];
-    if (status?.err) throw new TransactionFailedError(signature, status.err);
-    return status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized";
-  };
+  const read = () => readConfirmation(rpc, signature);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await read()) return "confirmed";

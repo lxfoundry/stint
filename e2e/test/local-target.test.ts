@@ -4,10 +4,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startLocalStack, type LocalStack } from "../src/targets/local.js";
 
 /**
- * The required scenarios, all passing on `local`. Together they take about three minutes: scenario 1 sleeps 7 s, 3 runs
- * about 25 s, 4 about 35 s, 7 about 3 s, 9 about 15 s, 16 about 15 s, 24 about 9 s, 25 about 20 s, 26 about 20 s and 34 about 35 s, so the test's limit is generous.
+ * The required scenarios, all passing on `local`. Together they take a little over three minutes, scenarios 4 and 34
+ * about 30 s each and every other one under 20 s, so the test's limit of nine minutes is generous.
  */
-const REQUIRED = [1, 2, 3, 4, 7, 9, 15, 16, 22, 24, 25, 26, 34];
+const REQUIRED = [1, 2, 3, 4, 5, 6, 7, 9, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 32, 34];
 
 describe("local target", () => {
   let stack: LocalStack;
@@ -49,6 +49,12 @@ describe("local target", () => {
     // One of each per stack: every context it makes shares them.
     expect(stack.context().stack).toBe(context.stack);
     expect(stack.context().direct).toBe(context.direct);
+    expect(stack.context().facilitator).toBe(context.facilitator);
+    // The stack's API key is accepted: the payload is judged, not refused as unauthorised.
+    expect(await context.facilitator!.verify({ x402Version: 1, accepted: {} as never, payload: {} }, {} as never)).toMatchObject({
+      isValid: false,
+      invalidReason: "invalid_x402_version",
+    });
 
     await context.stack!.stopGate();
     await context.stack!.startGate();

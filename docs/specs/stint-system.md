@@ -621,7 +621,8 @@ Network identifiers: devnet `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`, mainnet
   - for a top-up, 1…(`maxSeconds` − ⌈`deposited` ÷ `rate`⌉), the most that keeps
     `deposited + rate × seconds` within `rate × maxSeconds` (§5.4); `minSeconds` does not apply.
 - A duration outside these bounds is refused with `400 invalid_duration`, with the bounds stated
-  in the body.
+  in the body. A top-up request that carries its payment is the exception: the gate leaves the fit
+  to the deposit to the facilitator (section 7.1).
 - **A client cannot deposit more than the `amount` of the entry it accepts.** To pay more it asks
   for a longer duration, picks a longer entry, or tops up.
 
@@ -688,8 +689,9 @@ settles, the facilitator records which API key it came through.
 
 `/verify` MUST be read-only: it simulates and never submits.
 
-**A payload whose message this facilitator has claimed or recorded** (a retry: see Idempotency in
-section 5.5) is not verified again. `/verify` answers from its record.
+**A payload whose message this facilitator has recorded** (a retry: see Idempotency in section 5.5) is not verified
+again: `/verify` answers from its record. A message that is only claimed, its transaction not recorded yet, has not
+been submitted, so its payload is verified as any other.
 
 **Every type:**
 
@@ -698,6 +700,9 @@ section 5.5) is not verified again. `/verify` answers from its record.
   exactly.
 - **Fee payer:** it is `feePayer`, the first account, unsigned (S14).
 - **Facilitator keys:** the fee payer and the rent payer appear only where section 5.3 allows.
+  The fee-payer and facilitator-key checks come before the per-type checks of the transaction
+  (below), so that a transaction that breaks both is refused `payer_misuse`. For a `topUp` or a
+  `close`, the checks of the session it names, which is read first, come before them.
 - **Allowed programs:** compute budget, associated token account, SPL Token, Stint, and the
   allowance program (section 10).
 - **Simulation** (including inner instructions):
@@ -713,7 +718,7 @@ section 5.5) is not verified again. `/verify` answers from its record.
 | Type | Checks |
 |---|---|
 | `open` | The `stint.open` terms equal `extra` (`rate`, `minSeconds`, `maxSeconds`), and `receiver_authorizer` equals `extra.receiverAuthorizer`. `receiver` is `payTo`, and its associated token account for `asset` exists. `refund_owner` owns the associated token account the funding comes from. `rent_payer` is `rentPayer`. The funding moves **exactly `amount`** of `asset` into the vault. The authority signed |
-| `topUp` | The session exists and its terms match the gate's offer. The signer is its `authority`. `paid_until` is at least 10 s away on the facilitator's clock, so the transaction lands before the end (`session_expired` otherwise). The funding moves exactly `amount` of the session's mint into its vault, from the associated token account of its stored `refund_owner`, so that a refund goes back to the account the money came from. The total stays within `maxSeconds` (`invalid_amount` otherwise). The rent payer appears nowhere: a top-up creates no account |
+| `topUp` | The session exists and its terms match the gate's offer. The signer is its `authority`. `paid_until` is at least 10 s away on the facilitator's clock, so the transaction lands before the end (`session_expired` otherwise). The funding moves exactly `amount` of the session's mint into its vault, from the associated token account of its stored `refund_owner`, so that a refund goes back to the account the money came from. The total stays within `maxSeconds` (`invalid_amount` otherwise, unless the simulation reports the message already processed: a top-up that landed is already in the deposit, and is answered `already_processed`). The rent payer appears nowhere: a top-up creates no account |
 | `close` (from the gate, through `/settle`) | The session exists and its terms match the requirements. The `closer` is its `receiver_authorizer` |
 | `close` (sponsored, through `closeUrl`) | The session exists, in an account the program owns (else `unknown_session`), and its `rent_payer` is one of this facilitator's keys (else `invalid_terms`). The `closer` is its `authority` (else `invalid_payload`), and `kind` is `Standard` or `AtExpiry` (else `invalid_terms`). The payload, `accepted` and requirements checks do not apply: the request carries only the transaction. The fee-payer, facilitator-key, program, layout, simulation and blockhash checks do, and the rent payer funds nothing |
 
@@ -745,7 +750,13 @@ it is used.
 4. Kora signs as fee payer.
 5. Complete the record (see Idempotency), then submit the transaction and wait for `confirmed`.
 
-If step 2, 3 or 4 refuses the payload, the claim is released.
+If step 2, 3 or 4 refuses the payload, or fails, the claim is released. So is it when the node refuses the
+transaction at its first submission with an error that a node returns before it forwards a transaction (a failed
+preflight, a signature that does not verify, an unhealthy node, invalid parameters): it did not take the transaction.
+A node that reports it already processed has it (S16): its outcome is read by its ID. After any other failure to
+submit, such as a request with no answer or another error, which a proxy can return after forwarding, the node may have
+taken the transaction: the facilitator waits for its outcome as for one it submitted, keeps the record, and answers
+`settlement_pending` while the outcome is unknown.
 
 The response follows x402 v2:
 - `success`, `transaction`, `network`;
@@ -753,7 +764,9 @@ The response follows x402 v2:
 - `amount`: for `open` and `topUp`, the amount deposited; for `close`, `owed + redirected` from
   the `Closed` event, which is what this transaction paid the receiver. It leaves out earlier
   claims, which the gate's `paid` adds (below);
-- `settlement_pending` is a non-final `errorReason`, accompanied by a non-empty `transaction`.
+- `settlement_pending` is a non-final `errorReason`, accompanied by a non-empty `transaction`. The one exception needs
+  a store shared by instances: an instance that finds the message claimed by another, which has not recorded its
+  transaction yet, has no transaction to give, and answers with an empty one.
 
 Servers MUST derive the payer from the signed transaction, not from the response.
 
@@ -781,23 +794,27 @@ twice. The facilitator recognises a retry from its own records:
   with, and, once known, its outcome. All of the facilitator's instances share these records, in
   a store that survives restarts (section 6.5).
 - **How a retry is answered.** A payload whose message is claimed or recorded, and that comes with
-  the same API key and the same requirements, is answered from that record. "The same
-  requirements" leaves out the advisory fields that a fresh offer changes: `maxTimeoutSeconds`,
-  `extra.recentBlockhash` and `extra.lastValidBlockHeight`. Every field the transaction is
-  checked against must match. Nothing is verified, signed or
-  submitted again: the message is the one being, or already, settled.
+  the same API key and the same requirements, is a retry. "The same requirements" leaves out the
+  advisory fields that a fresh offer changes: `maxTimeoutSeconds`, `extra.recentBlockhash` and
+  `extra.lastValidBlockHeight`. Every field the transaction is checked against must match. Once its
+  transaction is recorded, a retry is answered from that record: nothing is verified, signed or
+  submitted again, since the message is the one being, or already, settled. A message that is only
+  claimed, its transaction not recorded yet, has not been submitted: `/verify` verifies its payload
+  as any other, and a `/settle` of it is a duplicate in flight (below).
   - `/verify` reports it valid while its settlement is pending or has succeeded. Otherwise it
     reports the recorded failure: `blockhash_expired` for a transaction that never landed, and
     `simulation_failed` for one that landed with an error.
-  - `/settle` reports the recorded outcome, or `settlement_pending` while there is none yet. If
-    the transaction was submitted but its outcome is not known, it first looks the transaction
-    up by its ID. If the transaction has not landed and its blockhash is still valid, it submits
-    the recorded transaction again, which S16 makes safe.
+  - `/settle` reports the recorded outcome, or `settlement_pending` while there is none yet. A
+    duplicate that reaches the instance settling its message, while that settlement runs, waits for
+    it and gets its answer. If the transaction was submitted but its outcome is not known, it first
+    looks the transaction up by its ID, in the node's transaction history as well as its recent
+    statuses, since a record outlives them. If the transaction has not landed and its blockhash is
+    still valid, it submits the recorded transaction again, which S16 makes safe.
 - **A repeated submission.** Submitting the recorded transaction again either returns the same
   ID, since the bytes are identical, or is refused with `AlreadyProcessed` because the first
   submission has landed (S16). Either way, the facilitator then reads the outcome by that ID.
 - **Already processed, with no record.** The chain can report a message as already processed
-  (`AlreadyProcessed`, in simulation or at submission) for which the facilitator holds no record,
+  (`AlreadyProcessed`, in simulation) for which the facilitator holds no record,
   for example after a store failure. The payload is then not refused: it is answered with
   `already_processed`, a non-final reason (section 5.4). The payment may have landed, so the gate
   and the client watch the chain (sections 7.1 and 9.3).
@@ -838,7 +855,7 @@ One endpoint for buyers, without an API key:
 | Endpoint | Behaviour |
 |---|---|
 | `GET /close` (the `closeUrl`) | What a client needs to build a close without access to a Solana node: `{feePayer, recentBlockhash, lastValidBlockHeight, blockHeight, programId}`, read at most a few seconds before the request (see below), with `lastValidBlockHeight` and `blockHeight` as decimal strings. `blockHeight` is read at `confirmed`, and also tells a client without node access when one of its own transactions can no longer land (section 9.3). With `?session=<address>`, also `session`: the session's `address` and its stored fields (section 4.1) other than `version` and `bump`, with `u64` values as decimal strings, `u32` values as numbers and `startedAt` in Unix seconds; or `404 {error: "unknown_session"}` if no account of the program exists at that address (no session was opened there, or it has closed) |
-| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and settled as in section 5.5. Returns `200 {success: true, transaction, paid, refunded}`, with `paid` = `claimed + owed + redirected` from the `Closed` event, as for the gate, or `200 {success: true, transaction}` when the close is confirmed but its `Closed` event cannot be read. A refusal or a failure is `200 {success: false, errorReason, errorMessage, transaction}`, with a reason of section 5.4 or 5.5, and `errorMessage` when there is one; `transaction` is empty when the close was refused before it was submitted, and otherwise carries its signature, also when the node rejected it (`simulation_failed`) or when it may still land (`settlement_pending`). While a sponsored close of a session is being settled, another sponsored close of the same session that passes verification is not submitted: it gets that close's answer. A body that is not JSON is `400 {error: "invalid_json"}` |
+| `POST /close` (the `closeUrl`) | The **sponsored close**. Body: `{transaction}`, a `close` transaction signed by the session's authority. Accepted only for sessions whose `rent_payer` is one of this facilitator's keys. Verified as in section 5.4 (sponsored row) and submitted as in section 5.5, steps 4 and 5, without a settlement record: once a close of the session has landed, its account is gone, so the same close sent again is refused at verification (`unknown_session`), which the client reads as a closed session (section 9.3). Returns `200 {success: true, transaction, paid, refunded}`, with `paid` = `claimed + owed + redirected` from the `Closed` event, as for the gate, or `200 {success: true, transaction}` when the close is confirmed but its `Closed` event cannot be read. A refusal or a failure is `200 {success: false, errorReason, errorMessage, transaction}`, with a reason of section 5.4 or 5.5, and `errorMessage` when there is one; `transaction` is empty when the close was refused before it was submitted, and otherwise carries its signature, also when the node rejected it (`simulation_failed`) or when it may still land (`settlement_pending`). While a sponsored close of a session is being settled, another sponsored close of the same session that passes verification is not submitted: it gets that close's answer. A body that is not JSON is `400 {error: "invalid_json"}` |
 
 Both are rate-limited per session and per client address. `GET` serves a blockhash cached for a few
 seconds, so unauthenticated requests do not each reach the node.
@@ -903,7 +920,7 @@ A Docker Compose stack: the facilitator, Kora and a configuration template.
 
 | Setting | Meaning |
 |---|---|
-| `RPC_URL`, `NETWORK`, `PROGRAM_ID` | Where and what to settle |
+| `RPC_URL`, `NETWORK`, `PROGRAM_ID` | Where and what to settle. `RPC_URL` reaches a node, or a proxy that does not send a `sendTransaction` on to another backend: a node's refusal before forwarding, returned after another backend has forwarded the same transaction, would release the claim and answer as refused a payment that can still land (section 5.5) |
 | Key paths | Fee-payer and rent-payer keys |
 | API keys | One per resource server; REQUIRED on `/verify` and `/settle` by default |
 | Limits per API key | Open sessions, rent fronted, recreated receiver accounts, and the session horizon: offers with a `maxSeconds` above the cap (default 86,400 s) are refused |
@@ -922,8 +939,8 @@ sessions it opens with itself. The API key and the limits per key bound that.
 
 | Endpoint | Purpose | Responses |
 |---|---|---|
-| `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `202 {session, transaction}` while the settlement is pending; `400 invalid_duration` |
-| `POST /sessions/:id/top-up?seconds=N` | Top up | `402` (offers for this session; once the end timer has fired, or when the facilitator answers `session_expired`, the reason `session_expired` with offers for a new session); `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `400 invalid_duration`; `404` for a session this gate does not track |
+| `POST /sessions?seconds=N` | Open | `402` (offers); `201 {session, paidUntil, wsUrl}`; `202 {session, transaction}` while the settlement is pending; `503 already_processed` (the payment may have landed: below); `400 invalid_duration` |
+| `POST /sessions/:id/top-up?seconds=N` | Top up | `402` (offers for this session; once the end timer has fired, or when the facilitator answers `session_expired`, the reason `session_expired` with offers for a new session); `200 {paidUntil}`; `202 {transaction}` while the settlement is pending; `503 already_processed` (the payment may have landed: below); `400 invalid_duration` (for a request that carries a payment, the duration is checked only against 1…`maxSeconds`, not against the deposit: a payment sent again after it landed is already in the deposit, and is answered from the facilitator's record, and the facilitator refuses a new one that does not fit with `invalid_amount`. A refused payment is answered `400` too, with the deposit's bounds, as the request for offers is, when none of the durations the request names fits the deposit, its `seconds` or else the seller's menu, which leaves nothing to offer); `404` for a session this gate does not track, and after a top-up settled when the session, read once the chain shows its transaction, is gone or holds another session (section 7.3); `502` after a top-up settled when the node does not show its transaction within the gate's reads (section 7.3) |
 | `POST /sessions/:id/close` | Normal close, with a `close` token | `200 {paid, refunded, transaction}`, or `200 {transaction}` when the close is confirmed but its `Closed` event cannot be read; `202 {transaction}` while the settlement is pending (the client polls the status until `404`, for at most `closeWaitSeconds`: section 9.3); `401`; `404`; `409 refund_account_closed` (the buyer's `refund_to` is closed and the close would pay it) |
 | `GET /sessions/:id` | Status from the chain, public like the chain. Body: `session`, `paidUntil`, `startedAt`, `deposited`, `claimed`, `rate`, `minSeconds`, `maxSeconds`, a fresh `blockhash` with its `lastValidBlockHeight`, and, as estimates at the gate's session clock (section 7.3), `timeLeft`, `earned` (section 4.2), `due` (what a close then charges in total) and `refundable` (`deposited - max(claimed, due)`). `u64` values are decimal strings. The chain's clock decides the amounts (section 4.2). It works for a session the gate does not track yet. It reads the chain on every call and is not authenticated: a deployment rate-limits it like any public route | `200`; `404` for an address that holds no session, or a session with other terms (section 4.6) |
 | `GET /sessions/:id/ws` | WebSocket upgrade, with a `connect` token | Upgrade; `401`; `402` (the session has ended or is within the margin of its end: offers for a new session); `403`; `404`; `503` |
@@ -997,6 +1014,7 @@ not a connection is live.
 |---|---|---|
 | Open settled | Read the session at `confirmed`. If its account is gone (a repeated payment answered after the session closed), answer `404` and do nothing more. Otherwise `provision()`; subscribe; start the idle timer and the end timer | — |
 | An open settled again for a session this gate already tracks (a retried or repeated payment). With several instances, this is decided gate-wide (section 7.8) | Answer `201` with the session's current state. No `provision()`, and no timer is touched | — |
+| A top-up settled for a session this gate tracks, the first time or again (a retried or repeated payment, answered from the facilitator's record) | Read the session at `confirmed` once the chain shows the settlement's transaction, from a node at or past its slot, asking again for a few reads while it does not. The end comes from that read, never from the deposit read before the payment plus the amount, which already holds a payment settled again. The end timer moves only if that end is later than the one the gate knows, and the `200` answers the later of the two. If the account is gone, or holds another session, answer `404`, and nothing more: the session ends as it would have without the top-up. If the node still does not show the transaction after those reads, answer `502`, which a client treats as any `5xx` after paying (section 9.3): the subscription, or the end timer's re-read, finds the later end | — |
 | `provision()` fails | Treated as a resource outage: close | `WaiveMinimum` |
 | Connect for a session this gate has not seen (opened directly on-chain, passing every check of section 7.2, including the mint, and with this gate's receiver authorizer) | Adopt it as if its open had just settled, then accept the connection | — |
 | Connection accepted | `attach()`; stop the idle timer | — |
@@ -1673,6 +1691,8 @@ section 12.2.
 - A remote-browser resource. The adapter interface supports it.
 - The `exact` fallback entry. It is specified in section 5.6.
 - A shared hosted facilitator. The image makes it a deployment.
+- A store for settlement records that survives restarts and is shared by the facilitator's instances (section 6.5). The
+  facilitator takes one through its interface; this repository has only the in-memory one, which a restart empties.
 - Token-2022 mints.
 - Mainnet deployment.
 - A facilitator fee paid by the buyer.

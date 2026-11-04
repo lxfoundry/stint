@@ -273,6 +273,15 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     sendPaymentRequired(response, `${config.origin}/sessions`, durations.map((seconds) => buildOpenOffer({ ...base, seconds })), error);
   }
 
+  /**
+   * The facilitator answered `already_processed` (spec §5.4): the chain has processed the payment's message and the
+   * facilitator holds no record of it, so the payment may have landed. That is not a refusal: `503`, never `402`, which
+   * would tell the client that nothing was charged (spec §7.1).
+   */
+  function mayHaveLanded(response: ServerResponse, body: Record<string, unknown> = {}, headers?: Record<string, string>): void {
+    sendJson(response, 503, { error: "already_processed", ...body }, headers);
+  }
+
   /** The session the payload's `stint.open` creates, read from the transaction itself. */
   function sessionOpenedBy(payload: PaymentPayload): Address | undefined {
     const elapsed = readElapsedPayload(payload);
@@ -588,7 +597,10 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     });
 
     const verified = await upstream(() => config.facilitator.verify(payload, requirements));
-    if (!verified.isValid) return paymentRequired(response, durations, verified.invalidReason ?? "invalid_payload");
+    if (!verified.isValid) {
+      if (verified.invalidReason === "already_processed") return mayHaveLanded(response, { session });
+      return paymentRequired(response, durations, verified.invalidReason ?? "invalid_payload");
+    }
     const settled = await upstream(() => config.facilitator.settle(payload, requirements));
     const paymentResponse = { [HEADERS.paymentResponse]: encodePaymentResponseHeader(settled) };
     log({ event: "open", session, success: settled.success, reason: settled.errorReason });
@@ -596,6 +608,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       if (settled.errorReason === "settlement_pending") {
         return sendJson(response, 202, { session, transaction: settled.transaction }, paymentResponse);
       }
+      if (settled.errorReason === "already_processed") return mayHaveLanded(response, { session }, paymentResponse);
       return paymentRequired(response, durations, settled.errorReason ?? "simulation_failed");
     }
 
@@ -632,9 +645,24 @@ export function createGate<U>(config: GateConfig<U>): Gate {
    * `POST /sessions/:id/top-up` (spec §7.1): a 402 listing top-up offers, then the payment. Only a session this gate tracks
    * can be topped up. Once its end timer has fired, the session cannot be extended (spec §4.3): the answer is a 402 with
    * `session_expired` and offers for a new session, as a connect gets then. The durations that fit come from the chain,
-   * since a top-up made elsewhere may have moved the deposit (spec §5.2). Once the top-up settles, the end timer moves to
-   * the end of the deposit read before the payment plus the amount: the program credits at least that (spec §4.3), and
-   * if it credited more, the end timer finds the later end when it fires, as it finds any top-up this gate did not settle.
+   * since a top-up made elsewhere may have moved the deposit (spec §5.2). A request that carries a payment has its
+   * duration checked only against 1 to `maxSeconds` (a `400` outside), not against the deposit read now: a payment sent
+   * again after its transaction landed is answered from the facilitator's record, and is already in that deposit, and
+   * the facilitator refuses a new one that does not fit (`invalid_amount`). The offers, a refusal's included, are the
+   * durations the request names (its `seconds`, or else the menu's) that fit the deposit; a refusal with none to offer
+   * is a `400 invalid_duration` with the deposit's bounds, as the request for offers gets then.
+   *
+   * Once the top-up settles, the new end is the `paid_until` of the session as it stands after the settlement's
+   * transaction, read from a node that shows that transaction (`readSessionAfter`), and asked again within `readRetry`
+   * while it does not (spec §7.3). It is not the deposit read before the payment plus the amount: a payment settled again
+   * after it landed, answered from the facilitator's record, is already in that deposit. The end timer moves there if it
+   * is later (`paidLonger`), and the `200` answers the later of it and the end the gate knows. If the read finds the
+   * account gone, or holding another session, the answer is `404` and no timer moves; if the node still does not show the
+   * transaction after the re-reads, it is `502`, and the subscription, or the end timer's re-read, finds the later end.
+   * A chain without `readSessionAfter` reads the session with `readSession` once the settlement has succeeded instead,
+   * and the end comes from that read, with the same `404`: a node that does not show the transaction yet can only find an
+   * earlier end, which credits too little and never too much, and the subscription, or the end timer's re-read, finds
+   * the later one.
    */
   async function topUp(request: IncomingMessage, response: ServerResponse, url: URL, session: Address): Promise<void> {
     const tracked = sessions.get(session);
@@ -645,28 +673,42 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     if (!sameSession(tracked, stored)) {
       return sendJson(response, 404, { error: "unknown_session" });
     }
+    const header = request.headers[HEADERS.paymentSignature.toLowerCase()];
+    // With a payment, the duration is checked here only against the bounds that hold whatever the deposit, those of an
+    // empty one: a payment sent again after its transaction landed is answered from the facilitator's record, and its
+    // deposit is already in the one read now. The facilitator refuses a new one that does not fit (`invalid_amount`).
+    const deposited = typeof header === "string" ? 0n : stored.deposited;
+    const fits = (deposit: bigint) => (seconds: number) => checkTopUpDuration(config.terms, deposit, seconds).ok;
     const requested = url.searchParams.get("seconds");
-    const durations =
-      requested === null ? menu.filter((seconds) => checkTopUpDuration(config.terms, stored.deposited, seconds).ok) : [Number(requested)];
+    const durations = requested === null ? menu.filter(fits(deposited)) : [Number(requested)];
     // When no duration of the menu fits, the 400 states the bounds, so that the buyer can ask for one that does.
     const checks =
       durations.length === 0
-        ? [checkTopUpDuration(config.terms, stored.deposited, 0)]
-        : durations.map((seconds) => checkTopUpDuration(config.terms, stored.deposited, seconds));
+        ? [checkTopUpDuration(config.terms, deposited, 0)]
+        : durations.map((seconds) => checkTopUpDuration(config.terms, deposited, seconds));
     for (const check of checks) {
       if (!check.ok) return sendJson(response, 400, { error: "invalid_duration", minSeconds: check.minSeconds, maxSeconds: check.maxSeconds });
     }
 
     const resource = `${config.origin}/sessions/${session}/top-up`;
+    // Whether a payment comes or not, the offers are the durations that fit the deposit read now.
+    const offered = durations.filter(fits(stored.deposited));
     const offers = async () => {
       const base = await offerBase();
-      return durations.map((seconds) => buildTopUpOffer({ ...base, seconds, session }));
+      return offered.map((seconds) => buildTopUpOffer({ ...base, seconds, session }));
     };
     // A refusal because the session has run out offers a new session; any other offers the top-up again.
-    const refusal = async (reason: string) =>
-      reason === "session_expired" ? paymentRequired(response, menu, reason) : sendPaymentRequired(response, resource, await offers(), reason);
+    const refusal = async (reason: string): Promise<void> => {
+      if (reason === "session_expired") return paymentRequired(response, menu, reason);
+      // Nothing fits the deposit read now, so nothing can be offered: answered as the request for offers is, with the
+      // deposit's bounds (0 s never fits, so the check states them). Nothing has settled.
+      const bounds = checkTopUpDuration(config.terms, stored.deposited, 0);
+      if (offered.length === 0 && !bounds.ok) {
+        return sendJson(response, 400, { error: "invalid_duration", minSeconds: bounds.minSeconds, maxSeconds: bounds.maxSeconds });
+      }
+      sendPaymentRequired(response, resource, await offers(), reason);
+    };
 
-    const header = request.headers[HEADERS.paymentSignature.toLowerCase()];
     if (typeof header !== "string") return sendPaymentRequired(response, resource, await offers());
     let payload: PaymentPayload;
     try {
@@ -690,18 +732,39 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     });
 
     const verified = await upstream(() => config.facilitator.verify(payload, requirements));
-    if (!verified.isValid) return refusal(verified.invalidReason ?? "invalid_payload");
+    if (!verified.isValid) {
+      if (verified.invalidReason === "already_processed") return mayHaveLanded(response);
+      return refusal(verified.invalidReason ?? "invalid_payload");
+    }
     const settled = await upstream(() => config.facilitator.settle(payload, requirements));
     const paymentResponse = { [HEADERS.paymentResponse]: encodePaymentResponseHeader(settled) };
     log({ event: "topUp", session, success: settled.success, reason: settled.errorReason });
     if (!settled.success) {
       // A pending top-up needs nothing more here: if it lands, its later end is found as one this gate did not settle is.
       if (settled.errorReason === "settlement_pending") return sendJson(response, 202, { transaction: settled.transaction }, paymentResponse);
+      if (settled.errorReason === "already_processed") return mayHaveLanded(response, {}, paymentResponse);
       return refusal(settled.errorReason ?? "simulation_failed");
     }
-    const until = paidUntil({ ...stored, deposited: stored.deposited + BigInt(requirements.amount) });
+    let after: Session | undefined;
+    const readSessionAfter = config.chain.readSessionAfter?.bind(config.chain);
+    if (readSessionAfter) {
+      const read = await readUntilFound(() => upstream(() => readSessionAfter(session, settled.transaction)), readRetry);
+      // What the top-up did to the account is not known yet: the subscription, or the end timer's re-read, finds the
+      // later end, as for a top-up this gate did not settle.
+      if (!read) throw new UpstreamError(new Error(`the chain does not show the top-up's transaction ${settled.transaction} yet`));
+      after = read.stored;
+    } else {
+      // Read once the settlement has succeeded, from a node that may not show its transaction yet: such a read can only
+      // lag, so it can only find an earlier end, and the subscription, or the end timer's re-read, finds the later one.
+      after = await upstream(() => config.chain.readSession(session));
+    }
+    // Closed after the top-up landed, by whichever party: answered as an open whose account is gone is, and nothing
+    // more. The session ends as it would have without this top-up: by the gate's own close, if that is what closed
+    // it, or else through the subscription or the end timer.
+    if (!sameSession(tracked, after)) return sendJson(response, 404, { error: "unknown_session" });
+    const until = paidUntil(after);
     paidLonger(tracked, until);
-    // The session may already run later than this top-up alone makes it: the end timer found one made elsewhere meanwhile.
+    // The session may already run later than `until`: the subscription, or the end timer, found a later end meanwhile.
     sendJson(response, 200, { paidUntil: Number(until > tracked.paidUntil ? until : tracked.paidUntil) }, paymentResponse);
   }
 

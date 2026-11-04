@@ -8,6 +8,8 @@ import { startFacilitator, type RunningFacilitator, type SweeperConfig } from ".
 
 const NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
 const MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" as Address;
+/** The record pruner's interval in these tests: kept off the sweeper's default of 30 s, which a test counts timers at. */
+const PRUNE_INTERVAL_MS = 3_600_000;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -123,6 +125,7 @@ describe("the sweeper inside startFacilitator (spec §6.4, §12.4)", () => {
       rentPayerSecretKey: newSecretKey(),
       apiKeys: ["seller-key"],
       sweeper,
+      recordPruneIntervalMs: PRUNE_INTERVAL_MS,
     });
     running.push(facilitator);
     return facilitator;
@@ -171,5 +174,15 @@ describe("the sweeper inside startFacilitator (spec §6.4, §12.4)", () => {
     expect(scan.count("getAccountInfo")).toBe(0);
     expect(main.count("getProgramAccounts")).toBe(0);
     expect(main.count("getAccountInfo")).toBe(1);
+  });
+
+  it("starts the record pruner at its interval, and clears it when it stops", async () => {
+    const started = vi.spyOn(globalThis, "setInterval");
+    const cleared = vi.spyOn(globalThis, "clearInterval");
+    const facilitator = await launch((await node([])).url);
+    const index = started.mock.calls.findIndex((call) => call[1] === PRUNE_INTERVAL_MS);
+    expect(index).toBeGreaterThanOrEqual(0);
+    await facilitator.stop();
+    expect(cleared).toHaveBeenCalledWith(started.mock.results[index]!.value);
   });
 });

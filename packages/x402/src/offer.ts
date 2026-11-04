@@ -138,6 +138,21 @@ export function sameRequirements(a: unknown, b: unknown): boolean {
   return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 }
 
+/**
+ * The requirements as a retry must repeat them (spec §5.5): every field but the advisory ones that a fresh offer changes,
+ * `maxTimeoutSeconds`, `extra.recentBlockhash` and `extra.lastValidBlockHeight`, as canonical JSON. A settlement record
+ * stores it; a value that is not an object gives its own canonical JSON, `"null"` for `undefined`.
+ */
+export function retryRequirementsKey(requirements: unknown): string {
+  if (!isRecord(requirements)) return JSON.stringify(canonical(requirements)) ?? "null";
+  const { maxTimeoutSeconds: _timeout, ...kept } = requirements;
+  if (isRecord(kept.extra)) {
+    const { recentBlockhash: _blockhash, lastValidBlockHeight: _height, ...extra } = kept.extra;
+    kept.extra = extra;
+  }
+  return JSON.stringify(canonical(kept));
+}
+
 export function sellerTermsOf(requirements: ElapsedRequirements): SellerTerms {
   const extra = requirements.extra;
   return {

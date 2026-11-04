@@ -146,6 +146,48 @@ describe("facilitator on the local network, through Kora", () => {
     expect((await fetchMaybeSession(stack.network.rpc, session)).exists).toBe(false);
   });
 
+  /** The buyer's USDC at `confirmed`, in base units. */
+  async function usdcOf(buyer: Buyer): Promise<string> {
+    return (await stack.network.rpc.getTokenAccountBalance(buyer.usdcAccount, { commitment: "confirmed" }).send()).value.amount;
+  }
+
+  it("answers a payment it has settled from its record: the same answer, one transaction, the buyer charged once", async () => {
+    const buyer = await newBuyer(stack.network.rpc, stack.keys.mintAuthority.signer, 100_000n);
+    const { offer, payload, session } = await openPayment(buyer);
+    const first = (await call("/settle", payload, offer)) as SettleResponse;
+    expect(first).toMatchObject({ success: true, payer: buyer.signer.address, amount: "30000" });
+
+    // The session exists now, so a verification of the payload as new would fail its simulation: the record answers.
+    expect(await call("/verify", payload, offer)).toEqual({ isValid: true, payer: buyer.signer.address });
+    expect(await call("/settle", payload, offer)).toEqual(first);
+
+    const changes = await tokenBalanceChanges(stack.network.rpc, first.transaction);
+    expect(changes.get(buyer.usdcAccount)).toBe(-30_000n);
+    expect(await usdcOf(buyer)).toBe("70000");
+    expect((await fetchSession(stack.network.rpc, session)).data.deposited).toBe(30_000n);
+  });
+
+  it("settles two identical payments sent at once with one transaction", async () => {
+    const buyer = await newBuyer(stack.network.rpc, stack.keys.mintAuthority.signer, 100_000n);
+    const { offer, payload } = await openPayment(buyer);
+    const [a, b] = (await Promise.all([call("/settle", payload, offer), call("/settle", payload, offer)])) as SettleResponse[];
+    expect(a).toMatchObject({ success: true });
+    expect(b).toEqual(a);
+    expect(await usdcOf(buyer)).toBe("70000");
+  });
+
+  it("refuses a payment it has settled when it comes back with other requirements", async () => {
+    const buyer = await newBuyer(stack.network.rpc, stack.keys.mintAuthority.signer, 100_000n);
+    const { offer, payload } = await openPayment(buyer);
+    expect(await call("/settle", payload, offer)).toMatchObject({ success: true });
+    // The same transaction, echoing the other requirements it now comes with: only the record can tell it apart.
+    const other = { ...offer, extra: { ...offer.extra, idleCloseSeconds: 11 } };
+    const again = { ...payload, accepted: other };
+    expect(await call("/settle", again, other)).toMatchObject({ success: false, errorReason: "invalid_payment_requirements" });
+    expect(await call("/verify", again, other)).toMatchObject({ isValid: false, invalidReason: "invalid_payment_requirements" });
+    expect(await usdcOf(buyer)).toBe("70000");
+  });
+
   it("answers GET /close with its fee payer, a current blockhash and the block height, and 404 for an address with no session", async () => {
     const info = readCloseInfo(await (await fetch(stack.facilitator.closeUrl)).json());
     expect(info).toMatchObject({ feePayer: stack.facilitator.feePayer, programId: base.facilitator.programId });

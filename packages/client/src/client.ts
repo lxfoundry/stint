@@ -639,7 +639,9 @@ export function createStintClient(options: ClientOptions): StintClient {
           throw error;
         }
         const answer = await send(endpoint, signature);
-        // Refused before settlement, so nothing was charged: the route answers 404 before it looks at a payment.
+        // Releasing the reservation matches what was spent: a 400 or a 402 refuses a payment that is not settled, and a
+        // 404 comes before the route looks at a payment, or, after a settled top-up, only when the session closed once
+        // the top-up had landed, a close that refunds what the session had not used, the top-up included.
         if (answer.status === 400 || answer.status === 402 || answer.status === 404) {
           undo();
           throw new StintError(`The gate refused the top-up: ${describeBody(answer.body)}`, answer.status, answer.body);

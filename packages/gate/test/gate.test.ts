@@ -1,6 +1,12 @@
 import { connect as netConnect, type AddressInfo, type Socket } from "node:net";
 import type { Address } from "@solana/kit";
-import { decodePaymentRequiredHeader, inspectTransaction, readElapsedPayload } from "@lxfoundry/stint-x402";
+import {
+  decodePaymentRequiredHeader,
+  decodePaymentResponseHeader,
+  encodePaymentSignatureHeader,
+  inspectTransaction,
+  readElapsedPayload,
+} from "@lxfoundry/stint-x402";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { NOW_MS, helpers, startHarness, type Harness } from "./harness.js";
 
@@ -117,6 +123,28 @@ describe("gate", () => {
     expect(status).toBe(402);
     expect(body.error).toBe("invalid_amount");
     expect(h.calls.settle).toHaveLength(0);
+  });
+
+  it("answers 503, not 402, when the facilitator's verification says the payment may have landed (already_processed)", async () => {
+    h.verifyAnswer = { isValid: false, invalidReason: "already_processed" };
+    const { session, status, body } = await open();
+    expect(status).toBe(503);
+    expect(body).toEqual({ error: "already_processed", session });
+    expect(h.calls.settle).toHaveLength(0);
+    expect(h.calls.provision).toHaveLength(0);
+  });
+
+  it("answers 503 with the payment response when the settlement answers already_processed, and provisions nothing", async () => {
+    h.settleAnswer = () => ({ success: false, errorReason: "already_processed", transaction: "", network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" });
+    const { session, payload } = await prepareOpen();
+    const response = await fetch(`${h.url}/sessions?seconds=30`, {
+      method: "POST",
+      headers: { "PAYMENT-SIGNATURE": encodePaymentSignatureHeader(payload) },
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "already_processed", session });
+    expect(decodePaymentResponseHeader(response.headers.get("payment-response")!)).toMatchObject({ success: false, errorReason: "already_processed" });
+    expect(h.calls.provision).toHaveLength(0);
   });
 
   it("accepts a connection with a connect token, in the header or the URL, and attaches it", async () => {

@@ -1,10 +1,10 @@
 import type { Address } from "@solana/kit";
-import { StintError, type StintSession } from "@lxfoundry/stint-client";
+import type { StintSession } from "@lxfoundry/stint-client";
 import { CloseKind, fetchMaybeSession, paidUntil, type Session } from "@lxfoundry/stint-program-client";
 import { associatedTokenAddress, tokenBalanceChanges } from "@lxfoundry/stint-x402";
 import { expectEqual, expectTrue, sleep, waitFor } from "../assert.js";
 import { awaitClose } from "../closes.js";
-import { buyerClient, closePollMs, sessionSeconds } from "../helpers.js";
+import { buyerClient, closePollMs, refusalOf, sessionSeconds, usdcBalance } from "../helpers.js";
 import { readUntil } from "../reads.js";
 import type { ScenarioContext } from "../types.js";
 import { watchWhilePaying } from "../watch.js";
@@ -35,17 +35,6 @@ async function topUpBeforeExpiry(
   return { deposited: toppedUp.data.deposited, endMs: extended.paidUntil * 1_000 };
 }
 
-/** How a top-up was refused: the gate's HTTP status and the reason its body gives; undefined if it went through. */
-async function refusalOf(attempt: Promise<unknown>): Promise<{ readonly status?: number; readonly reason?: unknown } | undefined> {
-  try {
-    await attempt;
-    return undefined;
-  } catch (error) {
-    if (!(error instanceof StintError)) throw error;
-    return { status: error.status, reason: (error.body as { error?: unknown } | undefined)?.error };
-  }
-}
-
 /**
  * Scenario 4 (spec §12.7): a top-up before expiry extends the session; after expiry, a top-up is refused. Once topped up,
  * the buyer stays connected while a payer keeps changing a watched account, so the frames show how long the gate serves
@@ -62,8 +51,7 @@ export async function topUpBeforeAndAfterExpiry(context: ScenarioContext): Promi
   const opened = await readUntil(context.readRetry, readSession, (read) => read.exists);
   expectTrue(opened.exists, "the session exists on-chain after the open");
   const stored = opened.data;
-  const usdcOf = async (account: Address) =>
-    BigInt((await context.rpc.getTokenAccountBalance(account, { commitment: "confirmed" }).send()).value.amount);
+  const usdcOf = (account: Address) => usdcBalance(context.rpc, account);
   const firstEndMs = session.paidUntil * 1_000;
 
   // Before expiry: the top-up adds its seconds to the end of the paid time, and its cost to the deposit. A connection holds

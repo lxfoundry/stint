@@ -1,5 +1,5 @@
-import { SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM, isSolanaError, type Rpc, type SolanaRpcApi } from "@solana/kit";
-import { createStintClient, type StintClient } from "@lxfoundry/stint-client";
+import { SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM, isSolanaError, type Address, type Rpc, type SolanaRpcApi } from "@solana/kit";
+import { StintError, createStintClient, type StintClient } from "@lxfoundry/stint-client";
 import type { Buyer, Target } from "./types.js";
 
 /**
@@ -41,4 +41,25 @@ export function rejectedWithProgramError(error: unknown, code: number): boolean 
     if (failedTransaction.test(current.message)) return true;
   }
   return false;
+}
+
+/**
+ * How a call of the session client was refused: the `StintError`'s HTTP status, the `error` its body names, and its body;
+ * undefined if the call went through. Any other error is thrown.
+ */
+export async function refusalOf(
+  attempt: Promise<unknown>,
+): Promise<{ readonly status?: number; readonly reason?: unknown; readonly body?: unknown } | undefined> {
+  try {
+    await attempt;
+    return undefined;
+  } catch (error) {
+    if (!(error instanceof StintError)) throw error;
+    return { status: error.status, reason: (error.body as { error?: unknown } | undefined)?.error, body: error.body };
+  }
+}
+
+/** A token account's balance at `confirmed`, in base units. */
+export async function usdcBalance(rpc: Rpc<SolanaRpcApi>, account: Address): Promise<bigint> {
+  return BigInt((await rpc.getTokenAccountBalance(account, { commitment: "confirmed" }).send()).value.amount);
 }

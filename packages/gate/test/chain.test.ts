@@ -1,4 +1,6 @@
 import {
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_MIN_CONTEXT_SLOT_NOT_REACHED,
+  SolanaError,
   generateKeyPairSigner,
   getBase58Decoder,
   getBase64Decoder,
@@ -294,5 +296,93 @@ describe("the RPC chain's lookup of a session's last close", () => {
     expect(await chain.lastClose!(where, notCloses)).toBeUndefined();
     expect(await chain.lastClose!(where, notCloses)).toBeUndefined();
     expect(fetched).toEqual([LATER, OPEN]);
+  });
+});
+
+/**
+ * An RPC that reports `status` for any signature, and holds `account` for any address once its `confirmed` state has
+ * reached `slot`: a read with a later `minContextSlot` is refused, as a node refuses it. `calls` records what each request
+ * asked.
+ */
+function rpcAtSlot(status: unknown, account: { owner: Address; data: Uint8Array } | null, slot = 100n) {
+  const calls = { statuses: [] as unknown[][], reads: [] as unknown[] };
+  const rpc = {
+    getSignatureStatuses: (signatures: unknown, config: unknown) => ({
+      send: async () => {
+        calls.statuses.push([signatures, config]);
+        return { context: { slot }, value: [status] };
+      },
+    }),
+    getAccountInfo: (_: Address, config: { minContextSlot?: bigint }) => ({
+      send: async () => {
+        calls.reads.push(config);
+        if ((config.minContextSlot ?? 0n) > slot) {
+          throw new SolanaError(SOLANA_ERROR__JSON_RPC__SERVER_ERROR_MIN_CONTEXT_SLOT_NOT_REACHED, { contextSlot: slot });
+        }
+        return (await rpcHolding(account).getAccountInfo(_).send()) as unknown;
+      },
+    }),
+  } as unknown as Rpc<SolanaRpcApi>;
+  return { rpc, calls };
+}
+
+describe("the RPC chain's read of a session after a transaction", () => {
+  const where = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDyLb" as Address;
+  const TOP_UP = signatureFilledWith(5);
+  const landedAt = (slot: bigint, confirmationStatus = "confirmed") => ({ slot, confirmations: 0n, err: null, confirmationStatus });
+
+  it("reads the session at confirmed from the transaction's slot on, looking the transaction up in the node's history too", async () => {
+    const args = await sessionArgs();
+    const data = new Uint8Array(getSessionEncoder().encode({ ...args, deposited: 40_000n }));
+    const { rpc, calls } = rpcAtSlot(landedAt(42n), { owner: STINT_PROGRAM_ADDRESS, data });
+
+    const read = await createRpcChain(rpc).readSessionAfter!(where, TOP_UP);
+
+    expect(read?.stored).toMatchObject({ authority: args.authority, deposited: 40_000n });
+    expect(calls.statuses).toEqual([[[TOP_UP], { searchTransactionHistory: true }]]);
+    expect(calls.reads).toEqual([expect.objectContaining({ commitment: "confirmed", minContextSlot: 42n })]);
+  });
+
+  it("reads a finalized transaction's session the same way", async () => {
+    const data = new Uint8Array(getSessionEncoder().encode(await sessionArgs()));
+    const { rpc, calls } = rpcAtSlot(landedAt(42n, "finalized"), { owner: STINT_PROGRAM_ADDRESS, data });
+
+    expect((await createRpcChain(rpc).readSessionAfter!(where, TOP_UP))?.stored).toMatchObject({ deposited: 30_000n });
+    expect(calls.reads).toEqual([expect.objectContaining({ minContextSlot: 42n })]);
+  });
+
+  it.each([
+    ["shows no status for the transaction", null],
+    ["shows the transaction processed only", landedAt(42n, "processed")],
+  ])("answers undefined, without reading the account, while the node %s", async (_, status) => {
+    const { rpc, calls } = rpcAtSlot(status, null);
+
+    expect(await createRpcChain(rpc).readSessionAfter!(where, TOP_UP)).toBeUndefined();
+    expect(calls.reads).toEqual([]);
+  });
+
+  it("answers undefined while the node's confirmed state has not reached the transaction's slot", async () => {
+    const data = new Uint8Array(getSessionEncoder().encode(await sessionArgs()));
+    const { rpc, calls } = rpcAtSlot(landedAt(142n), { owner: STINT_PROGRAM_ADDRESS, data }, 100n);
+
+    expect(await createRpcChain(rpc).readSessionAfter!(where, TOP_UP)).toBeUndefined();
+    expect(calls.reads).toHaveLength(1);
+  });
+
+  it("gives no session once the transaction shows and the address holds none", async () => {
+    const { rpc } = rpcAtSlot(landedAt(42n), null);
+
+    expect(await createRpcChain(rpc).readSessionAfter!(where, TOP_UP)).toEqual({ stored: undefined });
+  });
+
+  it("still rejects when the node fails otherwise", async () => {
+    const { rpc } = rpcAtSlot(landedAt(42n), null);
+    (rpc as unknown as { getAccountInfo: () => unknown }).getAccountInfo = () => ({
+      send: async () => {
+        throw new Error("fetch failed");
+      },
+    });
+
+    await expect(createRpcChain(rpc).readSessionAfter!(where, TOP_UP)).rejects.toThrow(/fetch failed/);
   });
 });

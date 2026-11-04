@@ -1,5 +1,5 @@
 import type { Address, KeyPairSigner, Rpc, SolanaRpcApi } from "@solana/kit";
-import type { RetryOptions } from "@lxfoundry/stint-x402";
+import type { PaymentPayload, PaymentRequirements, RetryOptions, VerifyResponse } from "@lxfoundry/stint-x402";
 
 /**
  * What a target offers a scenario (spec section 12.2). `facilitatorApi` is the ability to call
@@ -99,6 +99,11 @@ export interface DirectChain {
   newKey(): Promise<KeyPairSigner>;
 }
 
+/** The facilitator's `/verify` for resource servers (spec §6.1), called with the target's API key. */
+export interface FacilitatorApi {
+  verify(payload: PaymentPayload, requirements: PaymentRequirements): Promise<VerifyResponse>;
+}
+
 /** What a scenario receives when it runs. */
 export interface ScenarioContext {
   readonly target: Target;
@@ -128,6 +133,11 @@ export interface ScenarioContext {
   readonly stack?: StackControl;
   /** Sessions opened and closed straight on the program. Absent where the harness holds none of the keys to do it with. */
   readonly direct?: DirectChain;
+  /**
+   * The facilitator's `/verify`, with an API key (spec §12.2, "Facilitator API"): present on a target with the
+   * `facilitatorApi` capability (scenarios 17, 18 and 19), absent otherwise.
+   */
+  readonly facilitator?: FacilitatorApi;
   /**
    * Gives `owner`, a buyer this context made, `lamports` from the harness, for a scenario whose buyer pays a fee itself
    * (scenario 25); a buyer holds no SOL otherwise (spec §9.1). Give at least the rent-exempt minimum of an empty account,

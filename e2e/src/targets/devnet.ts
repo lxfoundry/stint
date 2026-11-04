@@ -1,6 +1,7 @@
 import { fetchMaybeToken } from "@solana-program/token";
 import { createSolanaRpc, type Rpc, type SolanaRpcApi } from "@solana/kit";
 import { describeError, type ScenarioContext, type StackControl, type Target } from "@lxfoundry/stint-conformance";
+import { createFacilitatorClient } from "@lxfoundry/stint-gate";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import { assertDevnet, assertProgramDeployed } from "../devnet/config.js";
 import { cleanUp, fundUsdcAccount, sendSol, type Funding } from "../devnet/funds.js";
@@ -164,6 +165,8 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
     report(await cleanUp(rpc, funding, keys.holders, send, scanRpc));
     throw error;
   }
+  // The facilitator keeps its address when it restarts, so one client serves every context.
+  const facilitatorApi = createFacilitatorClient(services.facilitator.url, services.facilitatorApiKey);
 
   const target: Target = { name: "devnet", capabilities: new Set(["stack", "facilitatorApi"]) };
   let nextBuyer = 0;
@@ -224,6 +227,7 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
       readRetry: READ_RETRY,
       stack: control,
       direct,
+      facilitator: facilitatorApi,
       // From the funding key, to a buyer of the pool, whose SOL the clean-up returns.
       fundSol: async (owner, lamports) => {
         if (!keys.holders.has(owner)) throw new Error(`SOL goes only to a key of the pool, which the clean-up empties: ${owner} is not one`);

@@ -1,4 +1,7 @@
 import {
+  SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE,
+  SolanaError,
   generateKeyPairSigner,
   getBase58Decoder,
   getBase58Encoder,
@@ -24,6 +27,12 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { KoraClient } from "../src/kora.js";
 import { createSweeper } from "../src/sweeper.js";
 import type { FacilitatorContext } from "../src/verify.js";
+
+/** A refusal by the node at preflight, as `@solana/kit` reports it: the program's error is its cause. */
+const preflightRefusal = () =>
+  new SolanaError(SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE, {
+    cause: new SolanaError(SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM, { code: 6004, index: 0 }),
+  } as never);
 
 const NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
 const BLOCKHASH = "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N";
@@ -131,7 +140,7 @@ function createChain(): { node: Node; rpc: Rpc<SolanaRpcApi>; scanRpc: Rpc<Solan
         const session = tx.instructions[0]!.accounts![1]!.address;
         if (node.refuse.has(session)) {
           node.onRefused?.(session);
-          throw new Error("Transaction simulation failed: custom program error 0x1774");
+          throw preflightRefusal();
         }
         node.sent.push({ session, tx });
         node.accounts.delete(session);

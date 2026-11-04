@@ -7,6 +7,7 @@ import {
   checkOpenDuration,
   checkTopUpDuration,
   readElapsedRequirements,
+  retryRequirementsKey,
   sameRequirements,
   sellerTermsOf,
 } from "../src/index.js";
@@ -121,5 +122,33 @@ describe("offers", () => {
       receiverAuthorizer: input.receiverAuthorizer,
       terms: input.terms,
     });
+  });
+});
+
+describe("retryRequirementsKey (spec §5.5, 'How a retry is answered')", () => {
+  const offer = buildOpenOffer(input);
+
+  it("leaves out the advisory fields that a fresh offer changes", () => {
+    const fresh = buildOpenOffer({
+      ...input,
+      lifetime: { blockhash: "GHtXQBsoZHVnNFa9YevAzFr17DJjgHXk3ycTKD5xD3Zi", lastValidBlockHeight: 9_999n },
+      maxTimeoutSeconds: 30,
+    });
+    expect(retryRequirementsKey(fresh)).toBe(retryRequirementsKey(offer));
+  });
+
+  it("keeps every other field, whatever the key order", () => {
+    const reordered = Object.fromEntries(Object.entries(offer).reverse());
+    expect(retryRequirementsKey(reordered)).toBe(retryRequirementsKey(offer));
+    expect(retryRequirementsKey({ ...offer, amount: "30001" })).not.toBe(retryRequirementsKey(offer));
+    expect(retryRequirementsKey({ ...offer, extra: { ...offer.extra, idleCloseSeconds: 11 } })).not.toBe(retryRequirementsKey(offer));
+    expect(retryRequirementsKey({ ...offer, extra: { ...offer.extra, closeUrl: "http://127.0.0.1:4021/closf" } })).not.toBe(
+      retryRequirementsKey(offer),
+    );
+  });
+
+  it("gives a string for a value that is not requirements", () => {
+    expect(retryRequirementsKey(undefined)).toBe("null");
+    expect(retryRequirementsKey("open")).toBe('"open"');
   });
 });
