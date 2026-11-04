@@ -39,7 +39,7 @@ the two examples is stated in this plan: no spec section describes them, and non
   such a policy.
 - **Scope:** nothing changes in `packages/`, `apps/`, `programs/`, `conformance/` or `e2e/`. The one change to existing
   code is in `examples/solana-stream/` (Task 1). Docs that change: `README.md` (one section), `docs/plans/README.md`
-  (one line), `docs/specs/stint-system.md` §3.3 (two lines). `pnpm-lock.yaml` changes through installs only.
+  (one paragraph), `docs/specs/stint-system.md` §3.3 (two lines). `pnpm-lock.yaml` changes through installs only.
 - New packages import the product libraries through `workspace:*` and their `package.json` exports only. Nothing
   imports `@lxfoundry/stint-e2e`: its only export, `e2e/src/index.ts`, loads `@solana/surfpool` (through
   `network/surfnet.ts` and `fixtures/keys.ts`), a native module.
@@ -141,6 +141,59 @@ What the design asked for that the code base made this plan change, each kept as
     standard input, nothing runs; the gate's idle close (60 s after the connection drops) then refunds the rest. The
     README says so instead of promising the quit-time close.
 
+## As built
+
+The code differs from the code this plan shows in these ways, each a behaviour of the built examples:
+
+- **The stream's origin must be an http or https URL.** `StreamConfig.origin` keeps only the origin of such a URL. A host
+  and a port with no scheme, or a `file` or `ftp` URL, throws before the stream listens, without quoting the value: the
+  gate would otherwise announce an `aud` that no token names.
+- **Kora's kept output drops a cut first line before it is shown.** Once the 64 KiB tail has been cut, its first line,
+  which the cut may have begun inside a URL, is left out of the log and of the start-up errors, and `redactUrls` runs
+  on what is left.
+- **Kora ends with the seller.** `startKora` kills Kora (SIGKILL) when the process exits, so that a stop that hangs or a
+  start that is cut short leaves no Kora running with the fee payer's key. The entry point stops the seller on SIGINT or
+  SIGTERM, one that arrives while it is still starting included, and on an error nobody handles, and it ends 15 s after
+  the signal or the error at the latest, whatever the stop is doing.
+- **The image and the machine keep secrets and restarts apart from the command line.** The seed and the RPC URL reach
+  `fly secrets import` on standard input, and seed files are made under `umask 077`. The Docker ignore file is an
+  allowlist (`*`, then what the Dockerfile copies) that also repeats the repository's secret patterns at any depth. The
+  machine's restart policy is `always`: a seller that exits when Kora does is started again, where the default gives up
+  after a number of retries.
+- **`agent.json` is published atomically.** The key is written whole to a private temporary file beside it (mode 0600),
+  which is linked to `agent.json`, and the link fails if the name is taken. The name never exists half written, copies
+  that start at once make one key, and a file that is there but incomplete is read for about 0.4 s before it is called
+  invalid. A crash can leave an `agent.json.*.tmp` file, and the folder needs a file system with hard links.
+- **The Explorer link checks never throw.** `isSignature` and `isAddress` throw on text of the right length that holds
+  a character outside base58, with an error that quotes the text. Any throw means "not valid": no link is made and
+  nothing of the text is kept.
+- **The owner is fenced.** Before it runs a call, in its own branch and in its endpoint, the owner reads `owner.json` and
+  runs the call only if the file still names it. If another copy's record is there, it stops serving, drops its state
+  and forwards; if the file is gone, it creates it again, which succeeds only while no other copy has. The check is bound
+  to the state it guards: a call that took an earlier state is refused once a later one exists.
+- **Liveness, forwarding and unknown outcomes.** An owner is alive when it answers `/ping` with its own pid. An owner
+  whose process is gone is taken over at once; a silent one whose process exists is asked again for 5 s first. A
+  forwarded launch, top-up or close waits 120 s, and a read 15 s; a timeout is an unknown outcome. An unknown outcome is
+  answered with a tool error even when the election that follows fails, and an unreadable `owner.json` is removed only
+  if it is the same file, unreadable throughout.
+- **A stream connection, a shutdown and a slow node do not hold the session.** The stream subscription is not awaited,
+  and a session has at most one in flight, so a connection that never opens holds neither a launch, a close nor a state
+  read. A launch checks for shutdown again after it reads the balance, so that no session opens after a shutdown. Every
+  request to the node gives up after 10 s, and a read that failed is made again at the next state read.
+- **Every tool has a strict input schema.** An argument that a tool does not name is a tool error that names it, never
+  dropped. The launch description tells the model to open the panel first.
+- **The panel**: the used part of a closed capsule is drawn in the text colour, inside its Signal outline; its hairlines
+  come from the palette alone (Mist on a light surface, Slate on a dark one); the page's surface is marked dark or light
+  from the colour it is painted, and Signal is text or fill only on a dark one; the funding row shows only while no
+  session runs; state reads go one at a time, and a state stamped before the one drawn is ignored.
+- **One `fetch` wrapper per process, and every built state is closed at shutdown.** The exchange recorder is installed
+  on the `fetch` the process had at the start, so that a later state's recorder replaces an earlier one's and never
+  wraps it. On the way out, the sessions of every state the copy built are closed, those of states it dropped included,
+  and a state built while it leaves opens nothing.
+- **The demo's guide is its own text.** `examples/claude-demo/README.md` is the source of truth for what it states, and
+  differs from the text Task 14 shows: it adds the wallet folder's requirements (hard links, file modes on Windows and
+  under WSL), the install routes, the sizes of the bundle and the `.mcpb`, and what quitting Claude Desktop does.
+
 ## What this plan builds, and what it leaves
 
 Built: the stream's optional public origin; the seller package with its configuration, keys, Kora launcher, chain
@@ -208,7 +261,7 @@ public host name, devnet SOL, devnet USDC, and Claude Desktop on Windows.
 | `examples/claude-demo/scripts/panel.ts`, `build.ts`, `pack.ts` | The inlined panel HTML; `dist/claude-demo.cjs`; `dist/stint-claude-demo.mcpb` |
 | `examples/claude-demo/mcpb/manifest.json`, `README.md` | The extension's manifest; the guide |
 | `examples/claude-demo/test/*.test.ts`, `test/fixtures.ts` | Unit, server and stdio tests; shared test values |
-| `README.md`, `docs/plans/README.md`, `docs/specs/stint-system.md` (modify) | One section, one line, two layout lines |
+| `README.md`, `docs/plans/README.md`, `docs/specs/stint-system.md` (modify) | One section, one paragraph, two layout lines |
 
 ---
 
@@ -424,7 +477,7 @@ git commit -m "Let the example stream announce a public origin to its gate" -m "
 - Consumes: the harness's patterns, rewritten here: `loadDevnetConfig` (`e2e/src/devnet/config.ts:32-70`: URLs without
   credentials, messages that quote neither seed nor URL; a seed of 64 hexadecimal characters or a recovery phrase of
   12, 15, 18, 21 or 24 words, the phrase turned into 64 bytes as BIP-39 does: PBKDF2-HMAC-SHA512 over the NFKD phrase,
-  salt `mnemonic`, 2048 rounds) and `deriveKey`/`KEY_INDEX` (`e2e/src/devnet/keys.ts:94-108`: HMAC-SHA-256 of the index
+  salt `mnemonic`, 2048 rounds) and `deriveKey`/`KEY_INDEX` (`e2e/src/devnet/keys.ts:11-26`: HMAC-SHA-256 of the index
   keyed by the seed, of any length, taken as an Ed25519 private key, the 64-byte secret as private half then public
   half).
 - Produces:
@@ -815,7 +868,7 @@ git commit -m "Add the example seller's configuration and key derivation" -m "Co
 
 ### Task 3: Kora, and the seller's chain set-up
 
-The seller runs Kora as the harness does (`e2e/src/kora/process.ts:142-221`, `e2e/src/kora/config.ts`), and sets its
+The seller runs Kora as the harness does (`e2e/src/kora/process.ts:41-120`, `e2e/src/kora/config.ts`), and sets its
 keys up before it starts: SOL for Kora's fee payer and the rent payer from the funding key, the seller's USDC account,
 and the close of the sessions an earlier process left open (deviation 2). The harness's helpers stay in `e2e/`; these
 are written here, small and tested.
@@ -1931,125 +1984,19 @@ kill_timeout = 20
 
 - [ ] **Step 3: Write the guide**
 
-Create `examples/seller/README.md`:
+The guide is `examples/seller/README.md`, and that file is the source of truth for its text: the plan does not copy it,
+so that the two cannot differ. It states:
 
-````markdown
-# Example seller deployment
-
-One Node process that sells the example stream (`examples/solana-stream`) on devnet. It runs Kora as a child process,
-the facilitator with its sweeper, and the stream with the gate mounted. The stream listens on `$HOST:$PORT`, the
-facilitator on 127.0.0.1. Kora 2.0.5 has no bind option and listens on every interface, at a port picked at start;
-it refuses any request without its API key, which only this process holds, and on Fly.io only the stream's port is
-public.
-
-The offer: 1000 base units of devnet USDC a second (0.001 USDC/s), sessions from 5 s to 300 s, 100 s when a request
-names no duration (0.100 USDC), and a session that nobody connects to for 60 s is closed by the gate.
-
-## Configuration
-
-| Variable | Meaning |
-|---|---|
-| `STINT_SELLER_SEED` | 64 hexadecimal characters (`openssl rand -hex 32`), or a recovery phrase of 12 to 24 words in quotes. Every key of the deployment derives from it, by this example's own rule, so a phrase does not give the addresses a wallet shows for it. Required; secret |
-| `STINT_SELLER_RPC_URL` | A devnet RPC endpoint, http or https. Required; it may carry an API key, so treat it as a secret |
-| `STINT_SELLER_WS_URL` | Its WebSocket endpoint. Default: the RPC URL with `ws` for `http` |
-| `STINT_SELLER_SCAN_RPC_URL` | An endpoint that answers `getProgramAccounts`, for the start-up and the sweeper, if the RPC URL's provider refuses it, such as `https://api.devnet.solana.com`. Default: the RPC URL |
-| `PORT` | The stream's port. Default 8080 |
-| `HOST` | The stream's address. Default `0.0.0.0` |
-| `PUBLIC_ORIGIN` | The origin buyers reach the stream at, such as `https://stint-demo.lxfoundry.ai`. Required: session tokens are checked against it |
-
-The process refuses to start unless both RPC endpoints report devnet's genesis hash and the Stint program is deployed.
-
-## Keys
-
-Five keys derive from the seed, by this example's own rule:
-
-| Index | Key | Holds |
-|---|---|---|
-| 0 | funding | The devnet SOL you send it. At each start it tops the next two up to 0.05 SOL each, and pays for the seller's USDC account and the start-up's closes |
-| 1 | Kora's fee payer | SOL for the fees of every payment and close |
-| 2 | rent payer | SOL for each open session's accounts, returned when the session closes |
-| 3 | receiver authorizer | Nothing: it signs the gate's closes |
-| 4 | seller | The USDC that buyers pay |
-
-Use a seed made for this deployment: not the devnet harness's `STINT_DEVNET_SEED`, nor another deployment's. At each
-start the process closes every open session whose rent payer is this deployment's, so two processes on one seed would
-close each other's sessions and spend from the same keys. The harness's seed also controls the harness's funding key:
-a copy of it on a server is a copy of that key, even though this example derives other addresses from it.
-
-Make a seed and print the addresses (in WSL, from the repository root):
-
-    mkdir -p ~/.config/stint && openssl rand -hex 32 > ~/.config/stint/seller-seed && chmod 600 ~/.config/stint/seller-seed
-    STINT_SELLER_SEED="$(cat ~/.config/stint/seller-seed)" pnpm --filter @lxfoundry/stint-example-seller start keys
-
-Send the funding key (the first line) at least 0.5 SOL from a devnet faucet, such as `https://faucet.solana.com`. The
-start-up says how much it needs if it holds too little.
-
-## Running it locally
-
-Run it locally on a seed of its own, never the deployment's: its start-up closes every open session of its seed's rent
-payer, and on the deployment's seed that would close the live deployment's sessions, refunding their buyers and
-dropping their connections. Make the local seed once, fund its funding key as above, and run:
-
-    openssl rand -hex 32 > ~/.config/stint/seller-seed-local && chmod 600 ~/.config/stint/seller-seed-local
-    STINT_SELLER_SEED="$(cat ~/.config/stint/seller-seed-local)" pnpm --filter @lxfoundry/stint-example-seller start keys
-    export STINT_SELLER_SEED="$(cat ~/.config/stint/seller-seed-local)" STINT_SELLER_RPC_URL=https://api.devnet.solana.com
-    PUBLIC_ORIGIN=http://127.0.0.1:8080 HOST=127.0.0.1 KORA_BIN="$(command -v kora)" pnpm --filter @lxfoundry/stint-example-seller start
-
-It logs one JSON line per event on stdout, with every URL cut to its scheme and host, and `{"event":"ready",…}` once
-the stream listens. Then:
-
-    curl -s http://127.0.0.1:8080/health                                   # {"ok":true}
-    curl -si -X POST 'http://127.0.0.1:8080/sessions?seconds=100' | head -1  # HTTP/1.1 402 Payment Required
-
-## Deploying on Fly.io
-
-From the repository root, with `flyctl` signed in:
-
-1. Create the app (the name in `fly.toml`; change both if it is taken):
-
-       fly apps create stint-demo
-
-2. Set the secrets. `PUBLIC_ORIGIN`, `HOST` and `PORT` are in `fly.toml`; change `PUBLIC_ORIGIN` to your host name.
-
-       fly secrets set -a stint-demo STINT_SELLER_SEED="$(cat ~/.config/stint/seller-seed)" \
-         STINT_SELLER_RPC_URL="https://<your devnet endpoint>" STINT_SELLER_SCAN_RPC_URL=https://api.devnet.solana.com
-
-3. Deploy. The build context is the repository root; Kora's build takes several minutes the first time.
-
-       fly deploy . --config examples/seller/fly.toml --dockerfile examples/seller/Dockerfile \
-         --ignorefile examples/seller/Dockerfile.dockerignore
-
-4. Give the app its host name, then add a `CNAME` record from that name to `stint-demo.fly.dev` at your DNS provider,
-   with the provider's proxy off (DNS only): Fly.io issues the TLS certificate and must receive the requests itself.
-
-       fly certs add stint-demo.lxfoundry.ai -a stint-demo
-       fly certs show stint-demo.lxfoundry.ai -a stint-demo    # until the certificate is issued
-
-5. Check it:
-
-       curl -s https://stint-demo.lxfoundry.ai/health     # {"ok":true}
-       curl -s -X POST 'https://stint-demo.lxfoundry.ai/sessions?seconds=100'
-
-   The second answers `402` with one offer: `amount` `"100000"`, `extra.rate` `"1000"`, `extra.seconds` 100,
-   `extra.minSeconds` 5, `extra.maxSeconds` 300, `extra.idleCloseSeconds` 60, and `resource.url`
-   `https://stint-demo.lxfoundry.ai/sessions`. `fly logs -a stint-demo` shows the process's log.
-
-## In operation
-
-- The machine runs all the time: `fly.toml` turns off Fly.io's automatic stop and start, and keeps one machine.
-- The gate keeps its sessions in memory. A deploy or a restart drops every open connection, and the new process's
-  start-up closes each session the old one left open while it is still paid for: the seller is paid for the time used
-  and the buyer gets the rest back. A session whose paid time has run out by then is closed by the sweeper.
-- Between a restart and that close, a buyer's own close fails: the new gate does not know the session (it answers
-  `404`), and the sponsored close is not reachable here (next point). The session is closed all the same, by the
-  start-up's close, which the chain then shows.
-- The facilitator is not public. The `closeUrl` in the offers names its internal address, `http://127.0.0.1:<port>/close`:
-  a client that falls back on the sponsored close would call that address on the buyer's own machine, so that
-  fallback does not apply to this deployment. The gate's close is the path.
-- If Kora exits, the process logs `{"event":"kora_exited",…}` with the end of Kora's output, stops, and exits with
-  status 1; Fly.io starts it again. `/health` answers for the stream only.
-- Kora is started with the RPC URL on its command line, so the URL is visible to the machine's processes (`ps`).
-````
+- what the process runs and what it offers (1000 base units a second, 5 s to 300 s, 100 s by default, the 60 s idle
+  close);
+- the variables (`STINT_SELLER_SEED`, `STINT_SELLER_RPC_URL`, `STINT_SELLER_WS_URL`, `STINT_SELLER_SCAN_RPC_URL`,
+  `PORT`, `HOST`, `PUBLIC_ORIGIN`, `KORA_BIN`);
+- the five keys, the seed made for the deployment alone and the funding key's margin;
+- how to run it locally on a seed of its own;
+- the steps to deploy on Fly.io, in which the seed and the RPC URL reach `fly` on its standard input and never a
+  command line;
+- how it behaves in operation (restarts, the closes at start-up, the facilitator that is not public, Kora's exit and
+  the restart policy, the signals, the RPC URL visible to `ps`).
 
 - [ ] **Step 4: Build the image locally (optional: needs Docker)**
 
@@ -2527,7 +2474,7 @@ git commit -m "Add the Claude Desktop example's shared state and panel model" -m
 **Interfaces:**
 - Consumes: `Policy` (`packages/client/src/policy.ts:11-31`; `programs` defaults to the Stint program),
   `SOLANA_DEVNET`, `SOLANA_MAINNET`, `USDC_DEVNET` (`packages/x402/src/constants.ts:7-11`), the key-file checks of
-  `packages/mcp/src/config.ts:114-141` (64 bytes; a message that never quotes the file).
+  `packages/mcp/src/config.ts:64-90` (64 bytes; a message that never quotes the file).
 - Produces:
   - from `src/config.ts` (the budget is 2.000 USDC an hour, deviation 15):
     `DEFAULT_GATE_URL = "https://stint-demo.lxfoundry.ai"`, `DEFAULT_RPC_URL = "https://api.devnet.solana.com"`,
@@ -4782,7 +4729,7 @@ a light background. At most two primary buttons show at a time: Launch with Refr
 
 **Interfaces:**
 - Consumes: from `@modelcontextprotocol/ext-apps/app-with-deps` 2.0.4: `new App({ name, version })`; the setters
-  `ontoolinput`, `ontoolresult` (`params.structuredContent`), `onhostcontextchanged`, set before `await app.connect()`
+  `ontoolinput`, `ontoolresult` (`params.structuredContent`), `onhostcontextchanged` (optional), set before `await app.connect()`
   (no transport); `app.callServerTool({ name, arguments })` → `{ structuredContent, isError, content }`;
   `app.openLink({ url })` → `{ isError? }` (the host asks the person to confirm); `app.updateModelContext({ content })`;
   `app.getHostContext()`; `applyDocumentTheme(theme)`, `applyHostStyleVariables(variables)`, `applyHostFonts(css)`.
@@ -4983,6 +4930,7 @@ function applyHost(look: HostLook): void {
 // Set before `connect`: the host may send the tool's input and result as soon as the panel is connected.
 app.ontoolinput = () => {};
 app.ontoolresult = (params) => accept(params.structuredContent);
+// The host's theme (optional).
 app.onhostcontextchanged = (context) => applyHost(context as HostLook);
 
 function textOf(answer: ToolAnswer): string {
@@ -5001,7 +4949,7 @@ function schedulePoll(delayMs: number): void {
   pollTimer = setTimeout(() => void poll(), delayMs);
 }
 
-/** Reads the state every 2 s, and every 0.5 s while an action runs: rows fill in as the exchange goes. */
+/** Reads the state every 2 s, and every 0.5 s while an action runs (optional: rows fill in as the exchange goes). */
 async function poll(): Promise<void> {
   try {
     await callTool(TOOL.state);
@@ -5153,6 +5101,7 @@ function render(): void {
   element("paid").style.width = `${paid * 100}%`;
   element("used").style.width = paid > 0 ? `${(used / paid) * 100}%` : "0";
   element("time-left").textContent = session.state === "open" ? `${secondsLeft(session, nowMs)} s of paid time left` : "";
+  // The stream's message count (optional).
   element("frames").textContent = session.sessionId ? `${session.frames} stream ${session.frames === 1 ? "message" : "messages"}` : "";
   const busy = acting ?? state.busy;
   const running = session.state === "opening" || session.state === "open" || session.state === "closing";
