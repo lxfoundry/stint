@@ -78,9 +78,14 @@ describe("rejectedWithProgramError", () => {
 });
 
 describe("refusalOf", () => {
-  it("gives a StintError's status, the error its body names, and its body", async () => {
+  it("gives a StintError's status, the error its body names, its body and its message", async () => {
     const body = { error: "invalid_duration", minSeconds: 5, maxSeconds: 120 };
-    expect(await refusalOf(Promise.reject(new StintError("refused", 400, body)))).toEqual({ status: 400, reason: "invalid_duration", body });
+    expect(await refusalOf(Promise.reject(new StintError("refused", 400, body)))).toEqual({
+      status: 400,
+      reason: "invalid_duration",
+      body,
+      message: "refused",
+    });
   });
 
   it("is undefined for a call that went through, and throws any other error", async () => {

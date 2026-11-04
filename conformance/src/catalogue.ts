@@ -7,6 +7,7 @@ import { failedPayment } from "./scenarios/06-failed-payment.js";
 import { unilateralClose } from "./scenarios/07-unilateral-close.js";
 import { tokenRefusals } from "./scenarios/08-token-refusals.js";
 import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
+import { allowanceFunding } from "./scenarios/12-allowance-funding.js";
 import { mismatchedPayload } from "./scenarios/13-mismatched-payload.js";
 import { samePaymentTwice } from "./scenarios/14-same-payment-twice.js";
 import { sponsoredClose } from "./scenarios/15-sponsored-close.js";
@@ -57,7 +58,7 @@ export const catalogue: readonly Scenario[] = [
   required(9, "Disconnect past the grace period; reconnect within it; never connect", disconnectAndGrace),
   pending(10, "Resource outage", ["stack"], "ownStack"),
   pending(11, "Two gate instances, reconnecting elsewhere", ["stack"], "ownStack"),
-  pending(12, "Allowance funding", ["allowance"]),
+  required(12, "Allowance funding", allowanceFunding, ["allowance"]),
   required(13, "Payment whose accepted differs by one byte; x402Version 1", mismatchedPayload),
   required(14, "The same payment sent twice", samePaymentTwice),
   required(15, "Sponsored close through closeUrl", sponsoredClose),

@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createSolanaRpcSubscriptions } from "@solana/kit";
 import { createGate, type GateConfig } from "@lxfoundry/stint-gate";
@@ -20,6 +20,11 @@ export interface StreamConfig {
   readonly rpcWsUrl: string;
   /** The gate's configuration, but its origin and adapter, which the stream supplies. */
   readonly gate: Omit<GateConfig<null>, "origin" | "adapter">;
+  /**
+   * An HTML page answered to `GET /` and `HEAD /`, such as a page that says what the deployment sells and how to buy
+   * it. Without one, `/` is a 404 like any other path the gate does not serve.
+   */
+  readonly home?: string;
 }
 
 export interface RunningStream {
@@ -34,6 +39,18 @@ function httpOrigin(value: string): string {
     throw new TypeError("The stream's origin must be an http or https URL, such as https://stream.example.com");
   }
   return url.origin;
+}
+
+/** A static page: no script runs in it, and nothing on it loads from elsewhere. */
+function sendHtml(response: ServerResponse, page: string, headOnly: boolean): void {
+  response.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": Buffer.byteLength(page),
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "x-content-type-options": "nosniff",
+    "cache-control": "no-cache",
+  });
+  response.end(headOnly ? undefined : page);
 }
 
 /** The example resource with its gate mounted as middleware (spec §7.6, §8). */
@@ -60,6 +77,9 @@ export async function startStream(config: StreamConfig): Promise<RunningStream> 
       .then((handled) => {
         if (handled) return;
         if (request.method === "GET" && request.url === "/health") return sendJson(response, 200, { ok: true });
+        if (config.home !== undefined && request.url === "/" && (request.method === "GET" || request.method === "HEAD")) {
+          return sendHtml(response, config.home, request.method === "HEAD");
+        }
         sendJson(response, 404, { error: "not_found" });
       })
       .catch((error: unknown) => {

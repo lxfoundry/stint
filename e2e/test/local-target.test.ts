@@ -18,8 +18,9 @@ describe("local target", () => {
     await stack?.stop();
   });
 
-  it("offers chain control, stack control and the facilitator's API, but not allowance funding yet", () => {
-    expect([...stack.target.capabilities].sort()).toEqual(["chain", "facilitatorApi", "stack"]);
+  it("offers chain control, stack control, the facilitator's API and allowance funding", () => {
+    expect([...stack.target.capabilities].sort()).toEqual(["allowance", "chain", "facilitatorApi", "stack"]);
+    expect(stack.context().allowance).toBeDefined();
   });
 
   it("offers what every required scenario needs, so that a run of the scenarios runs each one", () => {

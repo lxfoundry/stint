@@ -28,11 +28,11 @@ type SystemCall =
   | { readonly kind: "fund"; readonly accounts: readonly Address[]; readonly lamports: bigint }
   | { readonly kind: "other"; readonly accounts: readonly Address[] };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** Every string anywhere in a parsed instruction's `info`: a superset of the addresses it names. */
-function stringsIn(value: unknown): string[] {
+export function stringsIn(value: unknown): string[] {
   if (typeof value === "string") return [value];
   if (Array.isArray(value)) return value.flatMap(stringsIn);
   if (isRecord(value)) return Object.values(value).flatMap(stringsIn);
@@ -105,7 +105,7 @@ export function checkPayerFunding(
   return { ok: true, value: null };
 }
 
-const asIndex = (value: unknown) => (typeof value === "number" || typeof value === "bigint" ? Number(value) : undefined);
+export const asIndex = (value: unknown) => (typeof value === "number" || typeof value === "bigint" ? Number(value) : undefined);
 
 /** One inner instruction as a node returns it: `jsonParsed`, partially decoded, or compiled. */
 function readInner(ix: unknown, accounts: readonly Address[]): ExecutedInstruction | undefined {

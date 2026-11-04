@@ -136,6 +136,26 @@ export interface FacilitatorApi {
   verify(payload: PaymentPayload, requirements: PaymentRequirements): Promise<VerifyResponse>;
 }
 
+/** A recurring delegation that the harness granted for a scenario (spec §10). */
+export interface AllowanceGrant {
+  /** The owner: its USDC account funds the sessions and receives their refunds. It holds what its grant's fee and rent cost, in SOL. */
+  readonly owner: Buyer;
+  /** The agent: the delegation's delegatee, and the authority of the sessions it opens. It holds nothing. */
+  readonly agent: KeyPairSigner;
+  readonly nonce: bigint;
+  readonly delegation: Address;
+  readonly perPeriod: bigint;
+  readonly periodSeconds: number;
+}
+
+/** Grants and revokes allowances on the Subscriptions & Allowances program (spec §10.1, §12.2). */
+export interface AllowanceControl {
+  /** A new owner holding `usdc`, a new agent key, and a delegation from one to the other that starts now and ends in a day. */
+  grant(options: { readonly usdc: bigint; readonly perPeriod: bigint; readonly periodSeconds: number }): Promise<AllowanceGrant>;
+  /** Revokes the delegation and closes the owner's Subscription Authority: their rent returns to the owner. */
+  revoke(grant: AllowanceGrant): Promise<void>;
+}
+
 /** What a scenario receives when it runs. */
 export interface ScenarioContext {
   readonly target: Target;
@@ -170,6 +190,8 @@ export interface ScenarioContext {
    * `facilitatorApi` capability (scenarios 17, 18 and 19), absent otherwise.
    */
   readonly facilitator?: FacilitatorApi;
+  /** Allowances on the Subscriptions & Allowances program (spec §10): present on a target with the `allowance` capability. */
+  readonly allowance?: AllowanceControl;
   /**
    * Gives `owner`, a buyer this context made, `lamports` from the harness, for a scenario whose buyer pays a fee itself
    * (scenario 25); a buyer holds no SOL otherwise (spec §9.1). Give at least the rent-exempt minimum of an empty account,

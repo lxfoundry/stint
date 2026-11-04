@@ -6,6 +6,7 @@
   "engines": { "node": "24.22.0" },
   "scripts": {
     "generate:client": "pnpm --filter @lxfoundry/stint-program-client run generate",
+    "stint": "pnpm --dir packages/client run cli",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r --filter \"!@lxfoundry/stint-e2e\" run test",
     "test:e2e": "pnpm --filter @lxfoundry/stint-e2e run test",

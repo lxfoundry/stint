@@ -17,6 +17,7 @@ import { assertDevnet, assertProgramDeployed, closeLeftSessions, ensureTokenAcco
 import type { SellerConfig } from "./config.js";
 import { deriveSellerKeys, type SellerKeys } from "./keys.js";
 import { KORA_ALLOWED_PROGRAMS, SUBSCRIPTIONS_PROGRAM_ADDRESS, startKora } from "./kora.js";
+import { landingPage } from "./landing.js";
 
 /** 1000 base units of devnet USDC a second (0.001 USDC/s), from 5 s to 1000 s. */
 export const SELLER_TERMS: Terms = { rate: 1_000n, minSeconds: 5, maxSeconds: 1000 };
@@ -54,6 +55,17 @@ export function sellerGateSettings(keys: { readonly seller: Address; readonly re
     maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
     readRetry: READ_RETRY,
   };
+}
+
+/** The page served at `/`: this offer, how to try it, and what Stint provides. */
+export function sellerLandingPage(origin: string): string {
+  return landingPage({
+    origin,
+    terms: SELLER_TERMS,
+    durations: SELLER_DURATIONS,
+    idleCloseSeconds: IDLE_CLOSE_SECONDS,
+    programId: STINT_PROGRAM_ADDRESS,
+  });
 }
 
 export interface RunningSeller {
@@ -164,6 +176,7 @@ export async function startSeller(config: SellerConfig, log: Log = jsonLog): Pro
       port: config.port,
       origin: config.publicOrigin,
       rpcWsUrl: config.wsUrl,
+      home: sellerLandingPage(config.publicOrigin),
       gate: {
         ...sellerGateSettings({ seller: keys.seller.signer.address, receiverAuthorizer: keys.receiverAuthorizer.signer }),
         facilitator: createFacilitatorClient(facilitator.url, facilitatorApiKey),

@@ -14,7 +14,9 @@ import {
 import { CloseKind, STINT_PROGRAM_ADDRESS, decodeSession, type ClosedEvent, type Session } from "@lxfoundry/stint-program-client";
 import {
   HEADERS,
+  OWN_FUNDS,
   TransactionFailedError,
+  USDC_DEVNET,
   X402_VERSION,
   buildCloseTransaction,
   buildOpenTransaction,
@@ -29,6 +31,7 @@ import {
   readElapsedRequirements,
   waitForConfirmation,
   type ElapsedRequirements,
+  type FundingSource,
   type PaymentPayload,
   type PaymentRequired,
   type SessionStatus,
@@ -36,6 +39,7 @@ import {
   type TokenPurpose,
 } from "@lxfoundry/stint-x402";
 import { WebSocket } from "ws";
+import { allowanceShortfall, readAllowance, type AllowanceReport } from "./allowance.js";
 import { checkOffer, checkTopUp, type Policy } from "./policy.js";
 
 export class StintError extends Error {
@@ -100,6 +104,13 @@ export interface StintClient {
   open(url: string, options?: { readonly seconds?: number }): Promise<StintSession>;
   /** What the period budget still allows. */
   remainingBudget(): bigint;
+  /** Where payments come from: this signer's own USDC, or an owner's allowance (spec §10). */
+  readonly funding: FundingSource;
+  /**
+   * What the chain says about the allowance, for the policy's first asset (spec §10.3); undefined when the client pays
+   * from its own USDC, or has no `rpc` to read it with.
+   */
+  allowance(): Promise<AllowanceReport | undefined>;
 }
 
 export interface ClientOptions {
@@ -133,6 +144,15 @@ export interface ClientOptions {
    * limits as its other requests (`requestTimeoutMs`, `closeRequestTimeoutMs`), whatever the node's transport does.
    */
   readonly rpc?: Rpc<SolanaRpcApi>;
+  /**
+   * Funds every open and top-up from a recurring delegation that `owner` granted this signer on the Subscriptions &
+   * Allowances program (spec §10), instead of from the signer's own USDC. Refunds go back to the owner. `nonce` names the
+   * delegation, default 0. With `rpc`, the client reads the allowance before it signs and refuses a payment it cannot
+   * fund. A read of the node that fails refuses the payment too: the client does not sign what it could not check.
+   * Without `rpc`, such a payment is refused by the facilitator's simulation, as `simulation_failed`. The policy's limits
+   * apply as well.
+   */
+  readonly allowance?: { readonly owner: Address; readonly nonce?: bigint };
 }
 
 async function readBody(response: Response): Promise<unknown> {
@@ -267,6 +287,24 @@ export function createStintClient(options: ClientOptions): StintClient {
   const closeRequestTimeoutMs = timeLimitMs("closeRequestTimeoutMs", options.closeRequestTimeoutMs, DEFAULT_CLOSE_REQUEST_TIMEOUT_MS);
   /** A read of the client's node, given up after `requestTimeoutMs`: the default transport of `@solana/kit` never gives up. */
   const readLimit = () => ({ abortSignal: AbortSignal.timeout(requestTimeoutMs) });
+  const funding: FundingSource = options.allowance
+    ? { kind: "allowance", owner: options.allowance.owner, nonce: options.allowance.nonce ?? 0n }
+    : OWN_FUNDS;
+
+  /** With an allowance and a node, refuses a payment of `amount` that the allowance cannot fund, before anything is signed. */
+  async function checkAllowance(mint: Address, amount: bigint): Promise<void> {
+    if (funding.kind !== "allowance" || !options.rpc) return;
+    const report = await readAllowance(options.rpc, { owner: funding.owner, agent: options.signer.address, mint, nonce: funding.nonce }, readLimit());
+    const why = allowanceShortfall(report, amount);
+    if (why) throw new StintError(`The allowance cannot fund this payment: ${why}`);
+  }
+
+  /** What a refusal says when the payment came from an allowance and the chain refused it (spec §10.3). */
+  const refusalHint = (body: unknown): string =>
+    funding.kind === "allowance" && (body as { error?: unknown } | undefined)?.error === "simulation_failed"
+      ? " (with an allowance, this is how a payment it cannot fund is refused: used up for the period, expired or revoked, or the owner's balance too low)"
+      : "";
+
   const ledger: { readonly at: number; readonly amount: bigint }[] = [];
   const locked = () => {
     const since = now() - options.policy.budget.periodSeconds * 1000;
@@ -626,7 +664,8 @@ export function createStintClient(options: ClientOptions): StintClient {
         };
         let signature: string;
         try {
-          const transaction = await buildTopUpTransaction({ requirements: entry, authority: options.signer, decimals: check.decimals });
+          await checkAllowance(address(entry.asset), check.amount);
+          const transaction = await buildTopUpTransaction({ requirements: entry, authority: options.signer, decimals: check.decimals, funding });
           const payload: PaymentPayload = {
             x402Version: X402_VERSION,
             resource: required.resource,
@@ -644,7 +683,7 @@ export function createStintClient(options: ClientOptions): StintClient {
         // the top-up had landed, a close that refunds what the session had not used, the top-up included.
         if (answer.status === 400 || answer.status === 402 || answer.status === 404) {
           undo();
-          throw new StintError(`The gate refused the top-up: ${describeBody(answer.body)}`, answer.status, answer.body);
+          throw new StintError(`The gate refused the top-up: ${describeBody(answer.body)}${refusalHint(answer.body)}`, answer.status, answer.body);
         }
         if (answer.status !== 200) {
           throw new StintError(`The top-up is not confirmed (HTTP ${answer.status}); the payment may still land`, answer.status, answer.body);
@@ -680,6 +719,12 @@ export function createStintClient(options: ClientOptions): StintClient {
 
   return {
     remainingBudget: () => options.policy.budget.amount - locked(),
+    funding,
+    async allowance() {
+      if (funding.kind !== "allowance" || !options.rpc) return undefined;
+      const mint = (options.policy.assets ?? [USDC_DEVNET])[0]!.mint;
+      return readAllowance(options.rpc, { owner: funding.owner, agent: options.signer.address, mint, nonce: funding.nonce }, readLimit());
+    },
 
     async open(url, { seconds } = {}) {
       const gateUrl = url.replace(/\/+$/, "");
@@ -700,7 +745,8 @@ export function createStintClient(options: ClientOptions): StintClient {
       let built: Awaited<ReturnType<typeof buildOpenTransaction>>;
       let signature: string;
       try {
-        built = await buildOpenTransaction({ requirements: offer, authority: options.signer, decimals: check.decimals });
+        await checkAllowance(address(offer.asset), check.amount);
+        built = await buildOpenTransaction({ requirements: offer, authority: options.signer, decimals: check.decimals, funding });
         const payload: PaymentPayload = {
           x402Version: X402_VERSION,
           resource: required.resource,
@@ -715,7 +761,7 @@ export function createStintClient(options: ClientOptions): StintClient {
       const answer = await send(endpoint, signature);
       if (answer.status === 402 || answer.status === 400) {
         release(); // refused before settlement: nothing was charged
-        throw new StintError(`The gate refused the payment: ${describeBody(answer.body)}`, answer.status, answer.body);
+        throw new StintError(`The gate refused the payment: ${describeBody(answer.body)}${refusalHint(answer.body)}`, answer.status, answer.body);
       }
       if (answer.status !== 201) {
         throw new StintError(`The open is not confirmed (HTTP ${answer.status}); the payment may still land`, answer.status, answer.body);

@@ -44,18 +44,18 @@ export function rejectedWithProgramError(error: unknown, code: number): boolean 
 }
 
 /**
- * How a call of the session client was refused: the `StintError`'s HTTP status, the `error` its body names, and its body;
- * undefined if the call went through. Any other error is thrown.
+ * How a call of the session client was refused: the `StintError`'s HTTP status, the `error` its body names, its body and
+ * its message; undefined if the call went through. Any other error is thrown.
  */
 export async function refusalOf(
   attempt: Promise<unknown>,
-): Promise<{ readonly status?: number; readonly reason?: unknown; readonly body?: unknown } | undefined> {
+): Promise<{ readonly status?: number; readonly reason?: unknown; readonly body?: unknown; readonly message: string } | undefined> {
   try {
     await attempt;
     return undefined;
   } catch (error) {
     if (!(error instanceof StintError)) throw error;
-    return { status: error.status, reason: (error.body as { error?: unknown } | undefined)?.error, body: error.body };
+    return { status: error.status, reason: (error.body as { error?: unknown } | undefined)?.error, body: error.body, message: error.message };
   }
 }
 

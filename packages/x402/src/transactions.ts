@@ -3,7 +3,6 @@ import {
   TOKEN_PROGRAM_ADDRESS,
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstruction,
-  getTransferCheckedInstruction,
 } from "@solana-program/token";
 import {
   address,
@@ -30,6 +29,7 @@ import {
   getTopUpInstruction,
   type Session,
 } from "@lxfoundry/stint-program-client";
+import { OWN_FUNDS, fundingInstruction, refundOwnerOf, type FundingSource } from "./funding.js";
 import type { ElapsedRequirements } from "./types.js";
 
 /** A fresh random seed for every session (spec §4.1). */
@@ -63,6 +63,8 @@ export interface BuildOpenInput {
   /** The asset's decimals, from the client's allowlist (spec §5.1, "Decimals"). */
   readonly decimals: number;
   readonly seed?: bigint;
+  /** Where the deposit comes from (spec §10). Default: the authority's own associated token account. */
+  readonly funding?: FundingSource;
 }
 
 export interface BuiltOpen {
@@ -73,8 +75,8 @@ export interface BuiltOpen {
 
 /**
  * The `open` layout of spec §5.3: create the vault (funded by the rent payer), fund it with
- * exactly `amount` from the authority's associated token account, then `stint.open`. Refunds go
- * back to the authority's account.
+ * exactly `amount`, from the authority's associated token account or by one pull from its
+ * allowance (spec §10.2), then `stint.open`. Refunds go back to the account the money came from.
  */
 export async function buildOpenTransaction(input: BuildOpenInput): Promise<BuiltOpen> {
   const { requirements, authority } = input;
@@ -83,20 +85,13 @@ export async function buildOpenTransaction(input: BuildOpenInput): Promise<Built
   const seed = input.seed ?? randomSeed();
   const [session] = await findSessionPda(authority.address, seed);
   const vault = await associatedTokenAddress(session, mint);
-  const source = await associatedTokenAddress(authority.address, mint);
+  const funding = input.funding ?? OWN_FUNDS;
   // One signer object per address: the rent payer appears in two instructions.
   const rentPayer = createNoopSigner(address(extra.rentPayer));
 
   const instructions = [
     getCreateAssociatedTokenIdempotentInstruction({ payer: rentPayer, ata: vault, owner: session, mint }),
-    getTransferCheckedInstruction({
-      source,
-      mint,
-      destination: vault,
-      authority,
-      amount: BigInt(requirements.amount),
-      decimals: input.decimals,
-    }),
+    await fundingInstruction({ funding, authority, mint, vault, amount: BigInt(requirements.amount), decimals: input.decimals }),
     getOpenInstruction({
       authority,
       rentPayer,
@@ -105,7 +100,7 @@ export async function buildOpenTransaction(input: BuildOpenInput): Promise<Built
       vault,
       receiver: address(requirements.payTo),
       receiverAuthorizer: address(extra.receiverAuthorizer),
-      refundOwner: authority.address,
+      refundOwner: refundOwnerOf(funding, authority.address),
       ...(await eventAccounts()),
       seed,
       rate: BigInt(extra.rate),
@@ -127,12 +122,14 @@ export interface BuildTopUpInput {
   readonly authority: TransactionSigner;
   /** The asset's decimals, from the client's allowlist (spec §5.1, "Decimals"). */
   readonly decimals: number;
+  /** Where the deposit comes from (spec §10). Default: the authority's own associated token account. */
+  readonly funding?: FundingSource;
 }
 
 /**
- * The `topUp` layout of spec §5.3: fund the session's vault with exactly `amount` from the authority's associated token
- * account, then `stint.top_up`. Refunds go to the session's stored refund owner, which is the authority for every session
- * this client opens. The fee payer's slot stays empty; nobody else signs.
+ * The `topUp` layout of spec §5.3: fund the session's vault with exactly `amount`, from the account the session's deposit
+ * came from: pass the `funding` the session was opened with, since the facilitator requires the funding to come from the
+ * stored refund owner (spec §5.4). Then `stint.top_up`. The fee payer's slot stays empty; nobody else signs.
  */
 export async function buildTopUpTransaction(input: BuildTopUpInput): Promise<string> {
   const { requirements, authority } = input;
@@ -142,11 +139,11 @@ export async function buildTopUpTransaction(input: BuildTopUpInput): Promise<str
   const session = address(extra.session);
   const vault = await associatedTokenAddress(session, mint);
   const instructions = [
-    getTransferCheckedInstruction({
-      source: await associatedTokenAddress(authority.address, mint),
-      mint,
-      destination: vault,
+    await fundingInstruction({
+      funding: input.funding ?? OWN_FUNDS,
       authority,
+      mint,
+      vault,
       amount: BigInt(requirements.amount),
       decimals: input.decimals,
     }),
