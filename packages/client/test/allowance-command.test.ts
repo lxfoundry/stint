@@ -19,6 +19,9 @@ import { USDC_DEVNET } from "@lxfoundry/stint-x402";
 import { DEVNET_GENESIS_HASH, runAllowanceCommand } from "../src/allowance-command.js";
 import { accountsRpc } from "./accounts-rpc.js";
 
+/** An expiry the command accepts whenever the test runs: it refuses one in the past. */
+const inAYear = (): string => new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+
 async function ownerFile(): Promise<{ readonly json: string; readonly address: string }> {
   const seed = crypto.getRandomValues(new Uint8Array(32));
   const signer = await createKeyPairSignerFromPrivateKeyBytes(seed);
@@ -47,7 +50,7 @@ describe("stint allowance (spec §10.1)", () => {
     const agent = (await generateKeyPairSigner()).address;
     const h = harness();
     const code = await runAllowanceCommand(
-      ["grant", "--keypair", "/k/owner.json", "--agent", agent, "--per-period", "300000", "--period", "3600", "--expires", "2030-01-01T00:00:00Z"],
+      ["grant", "--keypair", "/k/owner.json", "--agent", agent, "--per-period", "300000", "--period", "3600", "--expires", inAYear()],
       h.deps(owner.json),
     );
     expect(code).toBe(0);
@@ -64,7 +67,7 @@ describe("stint allowance (spec §10.1)", () => {
     const owner = await ownerFile();
     const h = harness("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d");
     const code = await runAllowanceCommand(
-      ["grant", "--keypair", "/k/owner.json", "--agent", owner.address, "--per-period", "1", "--period", "60", "--expires", "2030-01-01T00:00:00Z"],
+      ["grant", "--keypair", "/k/owner.json", "--agent", owner.address, "--per-period", "1", "--period", "60", "--expires", inAYear()],
       h.deps(owner.json),
     );
     expect(code).not.toBe(0);
@@ -162,7 +165,7 @@ describe("stint allowance (spec §10.1)", () => {
     });
     const h = harness();
     const code = await runAllowanceCommand(
-      ["grant", "--keypair", "/k/owner.json", "--agent", agent, "--per-period", "1", "--period", "60", "--expires", "2030-01-01T00:00:00Z"],
+      ["grant", "--keypair", "/k/owner.json", "--agent", agent, "--per-period", "1", "--period", "60", "--expires", inAYear()],
       { ...h.deps(owner.json), send: async () => { throw refused; } },
     );
     expect(code).toBe(1);
