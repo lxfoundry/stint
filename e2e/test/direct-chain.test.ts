@@ -1,13 +1,14 @@
-import { fetchToken } from "@solana-program/token";
+import { fetchMaybeToken, fetchMint, fetchToken } from "@solana-program/token";
 import { createStintClient } from "@lxfoundry/stint-client";
 import { rejectedWithProgramError, sleep, type DirectChain } from "@lxfoundry/stint-conformance";
-import { CloseKind, STINT_ERROR__SESSION_EXPIRED, fetchMaybeSession, fetchSession, paidUntil } from "@lxfoundry/stint-program-client";
+import { CloseKind, STINT_ERROR__SESSION_EXPIRED, dueAt, fetchMaybeSession, fetchSession, paidUntil } from "@lxfoundry/stint-program-client";
 import { fetchClosedEvent, lamportBalances, tokenBalanceChanges } from "@lxfoundry/stint-x402";
-import type { Address, KeyPairSigner } from "@solana/kit";
+import { generateKeyPairSigner, some, type Address, type KeyPairSigner } from "@solana/kit";
 import { fetchSysvarClock } from "@solana/sysvars";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { newBuyer } from "../src/fixtures/buyers.js";
 import { fundSol, newHarnessKey } from "../src/fixtures/keys.js";
+import { USDC_DEVNET_MINT } from "../src/fixtures/usdc.js";
 import { waitForNewSlot } from "../src/network/surfnet.js";
 import { createDirectChain } from "../src/targets/direct.js";
 import { startLocalStack, type LocalStack } from "../src/targets/local.js";
@@ -211,4 +212,103 @@ describe("sessions opened straight on the program, on the local stack", () => {
     await expect.poll(() => sessionExists(opened.session), { timeout: 30_000, interval: 500 }).toBe(false);
     expect(await balanceOf(stack.facilitator.rentPayer)).toBe(rentBefore);
   }, 60_000);
+
+  it("opens a session that names the gate's receiver authorizer when asked to, still with the harness's rent payer", async () => {
+    const buyer = await buyerWith(1_000_000n);
+    const gateAuthorizer = stack.keys.receiverAuthorizer.signer.address;
+
+    const opened = await direct.open({ buyer, seconds: 30, receiverAuthorizer: gateAuthorizer });
+
+    const stored = (await fetchSession(stack.network.rpc, opened.session, { commitment: "confirmed" })).data;
+    expect(stored.receiverAuthorizer).toBe(gateAuthorizer);
+    expect(stored.rentPayer).toBe(rentPayer.address);
+    expect(opened.mint).toBe(USDC_DEVNET_MINT);
+    await direct.close(opened, buyer.signer);
+  });
+
+  it("makes one second mint, of 6 decimals and its own authority, funds an owner in it, and gives the account's rent back", async () => {
+    const other = await direct.otherMint();
+    expect((await direct.otherMint()).mint).toBe(other.mint);
+    expect(other.mint).not.toBe(USDC_DEVNET_MINT);
+    const mint = (await fetchMint(stack.network.rpc, other.mint, { commitment: "confirmed" })).data;
+    expect(mint.decimals).toBe(6);
+    expect(mint.mintAuthority).toEqual(some(other.mint));
+    const owner = await direct.newKey();
+
+    const account = await other.fund(owner.address, 50_000n);
+    expect(await other.fund(owner.address, 0n)).toBe(account);
+    expect((await fetchToken(stack.network.rpc, account, { commitment: "confirmed" })).data.amount).toBe(50_000n);
+
+    await other.reclaim(owner);
+    expect((await fetchMaybeToken(stack.network.rpc, account, { commitment: "confirmed" })).exists).toBe(false);
+  });
+
+  /** A key with SOL, which the test holds. */
+  const fundedKey = async (): Promise<KeyPairSigner> => {
+    const key = await newHarnessKey();
+    fundSol(stack.network, key.signer.address, 5);
+    await waitForNewSlot(stack.network.rpc);
+    return key.signer;
+  };
+
+  /** A direct chain on the stack's chain and seller whose fee payer the test holds, and whose second mint is `mintKey` when given. */
+  const directChainPaidBy = (feePayer: KeyPairSigner, mintKey?: KeyPairSigner): DirectChain =>
+    createDirectChain({
+      rpc: stack.network.rpc,
+      terms: TEST_TERMS,
+      seller: { wallet: stack.keys.seller.signer.address, usdcAccount: stack.keys.sellerUsdcAccount },
+      feePayer,
+      rentPayer: async () => rentPayer,
+      readRetry: ONE_READ,
+      ...(mintKey === undefined ? {} : { otherMint: async () => mintKey }),
+    });
+
+  it("gives the rent of a reclaimed account back to the direct chain's fee payer", async () => {
+    const payer = await fundedKey();
+    const chain = directChainPaidBy(payer);
+    const other = await chain.otherMint();
+    const owner = await chain.newKey();
+    await other.fund(owner.address, 50_000n);
+    const rent = await stack.network.rpc.getMinimumBalanceForRentExemption(165n).send();
+    const before = await balanceOf(payer.address);
+
+    await other.reclaim(owner);
+
+    // The fee payer pays the fee of two signatures, its own and the owner's, and gets the account's rent back.
+    expect((await balanceOf(payer.address)) - before).toBe(rent - 10_000n);
+  });
+
+  it("finds the second mint an earlier run made, without creating it again, and mints with it", async () => {
+    const mintKey = await generateKeyPairSigner();
+    const first = await directChainPaidBy(await fundedKey(), mintKey).otherMint();
+
+    // A second chain with the same key, as the devnet target is on every run: creating the account again would fail.
+    const second = await directChainPaidBy(await fundedKey(), mintKey).otherMint();
+
+    expect(second.mint).toBe(first.mint);
+    const owner = await direct.newKey();
+    const account = await second.fund(owner.address, 1_000n);
+    expect((await fetchToken(stack.network.rpc, account, { commitment: "confirmed" })).data.amount).toBe(1_000n);
+  });
+
+  it("opens a session in the second mint from the buyer's account for it, and closes it paying the seller's account for it", async () => {
+    const other = await direct.otherMint();
+    const signer = await direct.newKey();
+    const account = await other.fund(signer.address, 30_000n);
+    const sellerAccount = await other.fund(stack.keys.seller.signer.address, 0n);
+
+    const opened = await direct.open({ buyer: { signer, usdcAccount: account }, seconds: 30, mint: other.mint });
+
+    const stored = (await fetchSession(stack.network.rpc, opened.session, { commitment: "confirmed" })).data;
+    expect(stored.mint).toBe(other.mint);
+    expect(opened).toMatchObject({ mint: other.mint, receiverToken: sellerAccount, refundTo: account, deposit: 30_000n });
+    expect((await fetchToken(stack.network.rpc, opened.vault, { commitment: "confirmed" })).data.amount).toBe(30_000n);
+    const signature = await direct.close(opened, signer);
+    const closed = await fetchClosedEvent(stack.network.rpc, signature, ONE_READ);
+    expect(closed).toBeDefined();
+    const due = dueAt(stored, closed!.at);
+    const changes = await tokenBalanceChanges(stack.network.rpc, signature, ONE_READ);
+    expect(changes.get(sellerAccount)).toBe(due);
+    expect(changes.get(account)).toBe(30_000n - due);
+  });
 });

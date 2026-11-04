@@ -17,11 +17,36 @@ const FIRST_BUYER_INDEX = 5;
  */
 export const BUYER_POOL = 96;
 
-/** The key at `index` of `seed`, of any length: HMAC-SHA-256 of the index, keyed by the seed, taken as an Ed25519 private key. */
-export async function deriveKey(seed: Uint8Array, index: number): Promise<HarnessKey> {
-  const privateKey = Uint8Array.from(createHmac("sha256", seed).update(`stint-devnet-harness/${index}`).digest());
+/** The key of `label` under `seed`: HMAC-SHA-256 of the label, keyed by the seed, taken as an Ed25519 private key. */
+async function keyOf(seed: Uint8Array, label: string): Promise<HarnessKey> {
+  const privateKey = Uint8Array.from(createHmac("sha256", seed).update(`stint-devnet-harness/${label}`).digest());
   const signer = await createKeyPairSignerFromPrivateKeyBytes(privateKey);
   return { signer, secretKey: Uint8Array.from([...privateKey, ...getAddressEncoder().encode(signer.address)]) };
+}
+
+/** The key at `index` of `seed`, of any length: HMAC-SHA-256 of the index, keyed by the seed, taken as an Ed25519 private key. */
+export function deriveKey(seed: Uint8Array, index: number): Promise<HarnessKey> {
+  return keyOf(seed, String(index));
+}
+
+/** The name of the second mint's key (spec §12.6): the mint's address, and its mint authority. */
+export const OTHER_MINT_KEY = "other-mint";
+
+/** What a key name looks like: a lowercase letter first, then lowercase letters, digits and hyphens. No index matches it. */
+const KEY_NAME = /^[a-z][a-z0-9-]*$/;
+
+/**
+ * A key of `seed` named rather than numbered: it lies outside `KEY_INDEX` and the buyer pool, so it never moves when the
+ * pool grows. It is not one of `holders`: the clean-up neither empties it nor signs with it. A name that an index could
+ * be, such as "5", is refused, because it would give the key of that index.
+ */
+export function deriveNamedKey(seed: Uint8Array, name: string): Promise<HarnessKey> {
+  if (!KEY_NAME.test(name)) {
+    return Promise.reject(
+      new Error(`a key name starts with a lowercase letter and holds only lowercase letters, digits and hyphens, not ${JSON.stringify(name)}`),
+    );
+  }
+  return keyOf(seed, name);
 }
 
 export interface DevnetKeys {

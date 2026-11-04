@@ -5,6 +5,7 @@ import { topUpBeforeAndAfterExpiry } from "./scenarios/04-top-up.js";
 import { paymentRefusals } from "./scenarios/05-payment-refusals.js";
 import { failedPayment } from "./scenarios/06-failed-payment.js";
 import { unilateralClose } from "./scenarios/07-unilateral-close.js";
+import { tokenRefusals } from "./scenarios/08-token-refusals.js";
 import { disconnectAndGrace } from "./scenarios/09-disconnect-and-grace.js";
 import { allowanceFunding } from "./scenarios/12-allowance-funding.js";
 import { mismatchedPayload } from "./scenarios/13-mismatched-payload.js";
@@ -14,12 +15,14 @@ import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { topUpUnknownSession } from "./scenarios/17-top-up-unknown-session.js";
 import { payerMisuse } from "./scenarios/18-payer-misuse.js";
 import { verifyValidOpen } from "./scenarios/19-verify-valid-open.js";
+import { otherMintRefused } from "./scenarios/20-other-mint.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
 import { gateUnreachableAtClose } from "./scenarios/24-gate-unreachable-at-close.js";
 import { gateAndFacilitatorUnreachableAtClose } from "./scenarios/25-gate-and-facilitator-unreachable-at-close.js";
 import { expiredSessionNobodyCloses } from "./scenarios/26-expired-session-nobody-closes.js";
 import { durationsOutOfBounds } from "./scenarios/32-durations-out-of-bounds.js";
 import { topUpWhileClosingAtExpiry } from "./scenarios/34-top-up-while-closing.js";
+import { adoptedSession } from "./scenarios/35-adopted-session.js";
 import type { Capability, IsolationGroup, Scenario } from "./types.js";
 
 /** The scenarios of spec section 12.7. Each is pending until a stage builds it. */
@@ -51,7 +54,7 @@ export const catalogue: readonly Scenario[] = [
   required(5, "Payment with wrong terms, a wrong amount, or a Memo instruction", paymentRefusals),
   required(6, "Failed payment", failedPayment),
   required(7, "Unilateral on-chain close", unilateralClose),
-  pending(8, "Token: expired, wrong aud, wrong purpose, replayed"),
+  required(8, "Token: expired, wrong aud, wrong purpose, replayed", tokenRefusals),
   required(9, "Disconnect past the grace period; reconnect within it; never connect", disconnectAndGrace),
   pending(10, "Resource outage", ["stack"], "ownStack"),
   pending(11, "Two gate instances, reconnecting elsewhere", ["stack"], "ownStack"),
@@ -63,7 +66,7 @@ export const catalogue: readonly Scenario[] = [
   required(17, "Top-up for an unknown session", topUpUnknownSession),
   required(18, "Fee payer or rent payer in a forbidden position", payerMisuse, ["facilitatorApi"]),
   required(19, "/verify of a valid open", verifyValidOpen, ["facilitatorApi"]),
-  pending(20, "Session opened on-chain with the gate's terms but another mint"),
+  required(20, "Session opened on-chain with the gate's terms but another mint", otherMintRefused),
   pending(21, "Refund account closed, a stray base unit, then expiry"),
   required(22, "The example agent's task, scripted", exampleAgentTask, ["stack"]),
   pending(23, "The gate restarts with a session open", ["stack"], "ownStack"),
@@ -78,5 +81,5 @@ export const catalogue: readonly Scenario[] = [
   required(32, "Durations out of bounds", durationsOutOfBounds),
   pending(33, "A settlement reply lost after the transaction lands", ["stack"], "ownStack"),
   required(34, "A top-up lands while the gate is closing at expiry", topUpWhileClosingAtExpiry, ["stack"], "ownStack"),
-  pending(35, "A session opened on-chain with the gate's terms is adopted"),
+  required(35, "A session opened on-chain with the gate's terms is adopted", adoptedSession),
 ];

@@ -191,7 +191,10 @@ export async function returnSolRetrying(rpc: Rpc<SolanaRpcApi>, funding: Funding
 export interface FoundSessions {
   /** Sessions of the configured USDC mint. */
   readonly sessions: Address[];
-  /** Sessions of any other mint: the harness never opens one, closing it would create accounts it cannot recover, and it is not its to fix. */
+  /**
+   * Sessions of any other mint, left alone. The one scenario that opens a session in another mint, scenario 20, closes it
+   * itself; closing a stray one here would create accounts for a mint the clean-up does not hold.
+   */
   readonly otherMint: Address[];
   /**
    * Sessions that name a held key only as their receiver. Only the authority and the rent payer sign an open, so
@@ -300,7 +303,8 @@ export async function closeSessions(
  * Brings everything the `holders` keys have on the chain back to the funding key: closes their sessions,
  * revokes the allowances they granted, then returns their USDC and SOL. Safe to run at any time and any number
  * of times, after any run or none. Sessions of a mint other than USDC that name a held key are reported as a note and left alone: they
- * do not stop a start, and closing one would create accounts for a mint the harness does not hold. So are
+ * do not stop a start, and closing one would create accounts for a mint the clean-up does not hold (scenario 20
+ * closes the session it opens in the harness's second mint itself). So are
  * sessions that name a held key only as their receiver: an outside key opened them, and they are its to close.
  * A balance that was read stale, of USDC or SOL, is read again once. Returns what went wrong; throws nothing.
  * The sessions are listed through `scanRpc`, which is `rpc` unless the caller names another endpoint: a provider's

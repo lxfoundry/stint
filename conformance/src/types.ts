@@ -56,15 +56,17 @@ export interface StackControl {
 export interface DirectSession {
   readonly session: Address;
   readonly vault: Address;
+  /** The session's mint: USDC, or the harness's second mint (`DirectChain.otherMint`). */
+  readonly mint: Address;
   /**
    * The session's rent payer, to which the rent of the session account and its vault returns at the close: a harness key
    * that is not the facilitator's for a session opened straight on the program, the facilitator's for one the gate's flow
    * opened (`directSessionOf`).
    */
   readonly rentPayer: Address;
-  /** The seller's token account, which a close pays. */
+  /** The seller's token account for the session's mint, which a close pays. */
   readonly receiverToken: Address;
-  /** The buyer's USDC account, which a close refunds. */
+  /** The buyer's token account for the session's mint, which a close refunds: its USDC account for a USDC session. */
   readonly refundTo: Address;
   /** The whole deposit, the remainder included: the session account's `deposited`. */
   readonly deposit: bigint;
@@ -74,15 +76,43 @@ export interface DirectSession {
   readonly paidUntil: bigint;
 }
 
+/** The harness's second mint (S5): 6 decimals, like USDC, and a mint authority that only the harness holds. */
+export interface OtherMint {
+  readonly mint: Address;
+  /**
+   * Creates `owner`'s associated token account for the mint if it has none (the harness pays its rent), mints `amount`
+   * into it, and returns the account. An `amount` of 0 creates the account only.
+   */
+  fund(owner: Address, amount: bigint): Promise<Address>;
+  /** Burns what `owner`'s account for the mint holds and closes the account, so that its rent returns to the harness. `owner` needs no SOL. */
+  reclaim(owner: KeyPairSigner): Promise<void>;
+}
+
 /** Opens and closes sessions straight on the program (spec §12.2). */
 export interface DirectChain {
   /**
-   * Opens a session: the buyer funds the vault, and the rent payer and the receiver authorizer are harness keys, not the
-   * stack's. `seconds` is a whole number between the offer's minimum and maximum. `remainder` (default 0) is a number of base
-   * units, below the rate, that the buyer adds to the vault: the deposit is `rate x seconds + remainder`, the session is paid
-   * for `seconds`, and a close from the paid time on pays `rate x seconds` and refunds the remainder.
+   * Opens a session: the buyer funds the vault, the rent payer is a harness key, not the stack's, and so is the receiver
+   * authorizer unless `receiverAuthorizer` names one. `seconds` is a whole number between the offer's minimum and
+   * maximum. `remainder` (default 0) is a number of base units, below the rate, that the buyer adds to the vault: the
+   * deposit is `rate x seconds + remainder`, the session is paid for `seconds`, and a close from the paid time on pays
+   * `rate x seconds` and refunds the remainder.
    */
-  open(options: { readonly buyer: Buyer; readonly seconds: number; readonly remainder?: bigint }): Promise<DirectSession>;
+  open(options: {
+    readonly buyer: Buyer;
+    readonly seconds: number;
+    readonly remainder?: bigint;
+    /**
+     * The receiver authorizer the session names. Default: a throwaway harness key, so that no gate or sweeper takes the
+     * session up. A gate's own (its offer's `extra.receiverAuthorizer`) makes it a session that gate may adopt (spec §7.3).
+     */
+    readonly receiverAuthorizer?: Address;
+    /**
+     * The session's mint. Default: USDC, funded from `buyer.usdcAccount`. Another mint (`otherMint().mint`) is funded from
+     * the buyer's associated token account for it, which `OtherMint.fund` fills, and a close then pays the seller's
+     * associated token account for it, which must exist.
+     */
+    readonly mint?: Address;
+  }): Promise<DirectSession>;
   /**
    * A `Standard` close signed by `closer`, which may be any key and needs no SOL: a harness key pays the fee. Returns the
    * transaction's signature, and rejects if the program refuses the close.
@@ -91,12 +121,14 @@ export interface DirectChain {
   /**
    * Tops up `session` on the program: `rate x seconds` from the buyer's USDC account into the session's vault, then
    * `top_up` signed by the buyer as the session's authority, in one transaction whose fee a harness key pays. It works on
-   * any session the buyer opened, through the gate or not, and goes through neither the gate nor the facilitator. Returns
-   * the transaction's signature, and rejects if the program refuses the top-up.
+   * a session the buyer opened in USDC, through the gate or not, and goes through neither the gate nor the facilitator.
+   * Returns the transaction's signature, and rejects if the program refuses the top-up.
    */
   topUp(options: { readonly buyer: Buyer; readonly session: Address; readonly seconds: number }): Promise<string>;
   /** A new key that holds nothing. */
   newKey(): Promise<KeyPairSigner>;
+  /** The harness's second mint: the same one on every call, created at the first call if it does not exist yet. */
+  otherMint(): Promise<OtherMint>;
 }
 
 /** The facilitator's `/verify` for resource servers (spec §6.1), called with the target's API key. */

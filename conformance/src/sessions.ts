@@ -21,6 +21,7 @@ export async function directSessionOf(session: Address, stored: Session): Promis
   return {
     session,
     vault: await associatedTokenAddress(session, stored.mint),
+    mint: stored.mint,
     rentPayer: stored.rentPayer,
     receiverToken: await associatedTokenAddress(stored.receiver, stored.mint),
     refundTo: await associatedTokenAddress(stored.refundOwner, stored.mint),

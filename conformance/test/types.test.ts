@@ -1,6 +1,6 @@
 import type { Address, KeyPairSigner } from "@solana/kit";
 import { describe, expectTypeOf, it } from "vitest";
-import type { Buyer, DirectChain, DirectSession, GateStartOptions, ScenarioContext, StackControl } from "../src/index.js";
+import type { Buyer, DirectChain, DirectSession, GateStartOptions, OtherMint, ScenarioContext, StackControl } from "../src/index.js";
 
 describe("the scenario context's members for stack control and direct sessions", () => {
   it("are optional, and exported with the other types", () => {
@@ -19,6 +19,14 @@ describe("the scenario context's members for stack control and direct sessions",
     expectTypeOf<DirectSession["deposit"]>().toEqualTypeOf<bigint>();
     expectTypeOf<Parameters<DirectChain["open"]>[0]["remainder"]>().toEqualTypeOf<bigint | undefined>();
     expectTypeOf<Parameters<DirectChain["open"]>[0]["seconds"]>().toEqualTypeOf<number>();
+    expectTypeOf<Parameters<DirectChain["open"]>[0]["receiverAuthorizer"]>().toEqualTypeOf<Address | undefined>();
+    expectTypeOf<Parameters<DirectChain["open"]>[0]["mint"]>().toEqualTypeOf<Address | undefined>();
+    expectTypeOf<DirectSession["mint"]>().toEqualTypeOf<Address>();
+    expectTypeOf<Awaited<ReturnType<DirectChain["otherMint"]>>>().toEqualTypeOf<OtherMint>();
+    expectTypeOf<OtherMint["mint"]>().toEqualTypeOf<Address>();
+    expectTypeOf<Parameters<OtherMint["fund"]>>().toEqualTypeOf<[owner: Address, amount: bigint]>();
+    expectTypeOf<ReturnType<OtherMint["fund"]>>().toEqualTypeOf<Promise<Address>>();
+    expectTypeOf<Parameters<OtherMint["reclaim"]>>().toEqualTypeOf<[owner: KeyPairSigner]>();
   });
 
   it("describe a gate started with its session clock ahead, and a top-up made straight on the program", () => {

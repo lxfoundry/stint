@@ -130,6 +130,11 @@ const END_RETRY_MAX_MS = 60_000;
  * connections are muted by then, and the session clock decides their close code without the event.
  */
 const CLOSE_LOOKUP_MS = 2_000;
+/**
+ * How long the gate remembers a session it has ended (spec §7.3): a node can still show a closed account for a moment,
+ * and a connect then must not adopt the session again. Far longer than a node lags; the memory is pruned as it is used.
+ */
+const ENDED_MEMORY_MS = 10 * 60_000;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -208,6 +213,20 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   const provisioning = new Map<Address, Promise<Tracked<U>>>();
   /** `jti` → when it may be forgotten (ms on the token clock). */
   const seenTokens = new Map<string, number>();
+  /** `session/started_at` of each session this gate has ended → when it may be forgotten (ms on the session clock). */
+  const endedSessions = new Map<string, number>();
+  const endedKey = (session: Address, startedAt: bigint) => `${session}/${startedAt}`;
+
+  function forgetEnded(): void {
+    const now = sessionClock();
+    for (const [key, forgetAt] of endedSessions) if (forgetAt < now) endedSessions.delete(key);
+  }
+
+  /** Whether this gate has ended the session that started at `startedAt` at this address, within `ENDED_MEMORY_MS`. */
+  function hasEnded(session: Address, startedAt: bigint): boolean {
+    forgetEnded();
+    return endedSessions.has(endedKey(session, startedAt));
+  }
   let facilitatorExtra: FacilitatorExtra | undefined;
 
   const seller: SellerTerms = {
@@ -562,6 +581,24 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     return tracked;
   }
 
+  /**
+   * The session at `session`, tracked once: an open settled again, and a connect that adopts the session, join a
+   * provisioning in flight instead of provisioning again (spec §7.3).
+   */
+  function track(session: Address, stored: Session): Promise<Tracked<U>> {
+    const tracked = sessions.get(session);
+    if (tracked) return Promise.resolve(tracked);
+    // No `await` between the lookup and the registration: a retried open, or a second connect, joins this provisioning.
+    let pending = provisioning.get(session);
+    if (!pending) {
+      pending = provision(session, stored);
+      provisioning.set(session, pending);
+      const done = () => void provisioning.delete(session);
+      pending.then(done, done);
+    }
+    return pending;
+  }
+
   async function open(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const requested = url.searchParams.get("seconds");
     const durations = requested === null ? menu : [Number(requested)];
@@ -614,19 +651,10 @@ export function createGate<U>(config: GateConfig<U>): Gate {
 
     // The node may not return the account yet right after the open confirmed.
     const stored = await readUntilFound(() => upstream(() => config.chain.readSession(session)), readRetry);
-    if (!stored) return sendJson(response, 404, { error: "unknown_session" });
-    let tracked = sessions.get(session);
-    if (!tracked) {
-      // No `await` between the lookup and the registration: a retried open joins this provisioning.
-      let pending = provisioning.get(session);
-      if (!pending) {
-        pending = provision(session, stored);
-        provisioning.set(session, pending);
-        const done = () => void provisioning.delete(session);
-        pending.then(done, done);
-      }
-      tracked = await pending;
-    }
+    // A repeated payment answered after the session closed: its account is gone, or a node that lags still shows the
+    // session this gate ended. No `await` from here to `track`'s registration.
+    if (!stored || hasEnded(session, stored.startedAt)) return sendJson(response, 404, { error: "unknown_session" });
+    const tracked = await track(session, stored);
     sendJson(response, 201, { session, paidUntil: Number(tracked.paidUntil), wsUrl: wsUrl(session) }, paymentResponse);
   }
 
@@ -768,17 +796,14 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     sendJson(response, 200, { paidUntil: Number(until > tracked.paidUntil ? until : tracked.paidUntil) }, paymentResponse);
   }
 
-  /** Checks 1 to 3 of spec §7.2. Check 4 holds for every tracked session: it opened with this gate's terms. */
-  async function authenticate(token: string | undefined, tracked: Tracked<U>, purpose: TokenPurpose): Promise<boolean> {
+  /**
+   * Checks 1 to 3 of spec §7.2, against the session's `authority` as the chain stores it. Check 4 holds for every tracked
+   * session: it opened, or was adopted, with this gate's terms.
+   */
+  async function authenticate(token: string | undefined, session: Address, authority: Address, purpose: TokenPurpose): Promise<boolean> {
     if (!token) return false;
     const now = tokenClock();
-    const check = await verifySessionToken(token, {
-      authority: tracked.stored.authority,
-      session: tracked.info.session,
-      audience: config.origin,
-      purpose,
-      nowMs: now,
-    });
+    const check = await verifySessionToken(token, { authority, session, audience: config.origin, purpose, nowMs: now });
     if (!check.ok) return false;
     for (const [jti, forgetAt] of seenTokens) if (forgetAt < now) seenTokens.delete(jti);
     if (seenTokens.has(check.claims.jti)) return false;
@@ -795,6 +820,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   async function end(tracked: Tracked<U>, reason: EndReason, code: number): Promise<void> {
     if (tracked.ended) return;
     tracked.ended = true;
+    forgetEnded();
+    endedSessions.set(endedKey(tracked.info.session, tracked.stored.startedAt), sessionClock() + ENDED_MEMORY_MS);
     disarm(tracked, "idle");
     disarm(tracked, "end");
     sessions.delete(tracked.info.session);
@@ -811,7 +838,7 @@ export function createGate<U>(config: GateConfig<U>): Gate {
   async function closeSession(request: IncomingMessage, response: ServerResponse, session: Address): Promise<void> {
     const tracked = sessions.get(session);
     if (!tracked) return sendJson(response, 404, { error: "unknown_session" });
-    if (!(await authenticate(bearer(request), tracked, "close"))) return sendJson(response, 401, { error: "unauthorized" });
+    if (!(await authenticate(bearer(request), session, tracked.stored.authority, "close"))) return sendJson(response, 401, { error: "unauthorized" });
     // The session may have ended while the token was checked, or another party may have closed it (spec §7.3).
     if (tracked.ended || tracked.endingElsewhere) return sendJson(response, 404, { error: "unknown_session" });
     // Overlapping closes share one settlement and one outcome (the first assignment is synchronous).
@@ -907,11 +934,61 @@ export function createGate<U>(config: GateConfig<U>): Gate {
     socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   }
 
+  /**
+   * A connect for a session this gate does not track (spec §7.3): one opened directly on-chain, or through another of
+   * the seller's gates. It is adopted, as if its open had just settled, only once it passes every check of spec §7.2
+   * against the account as the chain stores it: the token (checks 1 to 3, `401`), the terms, the mint and the receiver
+   * authorizer included (check 4, `403`), and the margin (check 5, `402`). An address that holds no session, or holds one
+   * this gate has ended, is `404`. Before anything is provisioned, the account is read once more, after the gate's bound
+   * on a node's lag: gone, or holding another session, it is `404`. A connect refused here adopts nothing, and neither
+   * does one whose buyer has gone by the end of that wait. Returns the tracked session, the status the upgrade is
+   * refused with, or `undefined` when nobody is left to answer.
+   */
+  async function adopt(session: Address, token: string, socket: Duplex): Promise<Tracked<U> | number | undefined> {
+    const stored = await upstream(() => config.chain.readSession(session));
+    if (!stored) return 404;
+    if (!(await authenticate(token, session, stored.authority, "connect"))) return 401;
+    if (hasEnded(session, stored.startedAt)) return 404;
+    if (!sessionMatches(stored, seller)) return 403;
+    if (Number(paidUntil(stored)) * 1000 - sessionClock() <= marginMs) return 402;
+    // Tracked by now, through an open or another connect that got there while the token was checked: join it.
+    if (sessions.has(session) || provisioning.has(session)) return track(session, stored);
+    // The account may come from a node that lags, and the subscription that adoption starts reports changes only: a
+    // close that landed just before the connect would never be heard of. So the account is read once more, once a node
+    // has had the time the gate gives it to catch up (`readRetry`). The wait comes before `track`: `provision()` arms
+    // the idle timer, which only an accepted connection disarms, and it must not run while the connect waits.
+    await sleep(readRetry.attempts * readRetry.delayMs);
+    const again = await upstream(() => config.chain.readSession(session));
+    if (!again || again.startedAt !== stored.startedAt || !sessionMatches(again, seller)) return 404;
+    if (Number(paidUntil(again)) * 1000 - sessionClock() <= marginMs) return 402;
+    // No `await` from here to `track`'s registration. A gate stopped meanwhile would set no timer to end the session, so
+    // it adopts nothing. A session this gate ended before the connect, while its token was checked or during the wait,
+    // is not adopted again (the tracked path has the same guard). A buyer whose connection dropped during the wait
+    // is not adopted either: nothing would connect to the session, and its idle timer would have to end it.
+    if (stopped) return 503;
+    if (hasEnded(session, stored.startedAt)) return 404;
+    // The server keeps an upgrade socket half-open when its peer closes, so a socket that ended is as gone as one destroyed.
+    if (socket.destroyed || socket.readableEnded) return undefined;
+    if (!sessions.has(session) && !provisioning.has(session)) log({ event: "adopt", session });
+    return track(session, again);
+  }
+
   async function connect(request: IncomingMessage, socket: Duplex, head: Buffer, url: URL, session: Address): Promise<void> {
-    const tracked = sessions.get(session);
-    if (!tracked) return refuseUpgrade(socket, 404);
     const token = bearer(request) ?? url.searchParams.get("token") ?? undefined;
-    if (!(await authenticate(token, tracked, "connect"))) return refuseUpgrade(socket, 401);
+    // Before anything is read: a connect with no token costs the chain nothing.
+    if (!token) return refuseUpgrade(socket, 401);
+    const known = sessions.get(session);
+    let tracked: Tracked<U>;
+    if (known) {
+      if (!(await authenticate(token, session, known.stored.authority, "connect"))) return refuseUpgrade(socket, 401);
+      tracked = known;
+    } else {
+      const adopted = await adopt(session, token, socket);
+      // The buyer is gone: only its half-open end is left, and nothing else would close it.
+      if (!adopted) return void socket.destroy();
+      if (typeof adopted === "number") return refuseUpgrade(socket, adopted);
+      tracked = adopted;
+    }
     // The session may have ended while the token was checked, or another party may have closed it (spec §7.3).
     if (tracked.ended || tracked.endingElsewhere) return refuseUpgrade(socket, 404);
     if (!sessionMatches(tracked.stored, seller)) return refuseUpgrade(socket, 403);
@@ -982,7 +1059,8 @@ export function createGate<U>(config: GateConfig<U>): Gate {
       }
       connect(request, socket, head, url, id).catch((error: unknown) => {
         log({ event: "error", error: error instanceof Error ? error.message : String(error) });
-        refuseUpgrade(socket, 500);
+        // As on the HTTP routes: a failure of the chain or the facilitator is 502, any other error 500.
+        refuseUpgrade(socket, error instanceof UpstreamError ? 502 : 500);
       });
       return true;
     },

@@ -1,6 +1,6 @@
 import { createKeyPairSignerFromBytes } from "@solana/kit";
 import { describe, expect, it } from "vitest";
-import { BUYER_POOL, deriveKey, deriveKeys } from "../src/devnet/keys.js";
+import { BUYER_POOL, OTHER_MINT_KEY, deriveKey, deriveKeys, deriveNamedKey } from "../src/devnet/keys.js";
 
 const SEED = Uint8Array.from(Buffer.from("ab".repeat(32), "hex"));
 const OTHER_SEED = Uint8Array.from(Buffer.from("cd".repeat(32), "hex"));
@@ -52,5 +52,26 @@ describe("deriveKeys", () => {
     expect(keys.holders.get(keys.stack.seller.signer.address)).toBe(keys.stack.seller.signer);
     expect(keys.holders.get(keys.buyers[2]!.signer.address)).toBe(keys.buyers[2]!.signer);
     expect((await deriveKeys(SEED)).holders.size).toBe(4 + BUYER_POOL);
+  });
+
+  it("derives the second mint's key by name: the same for a seed every time, and none of the numbered keys", async () => {
+    const seed = new Uint8Array(32).fill(7);
+
+    const named = await deriveNamedKey(seed, OTHER_MINT_KEY);
+
+    expect((await deriveNamedKey(seed, OTHER_MINT_KEY)).signer.address).toBe(named.signer.address);
+    const keys = await deriveKeys(seed);
+    expect([keys.funding.signer.address, ...keys.holders.keys()]).not.toContain(named.signer.address);
+  });
+
+  it("gives the second mint the same address on every machine, so a later run finds the mint it made", async () => {
+    expect((await deriveNamedKey(SEED, OTHER_MINT_KEY)).signer.address).toBe("7ScNJnXk4QdbM72xJLnwBf6ooqUzNHJaFWhL3B4YWDHw");
+  });
+
+  it("refuses a name that a numbered key could have, so a named key is never a numbered one", async () => {
+    await expect(deriveNamedKey(SEED, "5")).rejects.toThrow(/lowercase/);
+    await expect(deriveNamedKey(SEED, "Other-mint")).rejects.toThrow(/lowercase/);
+    await expect(deriveNamedKey(SEED, "")).rejects.toThrow(/lowercase/);
+    await expect(deriveNamedKey(SEED, OTHER_MINT_KEY)).resolves.toBeDefined();
   });
 });
