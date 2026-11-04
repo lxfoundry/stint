@@ -67,4 +67,11 @@ describe("deriveKeys", () => {
   it("gives the second mint the same address on every machine, so a later run finds the mint it made", async () => {
     expect((await deriveNamedKey(SEED, OTHER_MINT_KEY)).signer.address).toBe("7ScNJnXk4QdbM72xJLnwBf6ooqUzNHJaFWhL3B4YWDHw");
   });
+
+  it("refuses a name that a numbered key could have, so a named key is never a numbered one", async () => {
+    await expect(deriveNamedKey(SEED, "5")).rejects.toThrow(/lowercase/);
+    await expect(deriveNamedKey(SEED, "Other-mint")).rejects.toThrow(/lowercase/);
+    await expect(deriveNamedKey(SEED, "")).rejects.toThrow(/lowercase/);
+    await expect(deriveNamedKey(SEED, OTHER_MINT_KEY)).resolves.toBeDefined();
+  });
 });
