@@ -13,8 +13,10 @@ devnet.
 **Architecture:** No change to the program. In the gate, a connect for a session it does not track reads the account,
 checks the token against the account's `authority` (checks 1 to 3), the terms (check 4) and the margin (check 5), then
 provisions the session through the same join as a retried open, so that two connects, or a connect and an open,
-provision it once. The gate remembers the sessions it has ended for ten minutes, so that a node which still shows a
-closed account cannot bring one back. The conformance library gains connects and closes through the gate with tokens a
+provision it once. A subscription reports changes only, so the gate then reads the account once more, after its bound
+on a node's lag, and treats an account gone as a session another party closed. The gate remembers the sessions it has
+ended for ten minutes, so that a node which still shows a closed account cannot bring one back, through a connect or
+an open paid again. The conformance library gains connects and closes through the gate with tokens a
 scenario signs itself. The harness's direct chain can name the gate's receiver authorizer, and open a session in a
 second mint that the harness holds.
 
@@ -52,9 +54,9 @@ answers to a connect), 7.2 (the session token and the gate's five checks), 7.3 (
 ## What this stage builds, and what it leaves
 
 Built:
-- the gate's adoption of a session it does not track, on connect;
-- the gate's memory of the sessions it has ended;
-- `502` for a connect whose chain read fails;
+- the gate's adoption of a session it does not track, on connect, with a second read of the account;
+- the gate's memory of the sessions it has ended, on the connect and the open paths;
+- `401` for a connect with no token before anything is read, and `502` for a connect whose chain read fails;
 - connects and closes through the gate with a scenario's own tokens (conformance library);
 - in the harness's direct chain, the gate's receiver authorizer, and a second mint;
 - scenarios 8, 20 and 35.
@@ -70,6 +72,26 @@ Not built, and not to be built here:
 - **A close by the clean-up of a session in the second mint** left open by a scenario that stopped half-way. The
   clean-up still reports such a session and leaves it alone (spec section 12.6). Scenario 20 closes its own session,
   failing or passing.
+- **A second read for a session the gate opened itself.** Adoption reads the account from a node that may lag, and
+  the subscription that follows reports changes only. So it reads the account once more, after the gate's bound on a
+  node's lag (Task 1). An open reads the account right after its settlement and subscribes once `provision()` returns. A
+  close that lands in between is found by the end timer's re-read, at `paid_until`.
+
+## Before you start: what a person must prepare
+
+Start from a clean tree on a branch of its own, from a `main` that holds stage 3
+(`conformance/src/scenarios/32-durations-out-of-bounds.ts` exists, and `REQUIRED` in
+`conformance/test/catalogue.test.ts` lists 21 scenarios) and this plan.
+- Tasks 1 to 6 need nothing but the repository, except Task 2's `pnpm add`, which needs access to the npm registry.
+- Task 7 runs the devnet harness with the person's `.env.devnet` (`STINT_DEVNET_RPC_URL`, `STINT_DEVNET_SEED`, and
+  `STINT_DEVNET_SCAN_RPC_URL` if the provider refuses `getProgramAccounts`), and the funding key funded as
+  `pnpm e2e:devnet funds` says.
+- No other run of the devnet harness may use the same seed at the same time.
+- This stage changes no program code, so the devnet deployment stays as it is.
+
+Another stage may have changed some of the same lines first: the `REQUIRED` lists, the devnet scenario list, the
+README's status, `DirectChain`. This plan states those edits as rules, with the text as stage 3 leaves it as the
+example.
 
 ## File map
 
@@ -113,13 +135,19 @@ What the connect does for a session the gate does not track, in this order (spec
 
 | Step | Refused with |
 |---|---|
-| Read the account at `confirmed`; it holds no session, or holds one this gate has ended (same address and `started_at`, within the last ten minutes) | `404` |
+| No token at all, before anything is read | `401` |
+| Read the account at `confirmed`; it holds no session | `404` |
 | Checks 1 to 3: the token against the account's `authority` | `401` |
+| The account holds a session this gate has ended (same address and `started_at`, within the last ten minutes). Checked after the token, with no `await` from here to `track`, so that a session ended while the token was checked is caught too | `404` |
 | Check 4: the terms, the mint and the receiver authorizer included (`sessionMatches`) | `403` |
 | Check 5: `paid_until` more than the margin away | `402` |
-| Provision it as an open that just settled (`track`), then accept the connection | — |
+| Provision it as an open that just settled (`track`) | — |
+| Wait the gate's bound on a node's lag (`readRetry.attempts × readRetry.delayMs`), then read the account again. A subscription reports changes only, so a close that landed before it started, read from a node that lagged, would never be heard of. An account gone, or holding another session, goes to `closedElsewhere`, as the subscription's notification would | `404` (the session is ending) |
+| Accept the connection | — |
 
-A read that fails is `502`. A refused connect adopts nothing.
+A read that fails is `502`. A connect refused before `track` adopts nothing. The open path gets the same memory check:
+an open paid again after this gate ended the session, read from a node that still shows the account, is `404`, not a
+second `provision()`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -146,7 +174,7 @@ describe("the gate's adoption of a session it does not track (spec §7.3)", () =
     await new Promise((resolve) => h.server.close(resolve));
   });
 
-  const { open, prepareOpen, closeWith, connect, token, settleDown } = helpers(() => h);
+  const { open, send, prepareOpen, closeWith, connect, token, settleDown } = helpers(() => h);
 
   /**
    * A session on the fake chain that this gate never settled: opened directly on the program with the gate's terms, mint
@@ -210,8 +238,16 @@ describe("the gate's adoption of a session it does not track (spec §7.3)", () =
     expect((await fetch(`${h.url}/sessions/${session}`)).status).toBe(404);
   });
 
-  it.each<[string, (session: Address) => Promise<string | undefined>]>([
-    ["without a token", async () => undefined],
+  it("refuses a connect without a token with 401 before it reads the chain", async () => {
+    const session = await onChain();
+
+    expect((await connect(session)).status).toBe(401);
+
+    expect(h.reads.session).toBe(0);
+    expect(h.calls.provision).toEqual([]);
+  });
+
+  it.each<[string, (session: Address) => Promise<string>]>([
     ["with a close token", (session) => token(session, "close")],
     ["with a token for another audience", (session) => token(session, "connect", "http://elsewhere")],
     [
@@ -259,6 +295,34 @@ describe("the gate's adoption of a session it does not track (spec §7.3)", () =
 
     expect((await connect(session, await token(session, "connect"))).status).toBe(404);
     expect(h.calls.provision).toHaveLength(1);
+  });
+
+  it("answers 404 to an open paid again after it ended the session, while the node still shows the account, and provisions nothing more", async () => {
+    const { session, payload } = await prepareOpen();
+    expect((await send(payload)).status).toBe(201);
+    expect((await closeWith(session)).status).toBe(200);
+
+    const again = await send(payload); // the fake facilitator answers it as a record would: success
+
+    expect(again.status).toBe(404);
+    expect(again.body).toEqual({ error: "unknown_session" });
+    expect(h.calls.provision).toHaveLength(1);
+  });
+
+  it("ends, and refuses with 404, an adopted session whose account the second read finds gone: closed before the subscription started", async () => {
+    const session = await onChain();
+    const read = h.chain.readSession.bind(h.chain);
+    let reads = 0;
+    // The first read, from a node that lags, still shows the account; the second, a moment later, does not.
+    h.chain.readSession = async (address) => (reads++ === 0 ? read(address) : undefined);
+
+    expect((await connect(session, await token(session, "connect"))).status).toBe(404);
+
+    expect(reads).toBe(2);
+    expect(h.calls.provision).toHaveLength(1);
+    expect(h.calls.attach).toEqual([]);
+    await expect.poll(() => h.calls.teardown).toEqual(["closedElsewhere"]);
+    await expect.poll(() => h.unwatched).toEqual([session]);
   });
 
   it("adopts a new session opened at the address of one it has ended", async () => {
@@ -320,9 +384,14 @@ describe("the gate's adoption of a session it does not track (spec §7.3)", () =
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `pnpm --filter @lxfoundry/stint-gate test adopt.test.ts`
-Expected: FAIL. Every connect for a session the gate does not track answers `404` today
-(`if (!tracked) return refuseUpgrade(socket, 404)` in `connect`). So the cases that expect a socket, `401`, `402`, `403`
-or `502` fail. The two cases that expect `404` after the gate's own close already pass: their `404` still comes from
+Expected: FAIL, 19 of the 20 cases. Every connect for a session the gate does not track answers `404` today
+(`if (!tracked) return refuseUpgrade(socket, 404)` in `connect`), so every case that expects a socket, `401`, `402`,
+`403` or `502` fails. So do these:
+- "remembers … for ten minutes": its `402` half;
+- "ends, and refuses with 404, an adopted session…": nothing is provisioned today;
+- "answers 404 to an open paid again…": today the open provisions a second time and answers `201`.
+
+The one case that passes is "answers 404, and adopts nothing, for a session it has ended…": its `404` still comes from
 that line.
 
 - [ ] **Step 3: Remember the sessions the gate has ended**
@@ -415,7 +484,7 @@ with:
     if (!(await authenticate(bearer(request), session, tracked.stored.authority, "close"))) return sendJson(response, 401, { error: "unauthorized" });
 ```
 
-- [ ] **Step 5: Share the open's provisioning join**
+- [ ] **Step 5: Share the open's provisioning join, and keep an open from bringing back a session the gate ended**
 
 Below `provision`, add:
 
@@ -464,6 +533,20 @@ with:
     sendJson(response, 201, { session, paidUntil: Number(tracked.paidUntil), wsUrl: wsUrl(session) }, paymentResponse);
 ```
 
+A little above it in `open`, replace:
+
+```ts
+    if (!stored) return sendJson(response, 404, { error: "unknown_session" });
+```
+
+with:
+
+```ts
+    // A repeated payment answered after the session closed: its account is gone, or a node that lags still shows the
+    // session this gate ended. No `await` from here to `track`'s registration.
+    if (!stored || hasEnded(session, stored.startedAt)) return sendJson(response, 404, { error: "unknown_session" });
+```
+
 - [ ] **Step 6: Adopt on connect**
 
 Above `connect`, add:
@@ -474,19 +557,34 @@ Above `connect`, add:
    * the seller's gates. It is adopted, as if its open had just settled, only once it passes every check of spec §7.2
    * against the account as the chain stores it: the token (checks 1 to 3, `401`), the terms, the mint and the receiver
    * authorizer included (check 4, `403`), and the margin (check 5, `402`). An address that holds no session, or holds one
-   * this gate has ended, is `404`. Returns the tracked session, or the status the upgrade is refused with; a refused
-   * connect adopts nothing.
+   * this gate has ended, is `404`. A connect refused before `track` adopts nothing. Once adopted, the account is read
+   * once more, after the gate's bound on a node's lag: an account gone then is a session another party closed. Returns
+   * the tracked session, or the status the upgrade is refused with.
    */
-  async function adopt(session: Address, token: string | undefined): Promise<Tracked<U> | number> {
+  async function adopt(session: Address, token: string): Promise<Tracked<U> | number> {
     const stored = await upstream(() => config.chain.readSession(session));
-    if (!stored || hasEnded(session, stored.startedAt)) return 404;
+    if (!stored) return 404;
     if (!(await authenticate(token, session, stored.authority, "connect"))) return 401;
+    // After the token's check, with no `await` from here to `track`'s registration: a session this gate ended before
+    // the connect, or while its token was checked, is not adopted again (the tracked path has the same guard).
+    if (hasEnded(session, stored.startedAt)) return 404;
     if (!sessionMatches(stored, seller)) return 403;
     if (Number(paidUntil(stored)) * 1000 - sessionClock() <= marginMs) return 402;
-    log({ event: "adopt", session });
-    return track(session, stored);
+    if (!sessions.has(session) && !provisioning.has(session)) log({ event: "adopt", session });
+    const tracked = await track(session, stored);
+    // The account was read before the subscription started, and a subscription reports changes only: a close that
+    // landed just before, read from a node that lagged, would never be heard of. One more read, once a node has had
+    // the time the gate gives it to catch up (`readRetry`), decides: an account gone, or holding another session, is a
+    // session another party closed (spec §7.3), and the connect then finds it ending.
+    await sleep(readRetry.attempts * readRetry.delayMs);
+    const again = await upstream(() => config.chain.readSession(session));
+    if (!sameSession(tracked, again)) closedElsewhere(tracked);
+    return tracked;
   }
 ```
+
+`sleep` is the module's own (`const sleep = (ms: number) => …`). It is not one of the gate's `timers`, so the wait does
+not show among a test's pending timers. With the harness's `readRetry` of 3 reads 5 ms apart, it lasts 15 ms.
 
 Replace the first lines of `connect`:
 
@@ -503,6 +601,8 @@ with:
 ```ts
   async function connect(request: IncomingMessage, socket: Duplex, head: Buffer, url: URL, session: Address): Promise<void> {
     const token = bearer(request) ?? url.searchParams.get("token") ?? undefined;
+    // Before anything is read: a connect with no token costs the chain nothing.
+    if (!token) return refuseUpgrade(socket, 401);
     const known = sessions.get(session);
     let tracked: Tracked<U>;
     if (known) {
@@ -515,8 +615,9 @@ with:
     }
 ```
 
-The rest of `connect` is unchanged: the checks on `tracked.ended`, `tracked.endingElsewhere`, the terms and the margin
-also run for an adopted session, and they pass, since the session has only just been adopted.
+The rest of `connect` is unchanged. The checks on `tracked.ended`, `tracked.endingElsewhere`, the terms and the margin
+also run for an adopted session. They pass unless the second read handed the session to `closedElsewhere`, which sets
+`endingElsewhere` at once, and then the connect is refused with `404`.
 
 In `handleUpgrade`, replace:
 
@@ -560,7 +661,19 @@ In `docs/specs/stint-system.md`, section 7.3, replace the row:
 with:
 
 ```markdown
-| Connect for a session this gate does not track (opened directly on-chain, or through another of the seller's gates) | Read the session at `confirmed`. Answer `404` if the address holds none, or holds a session this gate has ended: a node can still show a closed account for a moment, so the gate remembers the sessions it ended, for ten minutes. Otherwise run the checks of section 7.2 against the account: `401` for checks 1 to 3, `403` for check 4 (the mint and the receiver authorizer included), `402` for check 5. A refused connect adopts nothing. A session that passes them is adopted as if its open had just settled (`provision()`, the subscription, the idle and end timers; a retried open or a second connect joins that provisioning), then the connection is accepted | — |
+| Connect for a session this gate does not track (opened directly on-chain, or through another of the seller's gates) | Answer `401` to a connect with no token, before anything is read. Otherwise read the session at `confirmed`, and answer `404` if the address holds none. Run checks 1 to 3 of section 7.2 against the account (`401`), then answer `404` if it holds a session this gate has ended: a node can still show a closed account for a moment, so the gate remembers the sessions it ended, for ten minutes. Then check 4 (`403`, the mint and the receiver authorizer included) and check 5 (`402`). A connect refused so far adopts nothing. A session that passes them is adopted as if its open had just settled (`provision()`, the subscription, the idle and end timers; a retried open or a second connect joins that provisioning). Since a subscription reports changes only, the gate then reads the account once more, after its bound on a node's lag. An account gone, or holding another session, is a session another party closed (the row "Account closed by another party"), and the connect is answered `404`. Otherwise the connection is accepted. Each such connect reads the chain before the token's signature can be checked, so a deployment rate-limits the route, as it does the status route | — |
+```
+
+In the same table, in the row `Open settled`, replace:
+
+```markdown
+If its account is gone (a repeated payment answered after the session closed), answer `404` and do nothing more.
+```
+
+with:
+
+```markdown
+If its account is gone, or holds a session this gate has ended (a repeated payment answered after the session closed, read from a node that still shows the account), answer `404` and do nothing more.
 ```
 
 In section 7.1, in the row `GET /sessions/:id/ws`, replace:
@@ -602,10 +715,15 @@ git commit -m "Adopt a session opened directly on-chain when its buyer connects,
 
 - [ ] **Step 1: Add `ws`**
 
-Run: `pnpm --filter @lxfoundry/stint-conformance add ws@8.22.0 && pnpm --filter @lxfoundry/stint-conformance add -D @types/ws@8.18.2`
+Run: `pnpm --filter @lxfoundry/stint-conformance add -E ws@8.22.0 && pnpm --filter @lxfoundry/stint-conformance add -E -D @types/ws@8.18.2`
+
+This needs access to the npm registry: `pnpm add` reads the package's metadata even when its store already holds the
+version, and `--offline` fails with `ERR_PNPM_NO_OFFLINE_META`.
+
 Expected: `conformance/package.json` gains `"ws": "8.22.0"` under `dependencies` and `"@types/ws": "8.18.2"` under
-`devDependencies` (the versions the client and the gate pin), and `pnpm-lock.yaml` changes. If pnpm wrote a range
-(`^8.22.0`), make it exact.
+`devDependencies`. These are exact versions (`-E`), the ones the client and the gate pin, and `pnpm-lock.yaml` records
+the same specifiers. Do not edit either file by hand: a specifier in the lockfile that differs from `package.json` makes
+`pnpm install --frozen-lockfile` fail.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -881,9 +999,10 @@ git commit -m "Add scenario 8, session tokens refused before the upgrade, and ma
 ### Task 4: Direct sessions that name the gate's receiver authorizer, or open in a second mint
 
 **Files:**
-- Modify: `conformance/src/types.ts`, `conformance/src/sessions.ts`, `conformance/test/types.test.ts`
+- Modify: `conformance/src/types.ts`, `conformance/src/sessions.ts`, `conformance/test/types.test.ts`,
+  `conformance/test/sessions.test.ts`
 - Modify: `e2e/src/targets/direct.ts`
-- Modify: `e2e/src/devnet/keys.ts`, `e2e/src/targets/devnet.ts`
+- Modify: `e2e/src/devnet/keys.ts`, `e2e/src/targets/devnet.ts`, `e2e/src/devnet/funds.ts` (two comments)
 - Test: `e2e/test/direct-chain.test.ts`, `e2e/test/devnet-keys.test.ts`
 - Modify: `docs/specs/stint-system.md` (sections 12.2 and 12.6)
 
@@ -894,7 +1013,7 @@ git commit -m "Add scenario 8, session tokens refused before the upgrade, and ma
   - `DirectChain.open(options)` gains `readonly receiverAuthorizer?: Address` and `readonly mint?: Address`.
   - `DirectSession` gains `readonly mint: Address`.
   - `interface OtherMint { readonly mint: Address; fund(owner: Address, amount: bigint): Promise<Address>; reclaim(owner: KeyPairSigner): Promise<void> }`
-    (exported from `conformance/src/types.ts`).
+    (exported from `conformance/src/types.ts`). `reclaim` sends the account's rent to the direct chain's fee payer.
   - `DirectChain.otherMint(): Promise<OtherMint>`.
   - `DirectChainOptions.otherMint?: () => Promise<KeyPairSigner>`.
   - `deriveNamedKey(seed: Uint8Array, name: string): Promise<HarnessKey>` and `OTHER_MINT_KEY = "other-mint"`
@@ -922,14 +1041,30 @@ In `conformance/test/types.test.ts`, add `OtherMint` to the type import from `".
     expectTypeOf<Parameters<OtherMint["reclaim"]>>().toEqualTypeOf<[owner: KeyPairSigner]>();
 ```
 
-(`Address` and `KeyPairSigner` are already imported there; if one is not, import it as a type from `@solana/kit`.)
+(`Address` and `KeyPairSigner` are already imported there.)
+
+In `conformance/test/sessions.test.ts`, in the test of `directSessionOf`, the expected object gains the session's
+mint. Replace:
+
+```ts
+      vault: await associatedTokenAddress(session!, mint!),
+      rentPayer,
+```
+
+with:
+
+```ts
+      vault: await associatedTokenAddress(session!, mint!),
+      mint: mint!,
+      rentPayer,
+```
 
 In `e2e/test/direct-chain.test.ts`, extend the imports:
 
 ```ts
 import { fetchMaybeToken, fetchMint, fetchToken } from "@solana-program/token";
 import { CloseKind, STINT_ERROR__SESSION_EXPIRED, dueAt, fetchMaybeSession, fetchSession, paidUntil } from "@lxfoundry/stint-program-client";
-import { some, type Address, type KeyPairSigner } from "@solana/kit";
+import { generateKeyPairSigner, some, type Address, type KeyPairSigner } from "@solana/kit";
 import { USDC_DEVNET_MINT } from "../src/fixtures/usdc.js";
 ```
 
@@ -966,6 +1101,54 @@ import { USDC_DEVNET_MINT } from "../src/fixtures/usdc.js";
     expect((await fetchMaybeToken(stack.network.rpc, account, { commitment: "confirmed" })).exists).toBe(false);
   });
 
+  /** A key with SOL, which the test holds. */
+  const fundedKey = async (): Promise<KeyPairSigner> => {
+    const key = await newHarnessKey();
+    fundSol(stack.network, key.signer.address, 5);
+    await waitForNewSlot(stack.network.rpc);
+    return key.signer;
+  };
+
+  /** A direct chain on the stack's chain and seller whose fee payer the test holds, and whose second mint is `mintKey` when given. */
+  const directChainPaidBy = (feePayer: KeyPairSigner, mintKey?: KeyPairSigner): DirectChain =>
+    createDirectChain({
+      rpc: stack.network.rpc,
+      terms: TEST_TERMS,
+      seller: { wallet: stack.keys.seller.signer.address, usdcAccount: stack.keys.sellerUsdcAccount },
+      feePayer,
+      rentPayer: async () => rentPayer,
+      readRetry: ONE_READ,
+      ...(mintKey === undefined ? {} : { otherMint: async () => mintKey }),
+    });
+
+  it("gives the rent of a reclaimed account back to the direct chain's fee payer", async () => {
+    const payer = await fundedKey();
+    const chain = directChainPaidBy(payer);
+    const other = await chain.otherMint();
+    const owner = await chain.newKey();
+    await other.fund(owner.address, 50_000n);
+    const rent = await stack.network.rpc.getMinimumBalanceForRentExemption(165n).send();
+    const before = await balanceOf(payer.address);
+
+    await other.reclaim(owner);
+
+    // The fee payer pays the fee of two signatures, its own and the owner's, and gets the account's rent back.
+    expect((await balanceOf(payer.address)) - before).toBe(rent - 10_000n);
+  });
+
+  it("finds the second mint an earlier run made, without creating it again, and mints with it", async () => {
+    const mintKey = await generateKeyPairSigner();
+    const first = await directChainPaidBy(await fundedKey(), mintKey).otherMint();
+
+    // A second chain with the same key, as the devnet target is on every run: creating the account again would fail.
+    const second = await directChainPaidBy(await fundedKey(), mintKey).otherMint();
+
+    expect(second.mint).toBe(first.mint);
+    const owner = await direct.newKey();
+    const account = await second.fund(owner.address, 1_000n);
+    expect((await fetchToken(stack.network.rpc, account, { commitment: "confirmed" })).data.amount).toBe(1_000n);
+  });
+
   it("opens a session in the second mint from the buyer's account for it, and closes it paying the seller's account for it", async () => {
     const other = await direct.otherMint();
     const signer = await direct.newKey();
@@ -989,7 +1172,7 @@ import { USDC_DEVNET_MINT } from "../src/fixtures/usdc.js";
 ```
 
 In `e2e/test/devnet-keys.test.ts`, add `deriveNamedKey` and `OTHER_MINT_KEY` to the import from `../src/devnet/keys.js`,
-and add inside its `describe`:
+and add inside `describe("deriveKeys", …)`:
 
 ```ts
   it("derives the second mint's key by name: the same for a seed every time, and none of the numbered keys", async () => {
@@ -1036,15 +1219,46 @@ export interface OtherMint {
 }
 ```
 
-In `DirectChain`, replace:
+In `DirectSession`, replace:
 
 ```ts
+  /** The seller's token account, which a close pays. */
+  readonly receiverToken: Address;
+  /** The buyer's USDC account, which a close refunds. */
+  readonly refundTo: Address;
+```
+
+with:
+
+```ts
+  /** The seller's token account for the session's mint, which a close pays. */
+  readonly receiverToken: Address;
+  /** The buyer's token account for the session's mint, which a close refunds: its USDC account for a USDC session. */
+  readonly refundTo: Address;
+```
+
+In `DirectChain`, replace `open`'s docstring and signature:
+
+```ts
+  /**
+   * Opens a session: the buyer funds the vault, and the rent payer and the receiver authorizer are harness keys, not the
+   * stack's. `seconds` is a whole number between the offer's minimum and maximum. `remainder` (default 0) is a number of base
+   * units, below the rate, that the buyer adds to the vault: the deposit is `rate x seconds + remainder`, the session is paid
+   * for `seconds`, and a close from the paid time on pays `rate x seconds` and refunds the remainder.
+   */
   open(options: { readonly buyer: Buyer; readonly seconds: number; readonly remainder?: bigint }): Promise<DirectSession>;
 ```
 
 with:
 
 ```ts
+  /**
+   * Opens a session: the buyer funds the vault, the rent payer is a harness key, not the stack's, and so is the receiver
+   * authorizer unless `receiverAuthorizer` names one. `seconds` is a whole number between the offer's minimum and
+   * maximum. `remainder` (default 0) is a number of base units, below the rate, that the buyer adds to the vault: the
+   * deposit is `rate x seconds + remainder`, the session is paid for `seconds`, and a close from the paid time on pays
+   * `rate x seconds` and refunds the remainder.
+   */
   open(options: {
     readonly buyer: Buyer;
     readonly seconds: number;
@@ -1150,6 +1364,13 @@ import { generateKeyPairSigner, type Address, type Instruction, type KeyPairSign
 import { readUntil, type DirectChain, type OtherMint } from "@lxfoundry/stint-conformance";
 ```
 
+Below the imports, add:
+
+```ts
+/** How long `OtherMint.reclaim` waits before it reads a balance again that a node may have shown stale. */
+const RECLAIM_RETRY_MS = 2_000;
+```
+
 In `DirectChainOptions`, below `readonly send?: SendOptions;`, add:
 
 ```ts
@@ -1177,14 +1398,24 @@ In `createDirectChain`, below the `partiesOnce` definition, add:
     },
     async reclaim(owner) {
       const account = await associatedTokenAddress(owner.address, key.address);
-      const held = await fetchMaybeToken(rpc, account, { commitment: "confirmed" });
-      if (!held.exists) return;
-      const instructions: Instruction[] = [];
-      if (held.data.amount > 0n) {
-        instructions.push(getBurnCheckedInstruction({ account, mint: key.address, authority: owner, amount: held.data.amount, decimals: USDC_DECIMALS }));
+      // A node that lags can show an older balance than the account holds, right after the close that refunded it, and
+      // then closing the account fails: the balance is read again, after a pause, and the reclaim tried once more.
+      for (let attempt = 1; ; attempt++) {
+        const held = await fetchMaybeToken(rpc, account, { commitment: "confirmed" });
+        if (!held.exists) return;
+        const instructions: Instruction[] = [];
+        if (held.data.amount > 0n) {
+          instructions.push(getBurnCheckedInstruction({ account, mint: key.address, authority: owner, amount: held.data.amount, decimals: USDC_DECIMALS }));
+        }
+        instructions.push(getCloseAccountInstruction({ account, destination: feePayer.address, owner }));
+        try {
+          await sendInstructions(rpc, feePayer, instructions, send);
+          return;
+        } catch (error) {
+          if (attempt >= 2) throw error;
+          await new Promise((resolve) => setTimeout(resolve, RECLAIM_RETRY_MS));
+        }
       }
-      instructions.push(getCloseAccountInstruction({ account, destination: feePayer.address, owner }));
-      await sendInstructions(rpc, feePayer, instructions, send);
     },
   });
   let otherMint: Promise<OtherMint> | undefined;
@@ -1376,6 +1607,39 @@ and in the `createDirectChain({ … })` call, below `send,`, add:
     otherMint: async () => (await deriveNamedKey(options.seed, OTHER_MINT_KEY)).signer,
 ```
 
+In `e2e/src/devnet/funds.ts`, two comments say the harness never opens a session in another mint. In `FoundSessions`,
+replace:
+
+```ts
+  /** Sessions of any other mint: the harness never opens one, closing it would create accounts it cannot recover, and it is not its to fix. */
+```
+
+with:
+
+```ts
+  /**
+   * Sessions of any other mint, left alone. The one scenario that opens a session in another mint, scenario 20, closes it
+   * itself; closing a stray one here would create accounts for a mint the clean-up does not hold.
+   */
+```
+
+and in the docstring of `cleanUp`, replace:
+
+```ts
+ * none. Sessions of a mint other than USDC that name a held key are reported as a note and left alone: they
+ * do not stop a start, and closing one would create accounts for a mint the harness does not hold. So are
+```
+
+with:
+
+```ts
+ * none. Sessions of a mint other than USDC that name a held key are reported as a note and left alone: they
+ * do not stop a start, and closing one would create accounts for a mint the clean-up does not hold (scenario 20
+ * closes the session it opens in the harness's second mint itself). So are
+```
+
+The clean-up's behaviour does not change.
+
 - [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `pnpm typecheck && pnpm --filter @lxfoundry/stint-conformance test && pnpm --filter @lxfoundry/stint-e2e test direct-chain.test.ts devnet-keys.test.ts`
@@ -1388,12 +1652,15 @@ In `docs/specs/stint-system.md`, section 12.2, below the paragraph that ends "it
 failed.", add:
 
 ```markdown
-**Sessions opened directly on-chain** (scenarios 16, 20 and 35). Where the harness holds the keys to do so, it opens a
-session straight on the program, with no gate and no facilitator: the buyer funds the vault, and a harness key pays the
-rent. The receiver authorizer is a throwaway key, so that no gate or sweeper takes the session up (scenario 16), or the
-gate's own, read from its offer, so that the gate may adopt the session (scenarios 20 and 35). For scenario 20 it opens
-the session in a second mint that it holds, of 6 decimals like USDC, so that only the mint differs from the gate's terms
-(S5).
+**Sessions opened directly on-chain** (scenarios 15, 16, 20 and 35). Where the harness holds the keys to do so, it
+opens a session straight on the program, with no gate and no facilitator. The buyer funds the vault, and a harness key
+pays the rent, so the facilitator neither sweeps the session nor closes it for its buyer (scenarios 15 and 16). The
+receiver authorizer is one of two keys:
+- a throwaway key, so that no gate takes the session up;
+- or the gate's own, read from its offer, so that the gate may adopt the session (scenarios 20 and 35).
+
+For scenario 20 it opens the session in a second mint that it holds, of 6 decimals like USDC, so that only the mint
+differs from the gate's terms (S5).
 ```
 
 In section 12.6, in the prerequisite that begins "a funding key with SOL and the offer's asset", after the sentence that
@@ -1409,7 +1676,7 @@ session in that mint and gives back the buyer's account for it.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add conformance/src/types.ts conformance/src/sessions.ts conformance/test/types.test.ts e2e/src/targets/direct.ts e2e/src/devnet/keys.ts e2e/src/targets/devnet.ts e2e/test/direct-chain.test.ts e2e/test/devnet-keys.test.ts docs/specs/stint-system.md
+git add conformance/src/types.ts conformance/src/sessions.ts conformance/test/types.test.ts conformance/test/sessions.test.ts e2e/src/targets/direct.ts e2e/src/devnet/keys.ts e2e/src/targets/devnet.ts e2e/src/devnet/funds.ts e2e/test/direct-chain.test.ts e2e/test/devnet-keys.test.ts docs/specs/stint-system.md
 git commit -m "Let the harness open sessions that name the gate's receiver authorizer, or in a second mint it holds"
 ```
 
@@ -1584,20 +1851,22 @@ Create `conformance/src/scenarios/20-other-mint.ts`:
 
 ```ts
 import { address } from "@solana/kit";
+import { fetchMaybeSession } from "@lxfoundry/stint-program-client";
 import { expectEqual, expectTrue } from "../assert.js";
 import { sessionSeconds } from "../helpers.js";
 import { openOffers } from "../payments.js";
+import { readUntil } from "../reads.js";
 import { readOpenedSession } from "../sessions.js";
-import { closeWith, connectWith, tokenFor } from "../tokens.js";
+import { closeWith, tokenFor } from "../tokens.js";
 import type { ScenarioContext } from "../types.js";
 import { connectOnceSeen, expectOfferTerms } from "./35-adopted-session.js";
 
 /**
  * Scenario 20 (spec §12.7): a session opened directly on-chain with the gate's terms and receiver authorizer, but in
- * another mint, which anyone can create (S5). A connect with a valid token is refused with `403`, and the gate does not
- * adopt the session (spec §7.2, check 4; §7.3): a second connect is refused the same way, the gate has no such session
- * to close, and it reports no status for it. The scenario then closes the session itself, on the program, and gives
- * back the buyer's account for the mint, whether or not a check failed.
+ * another mint, which anyone can create (S5). A connect with a valid token is refused with `403`, and so is a second
+ * one. The gate does not adopt the session (spec §7.2, check 4; §7.3): it has no such session to close, and it reports
+ * no status for it. The scenario then closes the session itself, on the program, and gives back the buyer's account for
+ * the mint, whether or not a check failed.
  */
 export async function otherMintRefused(context: ScenarioContext): Promise<void> {
   const direct = context.direct;
@@ -1624,10 +1893,13 @@ export async function otherMintRefused(context: ScenarioContext): Promise<void> 
     expectOfferTerms(stored, offer);
     const sign = (purpose: "connect" | "close") => tokenFor(signer, context.gateUrl, opened.session, purpose);
 
+    // Each connect is tried again while the gate answers 404: its node can answer from behind right after the open.
     const first = await connectOnceSeen(context, () => sign("connect"), opened.session);
     expectEqual(first.status, 403, "a connect for a session in another mint is refused with 403");
-    expectEqual((await connectWith(context.gateUrl, opened.session, await sign("connect"))).status, 403, "a second connect is refused the same way: the first adopted nothing");
-    expectEqual((await closeWith(context.gateUrl, opened.session, await sign("close"))).status, 404, "the gate has no such session to close");
+    const second = await connectOnceSeen(context, () => sign("connect"), opened.session);
+    expectEqual(second.status, 403, "a second connect is refused with 403 too");
+    // The gate tracks a session it adopted, and would answer a close request for it.
+    expectEqual((await closeWith(context.gateUrl, opened.session, await sign("close"))).status, 404, "the gate has no such session to close: it adopted nothing");
     const status = await fetch(`${context.gateUrl}/sessions/${opened.session}`);
     await status.body?.cancel();
     expectEqual(status.status, 404, "the gate reports no status for a session in another mint");
@@ -1642,6 +1914,8 @@ export async function otherMintRefused(context: ScenarioContext): Promise<void> 
     if (checked) await cleanUp();
     else await cleanUp().catch(() => undefined);
   }
+  const readSession = () => fetchMaybeSession(context.rpc, opened.session, { commitment: "confirmed" });
+  expectTrue(!(await readUntil(context.readRetry, readSession, (read) => !read.exists)).exists, "the scenario's own close leaves no session on chain");
 }
 ```
 
@@ -1717,9 +1991,36 @@ with:
     const required = [1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 25, 26, 32, 34, 35];
 ```
 
+Scenario 20 now leaves rent behind on purpose: the second mint and the seller's account for it, 3,500,880 lamports,
+kept for later runs (spec §12.6). The test "closes a session left open at the end, returns the funds, and stops"
+bounds what the funding key spent at 5,000,000 lamports, on fees only. In that test, replace:
+
+```ts
+    const lamportsAfter = (await chain.network.rpc.getBalance(main.funding, { commitment: "confirmed" }).send()).value;
+    // The funding key paid fees only: the rent it lent for token accounts, and the SOL it gave the stack, came back.
+    expect(lamportsBefore - lamportsAfter).toBeLessThan(5_000_000n);
+```
+
+with:
+
+```ts
+    const lamportsOf = async (account: Address) => (await chain.network.rpc.getBalance(account, { commitment: "confirmed" }).send()).value;
+    const lamportsAfter = await lamportsOf(main.funding);
+    // Scenario 20's second mint and the seller's account for it keep their rent, once for a seed (spec §12.6).
+    const otherMint = (await deriveNamedKey(main.seed, OTHER_MINT_KEY)).signer.address;
+    const kept = (await lamportsOf(otherMint)) + (await lamportsOf(await associatedTokenAddress(stack.keys.seller.signer.address, otherMint)));
+    // Apart from that, the funding key paid fees only: the rent it lent for token accounts, and the SOL it gave the stack, came back.
+    expect(lamportsBefore - lamportsAfter - kept).toBeLessThan(5_000_000n);
+```
+
+Replace the file's import `import { deriveKeys } from "../src/devnet/keys.js";` with
+`import { OTHER_MINT_KEY, deriveKeys, deriveNamedKey } from "../src/devnet/keys.js";`. The file already imports
+`associatedTokenAddress` and the type `Address`.
+
 Run: `pnpm --filter @lxfoundry/stint-e2e test devnet-target.test.ts`
 Expected: PASS. Scenario 20 runs here with the devnet target's second mint, derived from the test's seed and created on
-the local network at its first use.
+the local network at its first use. Without the edit above, the lamports test fails with "expected 5475880 to be less
+than 5000000" (the fees and the kept rent together).
 
 - [ ] **Step 2: The whole suite, and the program**
 
@@ -1741,8 +2042,9 @@ If a run fails:
 | Symptom | Likely cause | What to do |
 |---|---|---|
 | Scenario 35 or 20: "… (status 404)" after the connect's retries | The gate's node still does not show the account the direct open created | Rerun once. If it repeats, the devnet target's `readRetry` (`e2e/src/targets/devnet.ts`) is too short for the provider |
+| Scenario 35: the connect takes about 10 s | Expected: an adopted session is read again after the gate's bound on a node's lag, which the devnet target sets at 20 reads 500 ms apart | Nothing |
 | Scenario 20: the second mint's creation fails for want of SOL | The funding key is low | `pnpm e2e:devnet funds`, then fund it |
-| Scenario 8: "a connect with an expired token is refused: expected 401, got 101" | The gate's machine clock is more than 170 s behind the scenario's | Check the machine's clock; the two run on the same machine on devnet |
+| Scenario 8: "a connect with an expired token is refused: expected 401, got 101" | The gate's clock is 110 to 230 s behind the scenario's: the token was issued 200 s ago for 60 s, and the gate allows 30 s of skew either side | Check the machine's clock; the two run on the same machine on devnet |
 | The clean-up reports a session of another mint | A run stopped inside scenario 20 before its own close | It does not stop a run. From its `paid_until` on, anyone can close it: the buyer's key is gone, so it stays until someone does |
 
 - [ ] **Step 4: Record the scenarios in the README**
@@ -1809,17 +2111,20 @@ git commit -m "Record the scenarios of session tokens and adoption that pass on 
 - A connect with a token that is expired, for another audience or purpose, or used before, is refused with `401`
   before the upgrade.
 - A connect for a session the gate does not track adopts the session once the account passes checks 1 to 5, as an open
-  that just settled, and provisions it once however many connects or opens arrive together. A refused connect (`401`,
-  `402`, `403`, `404`) adopts nothing. A session the gate has ended is not adopted again while a node still shows its
-  account.
+  that just settled. It provisions the session once however many connects or opens arrive together, and refuses it with
+  `404` when a second read, after the gate's bound on a node's lag, finds the account gone. A connect refused before
+  `track` (`401`, `402`, `403`, `404`) adopts nothing.
+- A session the gate has ended is not brought back while a node still shows its account, neither by a connect nor by
+  an open paid again.
 - `git diff --stat main -- programs/` is empty.
 - The pull request's description records the devnet runs and any deviation from this plan.
 
 ## Spec edits made by this stage
 
 - Section 7.1, `GET /sessions/:id/ws`: `502` when the chain cannot be read for a session the gate does not track (Task 1).
-- Section 7.3, the adoption row: the order of the checks, what each refusal answers, and the memory of ended sessions
-  (Task 1).
+- Section 7.3, the adoption row: `401` for a connect with no token before anything is read; the order of the checks
+  and what each refusal answers; the memory of ended sessions; the second read after the gate's bound on a node's lag;
+  the rate-limit note. The row `Open settled`: the memory of ended sessions (Task 1).
 - Section 12.2: the sessions the harness opens directly on-chain, with the gate's receiver authorizer and in a second
   mint (Task 4).
 - Section 12.6: the devnet target's second mint, derived from the seed and kept (Task 4).
