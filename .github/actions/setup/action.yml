@@ -1,0 +1,88 @@
+name: Set up
+description: >-
+  Installs the pinned toolchain and the workspace's dependencies, checks the toolchain, and fetches and checks the
+  Subscriptions program copy. The versions come from the calling workflow's environment (RUST_VERSION, AGAVE_VERSION,
+  ANCHOR_VERSION, SURFPOOL_VERSION, KORA_VERSION).
+
+runs:
+  using: composite
+  steps:
+    # An explicit bash runs with pipefail, so a failed download fails its step.
+    - name: System packages
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential pkg-config libudev-dev llvm libclang-dev protobuf-compiler libssl-dev
+
+    - name: Rust
+      shell: bash
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUST_VERSION"
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+    # The key is built from the environment in a step, which leaves the cache step with nothing but the steps context.
+    - name: Cache key for the cargo binaries
+      id: cargo-bin-key
+      shell: bash
+      run: echo "key=cargo-bin-${RUNNER_OS}-rust${RUST_VERSION}-anchor${ANCHOR_VERSION}-kora${KORA_VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Cache cargo binaries
+      id: cargo-bin
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/bin/avm
+          ~/.cargo/bin/anchor
+          ~/.cargo/bin/kora
+          ~/.avm
+        key: ${{ steps.cargo-bin-key.outputs.key }}
+
+    - name: Agave
+      shell: bash
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSfL "https://release.anza.xyz/v${AGAVE_VERSION}/install" -o "$RUNNER_TEMP/agave-install.sh"
+        sh "$RUNNER_TEMP/agave-install.sh"
+        echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+    - name: Anchor and Kora
+      if: steps.cargo-bin.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        cargo install --git https://github.com/otter-sec/anchor --tag "v${ANCHOR_VERSION}" avm --locked --force
+        avm install "$ANCHOR_VERSION"
+        cargo install kora-cli --version "$KORA_VERSION" --locked
+
+    - name: Select Anchor
+      shell: bash
+      run: avm use "$ANCHOR_VERSION"
+
+    - name: Surfpool
+      shell: bash
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSfL https://run.surfpool.run/ | VERSION="v${SURFPOOL_VERSION}" bash
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version-file: .nvmrc
+        cache: pnpm
+
+    - name: Check the toolchain
+      shell: bash
+      run: scripts/check-toolchain.sh
+
+    - name: Install
+      shell: bash
+      run: pnpm install --frozen-lockfile
+
+    - name: Cache the Subscriptions program copy
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: e2e/.cache
+        key: subscriptions-${{ hashFiles('e2e/fixtures/subscriptions.sha256') }}
+
+    - name: Fetch and check the Subscriptions program copy
+      shell: bash
+      run: scripts/fetch-subscriptions-program.sh

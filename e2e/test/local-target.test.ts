@@ -1,14 +1,12 @@
 import { fetchToken } from "@solana-program/token";
-import { catalogue, exitCodeFor, runScenarios } from "@lxfoundry/stint-conformance";
+import { catalogue } from "@lxfoundry/stint-conformance";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startLocalStack, type LocalStack } from "../src/targets/local.js";
 
 /**
- * The required scenarios, all passing on `local`. Together they take a little over three minutes, scenarios 4 and 34
- * about 30 s each and every other one under 20 s, so the test's limit of nine minutes is generous.
+ * The local target itself. `pnpm e2e:local` runs the scenarios on it and exits 1 when a required one fails;
+ * `conformance/test/catalogue.test.ts` pins which scenarios are required.
  */
-const REQUIRED = [1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 32, 34];
-
 describe("local target", () => {
   let stack: LocalStack;
 
@@ -25,21 +23,19 @@ describe("local target", () => {
     expect(stack.context().allowance).toBeDefined();
   });
 
+  it("offers what every required scenario needs, so that a run of the scenarios runs each one", () => {
+    // A scenario whose needs the target lacks is reported not applicable, which does not fail a run.
+    const required = catalogue.filter((scenario) => scenario.status === "required");
+    expect(required.length).toBeGreaterThan(0);
+    for (const scenario of required) {
+      expect(scenario.needs.filter((capability) => !stack.target.capabilities.has(capability)), `scenario ${scenario.id}`).toEqual([]);
+    }
+  });
+
   it("creates the seller's USDC account", async () => {
     const account = await fetchToken(stack.network.rpc, stack.keys.sellerUsdcAccount);
     expect(account.data.owner).toBe(stack.keys.seller.signer.address);
   });
-
-  it("passes every required scenario, and reports the others", async () => {
-    const outcomes = await runScenarios(catalogue, stack.target, () => stack.context());
-    expect(outcomes).toHaveLength(35);
-    for (const id of REQUIRED) {
-      expect(outcomes.find((outcome) => outcome.id === id), `scenario ${id}`).toMatchObject({ status: "required", result: "pass" });
-    }
-    // Every scenario that is not required is pending.
-    expect(outcomes.filter((outcome) => outcome.result === "pending")).toHaveLength(35 - REQUIRED.length);
-    expect(exitCodeFor(outcomes)).toBe(0);
-  }, 540_000);
 
   it("gives scenarios control of the gate and sessions opened straight on the program", async () => {
     const context = stack.context();

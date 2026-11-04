@@ -45,13 +45,16 @@ The toolchain is pinned in `CLAUDE.md` (section "Toolchain") and checked by
     pnpm install
     pnpm generate:client                      # regenerate the program client after an interface change
     scripts/fetch-subscriptions-program.sh    # fetch and check the Subscriptions program copy, once
-    pnpm test                                 # unit and integration tests
+    pnpm test                                 # unit and integration tests of every package but e2e
+    pnpm test:e2e                             # the e2e package's tests, each file starting a local network
     pnpm e2e:local                            # end-to-end scenarios on the local target
+    pnpm e2e:local --only=4,34                # only the scenarios named
     pnpm e2e:devnet                           # the same scenarios on devnet (needs .env.devnet and a deployed program)
     pnpm e2e:devnet funds                     # the address to fund for it, and what that address holds
     pnpm e2e:devnet clean                     # the clean-up alone
 
-The end-to-end report is written to `e2e/report/report.md`.
+The end-to-end report is written to `e2e/report/report.md`; after a run with `--only`, it lists only the
+scenarios named.
 
 ## MCP server
 

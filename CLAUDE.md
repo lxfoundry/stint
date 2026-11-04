@@ -69,14 +69,28 @@ Named in section 3.5 of `docs/specs/stint-system.md` and pinned by
 | Kora | 2.0.5 |
 
 `scripts/check-toolchain.sh` checks the installed tools and the files that pin them. Commands: `anchor build` builds the program;
-`pnpm generate:client` regenerates its client; `pnpm test` runs the unit and integration tests (the integration tests need `anchor build`,
-`scripts/fetch-subscriptions-program.sh` and the `surfpool` and `kora` binaries first); `pnpm e2e:local`
-runs the end-to-end scenarios on the `local` target. `pnpm e2e:devnet` runs them on devnet, on demand: it needs `.env.devnet` (see
-`.env.example`) and a deployed program. On Windows, everything runs inside WSL 2 (the
+`pnpm generate:client` regenerates its client; `pnpm test` runs the unit and integration tests of every package but `e2e`, and
+`pnpm test:e2e` runs the `e2e` package's own tests, each file starting a local network (both need `anchor build` first, and the e2e
+tests and scenarios also `scripts/fetch-subscriptions-program.sh` and the `surfpool` and `kora` binaries); `pnpm e2e:local`
+runs the end-to-end scenarios on the `local` target, and `pnpm e2e:local --only=4,34` only those named. `pnpm e2e:devnet` runs them
+on devnet, on demand: it needs `.env.devnet` (see `.env.example`) and a deployed program. On Windows, everything runs inside WSL 2 (the
 Solana and Anchor toolchains require it). Running `anchor` outside a project that pins
 `[toolchain] solana_version` in `Anchor.toml` can switch the Solana CLI to the version Anchor
 bundles (3.1.10 for Anchor 1.2.1); `agave-install init 4.3.2` restores the pinned one, which
 `scripts/check-toolchain.sh` checks.
+
+## Checks
+
+Two levels. The full suite that a skill or a plan asks for before a commit is the commit level.
+
+| Level | What runs | When |
+|---|---|---|
+| Commit | `pnpm typecheck && pnpm test`; the `e2e` test files that cover the code changed (`pnpm --filter @lxfoundry/stint-e2e test <file>`); `pnpm e2e:local --only=<ids>` for the scenarios that cover the change; `anchor build` and `cargo test -p stint` when `programs/` changed | Every commit, fixes included |
+| Branch | The commit level, plus `pnpm test:e2e` and `pnpm e2e:local` with every scenario | Once, before a branch is reviewed as a whole or opened as a pull request; CI runs it on every pull request and every push to `main` |
+
+- The scenarios share one stack and one chain, and run in order, so one that passes alone can fail after the
+  others. The branch level is where that shows.
+- A plan's steps name commit-level commands; its last task runs the branch level.
 
 ## Rules
 
