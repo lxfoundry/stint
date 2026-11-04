@@ -59,7 +59,7 @@ export interface RouterOptions {
   readonly becomeOwner: () => Promise<CallHandler>;
   /**
    * Told of the state this copy drops when `owner.json` names another copy (what `becomeOwner` gave, or is still
-   * building), once per state: no call reaches that state any more, so whatever it holds open is for its owner to end.
+   * building), once per state: no new call reaches that state, so whatever it holds open is for its owner to end.
    */
   readonly onStepDown?: (dropped: Promise<CallHandler>) => void;
   /**
