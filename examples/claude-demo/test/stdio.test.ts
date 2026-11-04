@@ -127,6 +127,14 @@ describe("the bundled server on stdio", () => {
       child.kill("SIGTERM");
     });
     const code = new Promise<number | null>((resolve) => child.once("exit", (exitCode) => resolve(exitCode)));
+    // Bounded: a line that never comes (the logging changed) fails here with what the server wrote, not after the test's own timeout.
+    // The poll only checks; the signal has already gone out from the handler above.
+    try {
+      await eventually(() => stderr, /this copy holds the demo's state/);
+    } catch (error) {
+      child.kill("SIGKILL"); // Nothing signalled it: it would outlive the test.
+      throw error;
+    }
     expect(await code).toBe(0);
     expect(ownerFileSeen).toBe(true);
     expect(existsSync(join(folder, "stint-demo", "owner.json"))).toBe(false);
