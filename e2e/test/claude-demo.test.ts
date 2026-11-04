@@ -57,8 +57,13 @@ describe("the Claude Desktop example on the local stack", () => {
   });
 
   afterEach(async () => {
-    await running?.stop();
-    running = undefined;
+    try {
+      await running?.stop();
+    } finally {
+      running = undefined;
+      // A start that failed after it wrapped `fetch` left no running demo to restore it.
+      globalThis.fetch = realFetch;
+    }
   });
 
   afterAll(async () => {
