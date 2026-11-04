@@ -27,9 +27,11 @@ connections once it has looked the close up (within about 2 s); the sweeper clos
 closed, if it names the facilitator's own rent payer. A buyer can top up a session before its paid time runs out,
 which moves its end; a session whose paid time has run out cannot be extended. The facilitator refuses a payment that
 does not match its offer with its reason before anything is signed, and keeps a record of each settlement, so that a
-payment sent twice is settled once and answered twice. Twenty-one of the 35 end-to-end scenarios of the
-[specification](docs/specs/stint-system.md) (section 12.7) pass on a local network and on devnet, and the run report
-lists the other 14 as pending. Not built yet: a store for settlement records that survives a restart of the
+payment sent twice is settled once and answered twice. The gate refuses a session token that has expired, names
+another audience or purpose, or was used before, and adopts a session opened directly on-chain on the seller's terms
+when its buyer connects; one in another mint is refused. Twenty-four of the 35 end-to-end scenarios of the
+[specification](docs/specs/stint-system.md) (section 12.7) pass on a local network, and the run report lists the other
+11 as pending. Not built yet: a store for settlement records that survives a restart of the
 facilitator (it keeps them in memory), the gate's watch of a payment whose settlement is pending, the facilitator's
 rate limits, and resilience across restarts.
 The [plans](docs/plans/README.md) list the stages that remain.
@@ -155,9 +157,11 @@ rate-limited. Create `.env.devnet` (git-ignored; `.env.example` lists the names)
 for a run, or what it still needs. Fund that address once, with at
 least 0.5 SOL from a devnet faucet and 5 USDC from Circle's (Solana Devnet). It is the only key to
 watch: it plays no part in any scenario, and the fees that runs spend are the only thing that does not
-come back to it.
+come back to it, apart from the rent, paid once for a seed, of scenario 20's second mint and of the seller's account
+for it.
 
-Scenarios 1, 2, 3, 4, 5, 6, 7, 9, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 32 and 34 pass on devnet.
+Scenarios 1, 2, 3, 4, 5, 6, 7, 9, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 32 and 34 pass on devnet. Scenarios 8, 20
+and 35 pass on a local network; their run on devnet is not recorded here.
 
 A run checks that the endpoint is devnet and that the program is deployed, then cleans up: it closes
 every session that the seed's keys have open and returns what they hold to the funding key. On a first
