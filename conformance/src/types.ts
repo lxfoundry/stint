@@ -121,8 +121,8 @@ export interface DirectChain {
   /**
    * Tops up `session` on the program: `rate x seconds` from the buyer's USDC account into the session's vault, then
    * `top_up` signed by the buyer as the session's authority, in one transaction whose fee a harness key pays. It works on
-   * any session the buyer opened, through the gate or not, and goes through neither the gate nor the facilitator. Returns
-   * the transaction's signature, and rejects if the program refuses the top-up.
+   * a session the buyer opened in USDC, through the gate or not, and goes through neither the gate nor the facilitator.
+   * Returns the transaction's signature, and rejects if the program refuses the top-up.
    */
   topUp(options: { readonly buyer: Buyer; readonly session: Address; readonly seconds: number }): Promise<string>;
   /** A new key that holds nothing. */
