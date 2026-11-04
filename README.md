@@ -95,6 +95,13 @@ agent stops once it has worked out the last payment from two consecutive message
 point it at the key that deploys the program or at the harness's funding key. Every spending limit is enforced by the client's policy in code. The stream's messages reach the model as
 data and cannot raise one. Every session is closed before the agent returns, whatever happened.
 
+## Examples: a seller deployment, and a session in Claude Desktop
+
+[`examples/seller`](examples/seller/README.md) runs Kora, the facilitator with its sweeper and the example stream with
+its gate in one process, deployable on Fly.io as one always-on machine that sells the stream on devnet.
+[`examples/claude-demo`](examples/claude-demo/README.md) is an MCP server whose panel shows a Stint session in Claude
+Desktop: the agent's wallet, the x402 exchange, the paid time draining, a top-up, and an early close with its refund.
+
 ## Deploying to devnet
 
 The program is upgradeable on devnet and built verifiably. Both scripts refuse any cluster whose

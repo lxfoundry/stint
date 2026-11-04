@@ -41,6 +41,9 @@ the earlier stages confirmed (spec §14) and the versions they pinned, instead o
 Stages 0 to 2 come first, in that order. From stage 3 on, the order may change. Each plan names
 the earlier stages it needs.
 
+[claude-demo.md](claude-demo.md) is not a stage: it adds an example seller deployment and an example MCP server that
+shows a Stint session in Claude Desktop, and changes no component.
+
 ## How the program grows
 
 The program is complete only at stage 9. Its LiteSVM tests (spec §12.1) grow with it, and every
