@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { canLaunch, capsule, closeRefusal, formatUsdc, headline, isStale, needsFunding, secondsLeft, skewOf, surfaceOf, topUpRefusal } from "../app/model.js";
-import { FAUCET_URL, type DemoAction, type DemoSession, type DemoState } from "../src/state.js";
+import {
+  canLaunch,
+  capsule,
+  closeRefusal,
+  formatAmount,
+  formatUsdc,
+  headline,
+  isStale,
+  ledgerLine,
+  needsFunding,
+  secondsLeft,
+  skewOf,
+  surfaceOf,
+  topUpRefusal,
+} from "../app/model.js";
+import { FAUCET_URL, type DemoAction, type DemoSession, type DemoState, type LedgerEntry } from "../src/state.js";
 
 /** A 100 s session from 1,000 to 1,100, at 1000 base units a second, in a seller's 300 s at most. */
 const running = (fields: Partial<DemoSession> = {}): DemoSession => ({
@@ -23,6 +37,7 @@ const stateOf = (session: DemoSession, usdc?: string, busy?: DemoAction): DemoSt
   faucetUrl: FAUCET_URL,
   session,
   exchange: { current: [] },
+  ledger: [],
   now: 0,
   ...(busy ? { busy } : {}),
 });
@@ -55,16 +70,57 @@ describe("the time left", () => {
 });
 
 describe("the capsule", () => {
-  it("draws the paid time and the time used as shares of the longest session", () => {
-    expect(capsule(running(), 1_050_000)).toEqual({ used: 50 / 300, paid: 100 / 300 });
+  it("draws the paid time and the time used as shares of the paid time and one top-up more", () => {
+    expect(capsule(running(), 1_050_000)).toEqual({ used: 50 / 200, paid: 100 / 200 });
     expect(capsule(running({ paidUntil: 1_200, deposited: "200000" }), 1_050_000)).toEqual({ used: 50 / 300, paid: 200 / 300 });
-    expect(capsule(running(), 990_000)).toEqual({ used: 0, paid: 100 / 300 });
+    expect(capsule(running(), 990_000)).toEqual({ used: 0, paid: 100 / 200 });
+  });
+
+  it("never draws past the longest session, and keeps a short session readable in a long one", () => {
+    expect(capsule(running({ paidUntil: 1_300, deposited: "300000" }), 1_050_000)).toEqual({ used: 50 / 300, paid: 1 });
+    expect(capsule(running({ maxSeconds: 1_000 }), 1_050_000)).toEqual({ used: 50 / 200, paid: 100 / 200 });
+    expect(capsule(running({ maxSeconds: 1_000, paidUntil: 1_950, deposited: "950000" }), 1_050_000)).toEqual({ used: 50 / 1_000, paid: 950 / 1_000 });
+    expect(capsule(running({ maxSeconds: 1_000, paidUntil: 2_000, deposited: "1000000" }), 1_050_000)).toEqual({ used: 50 / 1_000, paid: 1 });
   });
 
   it("stops at the close, is full once the session expired, and is empty with no session", () => {
-    expect(capsule(running({ state: "closed", endedAt: 1_030 }), 1_090_000)).toEqual({ used: 30 / 300, paid: 100 / 300 });
-    expect(capsule(running({ state: "expired" }), 1_500_000)).toEqual({ used: 100 / 300, paid: 100 / 300 });
+    expect(capsule(running({ state: "closed", endedAt: 1_030 }), 1_090_000)).toEqual({ used: 30 / 200, paid: 100 / 200 });
+    expect(capsule(running({ state: "expired" }), 1_500_000)).toEqual({ used: 100 / 200, paid: 100 / 200 });
     expect(capsule(none, 0)).toEqual({ used: 0, paid: 0 });
+  });
+});
+
+describe("the wallet's log", () => {
+  const entry = (fields: Partial<LedgerEntry>): LedgerEntry => ({ kind: "launch", sessionId: "S", at: 0, direction: "out", ...fields });
+
+  it("writes each movement as the balance before, the amount and the balance after", () => {
+    expect(ledgerLine(entry({ amount: "100000", before: "19630000", after: "19530000" }))).toBe("[launch] 19.630 - 0.100 = 19.530 USDC");
+    expect(ledgerLine(entry({ kind: "top-up", amount: "100000", before: "19530000", after: "19430000" }))).toBe(
+      "[top-up] 19.530 - 0.100 = 19.430 USDC",
+    );
+    expect(ledgerLine(entry({ kind: "close", direction: "in", amount: "34000", before: "19430000", after: "19464000" }))).toBe(
+      "[close] 19.430 + 0.034 = 19.464 USDC",
+    );
+  });
+
+  it("names the ends the demo did not make", () => {
+    expect(ledgerLine(entry({ kind: "expired", direction: "in", amount: "0", before: "900000", after: "900000" }))).toBe(
+      "[expired] 0.900 + 0.000 = 0.900 USDC: the seller was paid in full",
+    );
+    expect(ledgerLine(entry({ kind: "ended", direction: "in", amount: "39000", before: "900000", after: "939000" }))).toBe(
+      "[ended by the seller] 0.900 + 0.039 = 0.939 USDC",
+    );
+  });
+
+  it("gives the amount alone when the balance before is not known, and says so when the amount is not", () => {
+    expect(ledgerLine(entry({ amount: "100000" }))).toBe("[launch] -0.100 USDC");
+    expect(ledgerLine(entry({ kind: "close", direction: "in" }))).toBe("[close] the refund was not reported: see the close transaction");
+  });
+
+  it("writes amounts with at least three decimals, and nothing for a value that is not one", () => {
+    expect(formatAmount("19464000")).toBe("19.464");
+    expect(formatAmount("1234567")).toBe("1.234567");
+    expect(formatAmount("x")).toBe("?");
   });
 });
 

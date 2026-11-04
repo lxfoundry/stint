@@ -8,8 +8,22 @@ import {
   type DemoAction,
   type DemoState,
   type ExchangeRow,
+  type LedgerEntry,
 } from "../src/state.js";
-import { canLaunch, capsule, closeRefusal, formatUsdc, headline, isStale, needsFunding, secondsLeft, skewOf, surfaceOf, topUpRefusal } from "./model.js";
+import {
+  canLaunch,
+  capsule,
+  closeRefusal,
+  formatUsdc,
+  headline,
+  isStale,
+  ledgerLine,
+  needsFunding,
+  secondsLeft,
+  skewOf,
+  surfaceOf,
+  topUpRefusal,
+} from "./model.js";
 import { createPoller } from "./poller.js";
 
 type ToolAnswer = Awaited<ReturnType<App["callServerTool"]>>;
@@ -45,6 +59,7 @@ let pollFailure: string | undefined;
 let notice: { readonly text: string; readonly url?: string } | undefined;
 let rowsKey = "";
 let linksKey = "";
+let ledgerKey = "";
 
 function element<T extends HTMLElement = HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -146,7 +161,8 @@ async function pollOnce(): Promise<void> {
 async function tellModel(): Promise<void> {
   if (!state || !app.getHostCapabilities()?.updateModelContext) return;
   const id = state.session.sessionId;
-  const text = `Stint demo panel: ${headline(state, Date.now() + skew)}${id ? ` (session ${id})` : ""}.`;
+  const latest = state.ledger.at(-1);
+  const text = `Stint demo panel: ${headline(state, Date.now() + skew)}${id ? ` (session ${id})` : ""}.${latest ? ` Wallet log: ${ledgerLine(latest)}` : ""}`;
   try {
     await app.updateModelContext({ content: [{ type: "text", text }] });
   } catch (error) {
@@ -258,6 +274,25 @@ function renderRows(rows: readonly ExchangeRow[]): void {
   );
 }
 
+/** One line per movement of the wallet's USDC, oldest first, each with its transaction; rebuilt only when it changes. */
+function renderLedger(entries: readonly LedgerEntry[]): void {
+  element("wallet-log").hidden = entries.length === 0;
+  const key = JSON.stringify(entries);
+  if (key === ledgerKey) return;
+  ledgerKey = key;
+  element("ledger").replaceChildren(
+    ...entries.map((entry) => {
+      const item = document.createElement("li");
+      const line = document.createElement("span");
+      line.className = "mono";
+      line.textContent = ledgerLine(entry);
+      item.append(line);
+      if (entry.link) item.append(linkButton("Explorer", entry.link));
+      return item;
+    }),
+  );
+}
+
 function renderLinks(session: DemoState["session"]): void {
   const { links } = session;
   const entries: [string, string | undefined][] = [
@@ -316,6 +351,7 @@ function renderState(current: DemoState): void {
   show("top-up", session.state === "open", !busy && !topUpReason);
   show("close", session.state === "open", !busy && !closeRefusal(session, nowMs));
   setText("top-up-reason", session.state === "open" ? (topUpReason ?? "") : "");
+  renderLedger(current.ledger);
   renderRows(busy ? current.exchange.current : (current.exchange.last?.rows ?? []));
   renderLinks(session);
 }

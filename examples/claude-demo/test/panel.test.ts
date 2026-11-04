@@ -25,7 +25,7 @@ describe("the panel's HTML", () => {
     const end = html.lastIndexOf("</script>");
     expect(start).toBeGreaterThan(html.indexOf('id="links"'));
     expect(html.slice(start + "<script>".length, end)).not.toMatch(/<\/script/i);
-    for (const id of ["address", "balance", "launch", "refresh", "top-up", "close", "rows", "links", "error"]) {
+    for (const id of ["address", "balance", "launch", "refresh", "top-up", "close", "ledger", "rows", "links", "error"]) {
       expect(html).toContain(`id="${id}"`);
     }
     expect(html.length).toBeLessThan(2_000_000);

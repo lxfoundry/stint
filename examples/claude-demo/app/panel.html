@@ -52,6 +52,8 @@
   #rows li { display: grid; gap: 2px; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius); }
   #rows li[data-kind="error"] { border-style: dashed; }
   #rows li[data-kind="settled"] strong { color: var(--accent-text); }
+  #ledger { gap: 2px; }
+  #ledger li { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   #error { font-weight: 600; margin: 4px 0; overflow-wrap: anywhere; }
   #notice, #offline { overflow-wrap: anywhere; user-select: text; }
   p { margin: 4px 0; }
@@ -81,6 +83,10 @@
   <p id="error" role="alert"></p>
   <p id="offline"></p>
   <p id="notice"><span id="notice-text"></span> <code id="notice-url"></code></p>
+</section>
+<section id="wallet-log" hidden>
+  <h1>Wallet log <span class="label">USDC before, moved, after</span></h1>
+  <ol id="ledger"></ol>
 </section>
 <section id="exchange" hidden>
   <h1>x402 exchange</h1>

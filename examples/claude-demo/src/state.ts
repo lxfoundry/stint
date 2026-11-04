@@ -1,7 +1,8 @@
 /**
  * The demo's state, as the server keeps it and the panel draws it, and the constants both use. This module imports
- * nothing: the panel's bundle includes it. Amounts are base-unit decimal strings; times are Unix seconds, except four
- * fields, in milliseconds: `DemoState.now`, each `ExchangeRow.at`, `DemoWallet.checkedAt` and `DemoState.error.at`.
+ * nothing: the panel's bundle includes it. Amounts are base-unit decimal strings; times are Unix seconds, except five
+ * fields, in milliseconds: `DemoState.now`, each `ExchangeRow.at`, each `LedgerEntry.at`, `DemoWallet.checkedAt` and
+ * `DemoState.error.at`.
  */
 
 /** How long a launch buys, and how long a top-up adds. */
@@ -71,6 +72,32 @@ export interface DemoSession {
   readonly links: DemoLinks;
 }
 
+/**
+ * What moved the agent's USDC: one of the demo's actions, or an end of the session it did not make (`expired`: the paid
+ * time ran out and the seller was paid in full; `ended`: the seller closed it before its end, and refunded the rest).
+ */
+export type LedgerKind = "launch" | "top-up" | "close" | "expired" | "ended";
+
+/**
+ * One movement of the agent's USDC. The balance before a launch is the one the launch read from the chain; before
+ * anything else, the balance after the session's movement before it. So a session's lines add up, from its launch on.
+ */
+export interface LedgerEntry {
+  readonly kind: LedgerKind;
+  readonly sessionId: string;
+  /** When it was logged, in milliseconds. */
+  readonly at: number;
+  /** `out` of the wallet, into the session's escrow, or `in`, refunded from it. */
+  readonly direction: "out" | "in";
+  /** Absent when a close's answer did not report its refund. */
+  readonly amount?: string;
+  /** Absent when the launch could not read the balance, or the amount is not known. */
+  readonly before?: string;
+  readonly after?: string;
+  /** The movement's transaction on Explorer, once known. */
+  readonly link?: string;
+}
+
 export interface DemoWallet {
   readonly address: string;
   /** Its USDC, in base units, as last read; absent until a read succeeds. */
@@ -90,6 +117,8 @@ export interface DemoState {
     readonly current: readonly ExchangeRow[];
     readonly last?: { readonly action: DemoAction; readonly rows: readonly ExchangeRow[] };
   };
+  /** The movements of the agent's USDC this server made or saw, oldest first: the latest `LEDGER_LIMIT` of them. */
+  readonly ledger: readonly LedgerEntry[];
   /** The server's clock, in milliseconds: the panel corrects its own by it. */
   readonly now: number;
   readonly busy?: DemoAction;

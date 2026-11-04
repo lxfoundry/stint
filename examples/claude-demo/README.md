@@ -10,17 +10,21 @@ An MCP server whose panel shows a Stint session in Claude Desktop. Ask Claude to
   settled transaction), the paid time draining, and a count of the stream's messages about the agent's own USDC
   account, which arrive when its money moves;
 - **Top up +100 s** and **Close now**: the same exchange for a top-up, or the close with what was paid and refunded;
-- at the end of the paid time, the gate closing the session and the seller paid in full.
+- at the end of the paid time, the gate closing the session and the seller paid in full;
+- the wallet's log: one line per movement of its USDC, with the balance before, the amount and the balance after, such
+  as `[launch] 19.630 - 0.100 = 19.530 USDC`, `[top-up] 19.530 - 0.100 = 19.430 USDC` and
+  `[close] 19.430 + 0.034 = 19.464 USDC`, then `[expired]` or `[ended by the seller]` for an end the agent did not make.
 
 Each step links to devnet's Explorer. The panel's buttons and the chat act on the same session: "top up" or "close it"
-in the chat calls `stint_demo_top_up` or `stint_demo_close`.
+in the chat calls `stint_demo_top_up` or `stint_demo_close`. A launch, top-up or close that the model runs answers with
+its line of the wallet's log first, and the server's instructions ask the model to quote it in the chat.
 
 | Tool | What it does |
 |---|---|
 | `stint_demo` | Shows the panel and returns the state. The model calls it when asked to start or see the demo |
 | `stint_demo_state` | The state, for the panel's reads. With `refreshBalance: true` it reads the wallet's USDC again. Marked as the panel's own: it is not offered to the model |
 | `stint_demo_launch` | Opens a 100 s session and pays 0.100 USDC for it. Refused while a session runs, and when the wallet holds less |
-| `stint_demo_top_up` | Buys 100 s more. Refused with 13 s of paid time or less left, and when 100 s more would pass the seller's longest session (300 s) |
+| `stint_demo_top_up` | Buys 100 s more. Refused with 13 s of paid time or less left, and when 100 s more would pass the seller's longest session (1000 s for the example seller) |
 | `stint_demo_close` | Closes the session now: the seller is paid for the time used and the rest is refunded. Refused once the paid time is over, when the gate closes the session itself |
 
 A tool takes no argument but `refreshBalance` on `stint_demo_state`. An argument a tool does not name is refused, as a
@@ -119,7 +123,7 @@ building the panel at start. `pnpm --filter @lxfoundry/stint-claude-demo test` r
   **Refresh**. The panel's faucet link asks Claude Desktop to open it; if it will not, the panel shows the page's
   address to copy.
 - Its limits, enforced by the client's policy whatever the seller offers or the model asks: at most 1000 base units a
-  second (0.001 USDC/s), at most 0.300 USDC per session (an open and two top-ups), at most 2.000 USDC an hour across
+  second (0.001 USDC/s), at most 1.000 USDC per session (an open and nine top-ups), at most 2.000 USDC an hour across
   sessions, counted as it is paid in, refunds or not; devnet and devnet USDC only. The 2.000 USDC an hour is
   counted by the client of the copy that holds the state: when another copy takes over, or the server restarts, the
   new client starts a fresh window.
@@ -154,18 +158,24 @@ building the panel at start. `pnpm --filter @lxfoundry/stint-claude-demo test` r
 - A session ends in one of three ways: **closed** (Close now, or the model's `stint_demo_close`), **expired** (its paid
   time ran out, and the seller was paid in full) or **ended** (the gate or another party closed it before its end, such as
   the gate's idle close).
-- Quitting Claude Desktop closes the session as a best effort. When the server's standard input closes, as when Claude
-  Desktop quits and lets its servers finish, the owner closes the session if it is still paid for, so that the unused part
-  of the deposit comes back; it waits at most 90 s. Claude Desktop may end its servers within seconds, though. If the
-  process is killed first, nothing runs in it: the stream connection drops, and the gate's idle close, about 60 s later,
-  closes the session and refunds the rest the same way. A session with less than 60 s left then runs to its end, and the
-  seller is paid in full.
+- The wallet's log starts each session from the balance its launch reads on the chain, and works each later line out
+  from the one before, so that a session's lines add up. The wallet's own line shows the balance as last read, so USDC
+  that arrives from elsewhere shows there. An expiry is logged as soon as the stream reports it, and its close's link is
+  added once the chain shows the close; the refund of a session that the seller ended is logged once its close is found.
+  The log holds the latest 20 movements, in memory: a restart starts it again.
+- When the server's standard input closes, as when a host stops its servers and lets them finish, the owner logs
+  `closing session <address>` and closes the session if it is still paid for, so that the unused part of the deposit
+  comes back; it waits at most 90 s. Claude Desktop does not let them finish: as it quits, it kills each copy of the
+  extension at once (its `main.log` shows each one closed and killed in the same second), so nothing runs in them. The
+  stream connection drops, and the gate's idle close, 30 s later at the example seller, closes the session and refunds
+  the rest the same way. A session with less than 30 s left then runs to its end, and the seller is paid in full.
 - While the previous owner closes its sessions on the way out (up to 90 s), copies started meanwhile, as by restarting
   Claude Desktop, may forward to it, and a launch answers "The demo is shutting down: no session can be opened". It
   recovers by itself once that process exits.
 - Stdout carries the protocol; everything for a person goes to stderr, one line per tool call, prefixed
   `stint-claude-demo: `, in each copy that handles the call (a forwarder logs `<tool> forwarded`, the owner
-  `<tool> ok in <n> ms`), but for the panel's state reads, which are logged only when they fail. Claude Desktop keeps each
-  server's stderr in a file in its log folder (`%LOCALAPPDATA%\Claude\Logs` on the Windows Store build): for the
-  extension, `mcp-server-Stint demo.log`, named by the display name in its manifest; for an entry of
-  `claude_desktop_config.json`, `mcp-server-<its key>.log`, such as `mcp-server-stint-demo.log` for the entry above.
+  `<tool> ok in <n> ms`), but for the panel's state reads, which are logged only when they fail. Claude Desktop keeps it
+  in its log folder (`%LOCALAPPDATA%\Claude\Logs` on the Windows Store build): for the extension, in `main.log`, each
+  line after `[UtilityProcess stderr]` (`mcp-server-Stint demo.log`, named by the display name in its manifest, holds
+  the protocol's messages); for an entry of `claude_desktop_config.json`, in `mcp-server-<its key>.log`, such as
+  `mcp-server-stint-demo.log` for the entry above.

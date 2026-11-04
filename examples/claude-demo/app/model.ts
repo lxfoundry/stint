@@ -1,16 +1,42 @@
-import { LAUNCH_AMOUNT, LAUNCH_SECONDS, TOP_UP_SECONDS, isRunning, type DemoSession, type DemoState } from "../src/state.js";
+import { LAUNCH_AMOUNT, LAUNCH_SECONDS, TOP_UP_SECONDS, isRunning, type DemoSession, type DemoState, type LedgerEntry, type LedgerKind } from "../src/state.js";
 
 /** The panel's logic, without the DOM: the server refuses with the same words what the panel does not offer. */
 
 const USDC_DECIMALS = 6;
 
-/** `"100000"` → `"0.100 USDC"`: at least three decimals, and no trailing zero beyond them. */
-export function formatUsdc(baseUnits: string): string {
-  if (!/^\d+$/.test(baseUnits)) return "? USDC";
+/** `"100000"` → `"0.100"`: at least three decimals, and no trailing zero beyond them; `"?"` for what is not an amount. */
+export function formatAmount(baseUnits: string): string {
+  if (!/^\d+$/.test(baseUnits)) return "?";
   const value = BigInt(baseUnits);
   const scale = 10n ** BigInt(USDC_DECIMALS);
   const fraction = (value % scale).toString().padStart(USDC_DECIMALS, "0").replace(/0+$/, "").padEnd(3, "0");
-  return `${value / scale}.${fraction} USDC`;
+  return `${value / scale}.${fraction}`;
+}
+
+/** `"100000"` → `"0.100 USDC"`, as `formatAmount` writes the number. */
+export const formatUsdc = (baseUnits: string): string => `${formatAmount(baseUnits)} USDC`;
+
+const LEDGER_LABELS: Readonly<Record<LedgerKind, string>> = {
+  launch: "launch",
+  "top-up": "top-up",
+  close: "close",
+  expired: "expired",
+  ended: "ended by the seller",
+};
+
+/**
+ * One line of the wallet's log, the same in the panel and in the chat: `[top-up] 19.530 - 0.100 = 19.430 USDC`. The
+ * amount alone when the balance before is not known; what is missing when the amount is not.
+ */
+export function ledgerLine(entry: LedgerEntry): string {
+  const label = `[${LEDGER_LABELS[entry.kind]}]`;
+  if (entry.amount === undefined) return `${label} the refund was not reported: see the close transaction`;
+  const sign = entry.direction === "out" ? "-" : "+";
+  const movement =
+    entry.before === undefined || entry.after === undefined
+      ? `${sign}${formatUsdc(entry.amount)}`
+      : `${formatAmount(entry.before)} ${sign} ${formatAmount(entry.amount)} = ${formatUsdc(entry.after)}`;
+  return `${label} ${movement}${entry.kind === "expired" ? ": the seller was paid in full" : ""}`;
 }
 
 /** What to add to the panel's clock to read the server's, from a state the server stamped `serverNowMs`. */
@@ -23,8 +49,9 @@ export function secondsLeft(session: DemoSession, nowMs: number): number {
 }
 
 /**
- * The capsule (`brand/README.md`): the paid time and the time used, as shares of the longest session the seller allows,
- * so that a top-up moves the capsule's end out. The time used stops at `endedAt`, and fills the capsule once expired.
+ * The capsule (`brand/README.md`): the paid time and the time used, as shares of the paid time plus one top-up, and at
+ * most of the longest session the seller allows. A top-up moves the capsule's end out, and a 100 s session stays half
+ * the track when the seller allows ten times that. The time used stops at `endedAt`, and fills the capsule once expired.
  */
 export function capsule(session: DemoSession, nowMs: number): { used: number; paid: number } {
   const { startedAt, paidUntil, maxSeconds } = session;
@@ -32,7 +59,8 @@ export function capsule(session: DemoSession, nowMs: number): { used: number; pa
   const paidSeconds = Math.max(0, paidUntil - startedAt);
   const at = session.state === "expired" ? paidUntil : (session.endedAt ?? nowMs / 1000);
   const usedSeconds = Math.min(paidSeconds, Math.max(0, at - startedAt));
-  return { used: Math.min(1, usedSeconds / maxSeconds), paid: Math.min(1, paidSeconds / maxSeconds) };
+  const track = Math.min(maxSeconds, paidSeconds + TOP_UP_SECONDS);
+  return { used: Math.min(1, usedSeconds / track), paid: Math.min(1, paidSeconds / track) };
 }
 
 function notRunning(session: DemoSession): string {
