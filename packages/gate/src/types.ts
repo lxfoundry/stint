@@ -80,8 +80,11 @@ export interface GateConfig<U = unknown> {
    */
   readonly endRetrySeconds?: number;
   /**
-   * How the session after a settled open, and the `Closed` event after a confirmed close, are
-   * re-read while the node returns nothing yet. Default 5 reads, 200 ms apart.
+   * How a read that the node may not answer yet is asked again: the session after a settled open, the session once
+   * the chain shows a settled top-up's transaction (`GateChain.readSessionAfter`), the `Closed` event after a confirmed
+   * close, and the `Closed` event of a close by another party, for 2 s at most. Default 5 reads, 200 ms apart. A top-up
+   * whose transaction the node does not show within these reads is answered `502` although it settled (spec §7.3): a
+   * gate whose node can lag by more than that needs a larger bound.
    */
   readonly readRetry?: RetryOptions;
   /** The largest WebSocket message a buyer may send; a bigger one closes the connection with 1009. Default 65536. */

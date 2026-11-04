@@ -645,12 +645,12 @@ export function createGate<U>(config: GateConfig<U>): Gate {
    * `POST /sessions/:id/top-up` (spec §7.1): a 402 listing top-up offers, then the payment. Only a session this gate tracks
    * can be topped up. Once its end timer has fired, the session cannot be extended (spec §4.3): the answer is a 402 with
    * `session_expired` and offers for a new session, as a connect gets then. The durations that fit come from the chain,
-   * since a top-up made elsewhere may have moved the deposit (spec §5.2). A request that carries a payment is refused
-   * `400` only for a duration outside 1 to `maxSeconds`, and the duration it accepts need not fit the deposit read now: a
-   * payment sent again after its transaction landed is answered from the facilitator's record, and is already in that
-   * deposit, and the facilitator refuses a new one that does not fit (`invalid_amount`). The offers, a refusal's
-   * included, are the durations that fit; a refusal with none to offer is a `400 invalid_duration` with the deposit's
-   * bounds, as the request for offers gets then.
+   * since a top-up made elsewhere may have moved the deposit (spec §5.2). A request that carries a payment has its
+   * duration checked only against 1 to `maxSeconds` (a `400` outside), not against the deposit read now: a payment sent
+   * again after its transaction landed is answered from the facilitator's record, and is already in that deposit, and
+   * the facilitator refuses a new one that does not fit (`invalid_amount`). The offers, a refusal's included, are the
+   * durations the request names (its `seconds`, or else the menu's) that fit the deposit; a refusal with none to offer
+   * is a `400 invalid_duration` with the deposit's bounds, as the request for offers gets then.
    *
    * Once the top-up settles, the new end is the `paid_until` of the session as it stands after the settlement's
    * transaction, read from a node that shows that transaction (`readSessionAfter`), and asked again within `readRetry`
