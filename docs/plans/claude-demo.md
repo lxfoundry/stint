@@ -113,7 +113,8 @@ Where the code base made this plan depart from the design it started from, each 
 12. **`STINT_DEMO_RPC_URL`** names the node the demo reads the balance and the closes from (default
     `https://api.devnet.solana.com`), alongside `STINT_DEMO_HOME` and `STINT_DEMO_GATE_URL`.
 13. **No end-to-end test of the demo against the local stack**: `startLocalStack` is exported only through the e2e
-    index, which loads Surfpool (constraint above). The manual devnet run (Task 15) covers it.
+    index, which loads Surfpool (constraint above). The manual devnet run (Task 15) covers it. (Superseded under As
+    built: the end-to-end package imports the examples, the other way round, and tests both on the local stack.)
 14. **The demo's files live in a `stint-demo` subfolder of `STINT_DEMO_HOME`**, created before the election, so that the
     `.mcpb`'s default (the home folder) does not fill the home folder itself.
 15. **The demo's budget is 2000000 base units an hour (2.000 USDC)**, not 600000, so that a manual run and its retries
@@ -200,6 +201,15 @@ The code differs from the code this plan shows in these ways, each a behaviour o
   router's `onStepDown`. On the way out, the sessions of every state the copy built are closed, those of states it
   dropped included (a close that failed when the state was dropped is tried again), and a state built while it leaves
   opens nothing.
+- **Both examples are tested on the local stack.** The end-to-end package imports them; they still import nothing from
+  it. `e2e/test/seller-start-up-close.test.ts` runs the seller's start-up close against the real program, with the
+  stack's gate and facilitator stopped as a restart stops them: a session still paid for is closed with a `Standard`
+  close by the receiver authorizer, the seller paid for the time used and the buyer refunded the rest, the rent back to
+  the rent payer, and an expired one left to the sweeper. `e2e/test/claude-demo.test.ts` drives the demo's MCP server
+  with no Claude: a launch records the exchange from the client's own requests to the real gate, a top-up its own, and
+  a close or an expiry matches the close the chain shows. For them the seller exports `closeLeftSessions`, the demo
+  package has an entry point (`src/index.ts`, which the bundle does not use), and `createDemo` takes `launchSeconds`
+  (default 100): the local stack's longest session, 120 s, leaves no room for a top-up of 100 s after a launch of 100 s.
 
 ## What this plan builds, and what it leaves
 
@@ -5852,7 +5862,7 @@ If a step fails:
 | The bundle (`dist/claude-demo.cjs`), the `.mcpb` (manifest 0.3, no BOM, validated then packed); a stdio test of the built bundle | 13 |
 | The docs lines: README, plans README, spec §3.3 | 14 |
 | The manual run: deploy, `curl`, a fresh wallet, the faucet, Launch, Close now, top-ups from the panel and the chat, an expiry, a quit | 15 |
-| An end-to-end test against the local stack | Not possible without importing Surfpool: deviation 13 |
+| An end-to-end test against the local stack | `e2e/test/seller-start-up-close.test.ts` and `e2e/test/claude-demo.test.ts` (As built; deviation 13 superseded) |
 
 **Placeholder scan:** every code step holds the whole file or the exact text to replace; no step says "similar to";
 the README steps name `<your devnet endpoint>` and `<you>`, which are the operator's own values, not missing code.
@@ -5860,8 +5870,8 @@ the README steps name `<your devnet endpoint>` and `<you>`, which are the operat
 **Test counts:** seller 11 after Task 2 (config 7, keys 4), 21 after Task 3 (Kora 6, chain 4), 22 after Task 4; demo
 9 after Task 6, 17 after Task 7, 24 after Task 8, 33 after Task 9 (owner 9), 42 after Task 10, 51 after Task 11 (tools
 5, server 4), 53 after Task 12, 57 after Task 13 (manifest 2, stdio 2). Those are the counts of the listings above. As
-built, the seller has 55 tests in 6 files and the demo 194 in 16: the others cover the behaviours under As built, and
-the seller's chain code against a node on 127.0.0.1.
+built, the seller has 55 tests in 6 files and the demo 195 in 16: the others cover the behaviours under As built, and
+the seller's chain code against a node on 127.0.0.1. The end-to-end package adds 4, in 2 files.
 
 **Type consistency:** `CallHandler` (Task 9) is what `createCallHandler` returns (Task 11) and what `createDemoServer`
 takes; `RouterOptions` has `dir` and `readOnly`, which `main.ts` fills with `DemoConfig.dir` and the two read-only
