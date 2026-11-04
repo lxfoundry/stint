@@ -45,10 +45,9 @@ Codama 1.11.0 with `@codama/renderers-js` 2.8.0, Surfpool 1.6.1, Kora 2.0.5.
 - `apps/facilitator/src/verify.ts` and its tests (`simulate` gains a line; `settlePayment` becomes `createSettlement`);
 - `conformance/src/types.ts`, `catalogue.ts`, `helpers.ts`, and a new `payments.ts`. It adds `refusalOf` and
   `usdcBalance` to `helpers.ts` and `openOffers` to `payments.ts`, which scenario 12 reuses;
-- `conformance/test/catalogue.test.ts`;
+- `conformance/test/catalogue.test.ts`, and `conformance/test/helpers.test.ts`, whose `refusalOf` test Task 8 updates;
 - `e2e/src/targets/local.ts`, `devnet.ts`, `e2e/test/local-target.test.ts` and `devnet-target.test.ts`;
-- `packages/x402/src/inspect.ts` and `chain.ts`;
-- the README.
+- `packages/client/src/client.ts`.
 
 Line numbers below are those of `b686a72` and will have moved: find each edit by the text it names, place it next to
 stage 3's lines, and undo none of them.
@@ -177,11 +176,12 @@ simulation refused an open over the cap with `custom program error: 0x190`. The 
 | `packages/x402/src/checks.ts` (modify) | The open and top-up layouts take either funding instruction; `checkFunding` checks a pull's owner and delegatee |
 | `apps/facilitator/src/receipt.ts` (create) | `vaultReceipt`: what the simulated transaction moves into the vault |
 | `apps/facilitator/src/verify.ts` (modify) | The receipt check after simulation; allowance errors named in refusals |
-| `packages/client/src/allowance.ts` (create) | `readAllowance`, `checkAllowanceCovers`: the client's reads of the delegation |
+| `packages/client/src/allowance.ts` (create) | `readAllowance`, `allowanceShortfall`: the client's reads of the delegation |
 | `packages/client/src/client.ts` (modify) | The `allowance` option; the check before signing; `funding` and `allowance()` |
 | `packages/client/src/tools.ts` (modify) | `stint_allowance` |
+| `packages/client/src/node.ts` (create) | `isNodeUrl`, `hideNodeUrl`, `createNodeRpc`: a node client whose errors never carry the URL's key |
 | `packages/client/src/allowance-command.ts`, `src/cli.ts` (create) | `stint allowance grant | revoke | status` |
-| `packages/mcp/src/config.ts`, `src/cli.ts` (modify) | `STINT_ALLOWANCE_OWNER`, `STINT_ALLOWANCE_NONCE`, `STINT_RPC_URL` |
+| `packages/mcp/src/config.ts`, `src/cli.ts`, `examples/agent/src/cli.ts` (modify) | `STINT_ALLOWANCE_OWNER`, `STINT_ALLOWANCE_NONCE`, `STINT_RPC_URL` |
 | `conformance/src/types.ts` (modify) | `AllowanceControl`, `AllowanceGrant`, `ScenarioContext.allowance` |
 | `conformance/src/scenarios/12-allowance-funding.ts` (create) | Scenario 12 |
 | `e2e/src/fixtures/allowance.ts` (create) | `createAllowanceControl`, shared by both targets |
@@ -1176,9 +1176,14 @@ export async function readFunding(ix: Instruction): Promise<Check<FundingRead> |
 
 - [ ] **Step 4: Use it in `packages/x402/src/checks.ts`**
 
-1. Import `readFunding` and `type FundingRead` from `./funding-checks.js`. Remove `isTransferChecked`,
-   `parseTransferCheckedInstruction` and `ParsedTransferCheckedInstruction` if nothing else in the file uses them
-   (`typecheck` and the linter will tell).
+1. Import `readFunding` and `type FundingRead` from `./funding-checks.js`. Once steps 2 to 4 are done, remove what
+   nothing in the file uses any more:
+   - the local `isTransferChecked`;
+   - from the `@solana-program/token` import: `TOKEN_PROGRAM_ADDRESS`, `TokenInstruction`, `identifyTokenInstruction`,
+     `parseTransferCheckedInstruction` and `type ParsedTransferCheckedInstruction`.
+
+   Search the file for each name before you remove it. The repository has no linter, and `tsc` does not report an
+   unused import.
 2. Replace `checkFunding` with:
 
 ```ts
@@ -1275,7 +1280,7 @@ git commit -m "Accept one allowance pull as the funding of an open or a top-up"
 `apps/facilitator/test/receipt.test.ts`:
 
 ```ts
-import { TOKEN_PROGRAM_ADDRESS, getTransferCheckedInstruction } from "@solana-program/token";
+import { TOKEN_PROGRAM_ADDRESS, getMintToInstruction, getTransferCheckedInstruction } from "@solana-program/token";
 import { address, createNoopSigner, generateKeyPairSigner, getBase58Decoder, type Address } from "@solana/kit";
 import { beforeAll, describe, expect, it } from "vitest";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
@@ -1393,6 +1398,21 @@ describe("vaultReceipt (spec §5.4, §10.2)", () => {
     expect(() => vaultReceipt(tx, mint, vault)).toThrow(/other than by a transfer/);
   });
 
+  it("throws on a mint into the vault, as a node compiles it", async () => {
+    const { tx, authority, vault } = await allowanceOpen();
+    const index = (key: Address) => tx.accounts.indexOf(key);
+    const mint = getMintToInstruction({ mint: MINT, token: vault, mintAuthority: createNoopSigner(authority), amount: 1n });
+    const inner = [
+      {
+        index: 1,
+        instructions: [
+          { programIdIndex: index(TOKEN_PROGRAM_ADDRESS), accounts: [index(MINT), index(vault), index(authority)], data: getBase58Decoder().decode(mint.data) },
+        ],
+      },
+    ];
+    expect(() => vaultReceipt(tx, inner, vault)).toThrow(/other than by a transfer/);
+  });
+
   it("throws on inner instructions it cannot read", async () => {
     const { tx, vault } = await allowanceOpen();
     expect(() => vaultReceipt(tx, "nope", vault)).toThrow();
@@ -1438,7 +1458,7 @@ the file's imports:
           ],
         },
       ];
-      return { body: payload(offer, { type: "open", transaction: built.transaction, session: built.session }), inner };
+      return { body: payload(offer, { type: "open", transaction: built.transaction, session: built.session }), inner, vault };
     }
 
     it("accepts it when the simulated pull moves exactly the amount into the vault", async () => {
@@ -1453,6 +1473,21 @@ the file's imports:
       const { body, inner } = await allowanceOpen(29_999n);
       node.simulation = { err: null, innerInstructions: inner };
       expect(await verifyPayment(ctx, body, offer)).toMatchObject({ ok: false, reason: "invalid_amount" });
+    });
+
+    it("refuses it, without throwing, when what the vault receives cannot be told", async () => {
+      await resetNode();
+      const { body, vault } = await allowanceOpen(30_000n);
+      const minting = [
+        {
+          index: 1,
+          instructions: [
+            { program: "spl-token", programId: TOKEN_PROGRAM_ADDRESS, parsed: { type: "mintTo", info: { mint: MINT, account: vault, mintAuthority: buyer.address, amount: "1" } } },
+          ],
+        },
+      ];
+      node.simulation = { err: null, innerInstructions: minting };
+      expect(await verifyPayment(ctx, body, offer)).toMatchObject({ ok: false, reason: "invalid_amount", message: expect.stringMatching(/cannot be told/) });
     });
 
     it("names an allowance that is used up for the period", async () => {
@@ -1475,8 +1510,8 @@ instructions are empty, and the open's top-level `TransferChecked` moves exactly
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `pnpm --filter @lxfoundry/stint-facilitator test receipt verify`
-Expected: FAIL. `../src/receipt.js` does not exist. The allowance open with the wrong amount passes, and the cap's
-message is the bare JSON error.
+Expected: FAIL. `../src/receipt.js` does not exist. The allowance open with the wrong amount passes, so does the one
+whose simulation mints into the vault, and the cap's message is the bare JSON error.
 
 - [ ] **Step 3: Implement `apps/facilitator/src/receipt.ts`**
 
@@ -1504,14 +1539,20 @@ type Movement =
   | { readonly unsummed: readonly string[] }
   | undefined;
 
-/** Token instructions that change a balance other than by a transfer, which a sum of transfers cannot account for. */
+/**
+ * Token instructions that change a balance other than by a transfer, which a sum of transfers cannot account for: the set
+ * that the scheme's `tokenTransferChanges` (`packages/x402/src/chain.ts`) refuses. A node parses only some of them.
+ */
 const UNSUMMED: ReadonlySet<TokenInstruction> = new Set([
   TokenInstruction.MintTo,
   TokenInstruction.MintToChecked,
   TokenInstruction.Burn,
   TokenInstruction.BurnChecked,
+  TokenInstruction.SyncNative,
+  TokenInstruction.UnwrapLamports,
+  TokenInstruction.Batch,
 ]);
-const UNSUMMED_PARSED: ReadonlySet<string> = new Set(["mintTo", "mintToChecked", "burn", "burnChecked"]);
+const UNSUMMED_PARSED: ReadonlySet<string> = new Set(["mintTo", "mintToChecked", "burn", "burnChecked", "syncNative"]);
 
 /** Every string anywhere in a parsed instruction's `info`: a superset of the addresses it names. */
 const stringsIn = (value: unknown): string[] =>
@@ -1688,7 +1729,8 @@ git commit -m "Check after simulation that the vault receives exactly the amount
     or has no `rpc`;
   - `readAllowance(rpc, ref: AllowanceRef, config?: { abortSignal?: AbortSignal }): Promise<AllowanceReport>`;
   - `allowanceShortfall(report: AllowanceReport, amount: bigint): string | undefined`;
-  - `AllowanceReport = { owner: Address; delegation: Address; period?: PeriodState; ownerBalance: bigint }`;
+  - `AllowanceReport = { owner: Address; delegation: Address; period?: PeriodState; ownerBalance: bigint;
+    delegatedAmount: bigint }`;
   - the tool `stint_allowance` (no input) with `AllowanceOutput`;
   - `SessionTools.tools.stint_allowance`.
 
@@ -1770,8 +1812,8 @@ async function chain(input: {
   readonly now: bigint;
   readonly expiryTs?: bigint;
   readonly granted?: boolean;
-  /** False: the owner's account has no delegate, as after an SPL Token revoke. */
-  readonly delegate?: boolean;
+  /** The owner's account's SPL Token delegate: by default the Subscription Authority; null for none, as after a revoke. */
+  readonly delegate?: Address | null;
 }): Promise<Rpc<SolanaRpcApi>> {
   const accounts = await allowanceAccounts({ owner: input.owner, agent: input.agent, mint: MINT, nonce: 0n });
   const map = new Map<Address, { owner: Address; data: Uint8Array }>();
@@ -1792,10 +1834,10 @@ async function chain(input: {
     mint: MINT,
     owner: input.owner,
     amount: input.balance,
-    delegate: input.delegate === false ? none() : some(accounts.subscriptionAuthority),
+    delegate: input.delegate === null ? none() : some(input.delegate ?? accounts.subscriptionAuthority),
     state: AccountState.Initialized,
     isNative: none(),
-    delegatedAmount: input.delegate === false ? 0n : 2n ** 64n - 1n,
+    delegatedAmount: input.delegate === null ? 0n : 2n ** 64n - 1n,
     closeAuthority: none(),
   });
   map.set(accounts.ownerToken, { owner: TOKEN_PROGRAM_ADDRESS, data: Uint8Array.from(token) });
@@ -1864,7 +1906,9 @@ describe("allowance funding in the client (spec §10.2, §10.3)", () => {
     expect(allowanceShortfall(await read({ expiryTs: 1_040n }), 30_000n)).toMatch(/expired/);
     expect(allowanceShortfall(await read({ pulled: 30_000n }), 30_000n)).toMatch(/30000 of 50000 pulled, 20000 left/);
     expect(allowanceShortfall(await read({}), 60_000n)).toMatch(/larger than the allowance's cap per period/);
-    expect(allowanceShortfall(await read({ delegate: false }), 30_000n)).toMatch(/delegate/);
+    expect(allowanceShortfall(await read({ delegate: null }), 30_000n)).toMatch(/delegate/);
+    // Another delegate, even for the whole balance: the Subscription Authority cannot move the owner's tokens.
+    expect(allowanceShortfall(await read({ delegate: (await generateKeyPairSigner()).address }), 30_000n)).toMatch(/delegate/);
   });
 
   it("reports the allowance through stint_allowance", async () => {
@@ -2137,15 +2181,18 @@ git commit -m "Let the session client pay from an allowance, check it before sig
 ### Task 6: The owner's command and the MCP server's settings
 
 **Files:**
-- Create: `packages/client/src/allowance-command.ts`, `packages/client/src/cli.ts`,
-  `packages/client/test/allowance-command.test.ts`
-- Modify: `packages/client/package.json` (script), `package.json` (root script), `packages/mcp/src/config.ts`,
-  `packages/mcp/src/cli.ts`, `packages/mcp/test/config.test.ts`, `examples/agent/src/cli.ts`
+- Create: `packages/client/src/node.ts`, `packages/client/src/allowance-command.ts`, `packages/client/src/cli.ts`,
+  `packages/client/test/node.test.ts`, `packages/client/test/allowance-command.test.ts`
+- Modify: `packages/client/package.json` (script), `packages/client/src/index.ts`, `package.json` (root script),
+  `packages/mcp/src/config.ts`, `packages/mcp/src/cli.ts`, `packages/mcp/test/config.test.ts`,
+  `examples/agent/src/cli.ts`
 
 **Interfaces:**
 - Consumes: Task 1's `grantInstructions`, `revokeInstructions`, `allowanceAccounts` and
   `fetchMaybeSubscriptionAuthority`; Task 5's `readAllowance` and `ClientOptions.allowance`.
 - Produces:
+  - from `@lxfoundry/stint-client`: `isNodeUrl(value: string): boolean`, `hideNodeUrl(url: string, text: string): string`
+    and `createNodeRpc(url: string, transport?: RpcTransport): Rpc<SolanaRpcApi>`;
   - `runAllowanceCommand(argv: readonly string[], deps: CommandDeps): Promise<number>` (the exit code), where
     `CommandDeps = { rpc: Rpc<SolanaRpcApi>; readKeyFile(path: string): string; send(payer: TransactionSigner,
     instructions: readonly Instruction[]): Promise<string>; print(line: string): void }`;
@@ -2162,6 +2209,13 @@ pnpm stint allowance status --owner <address> --agent <address> [--nonce <n>]
 
 The node is `STINT_RPC_URL`, an http or https URL, as for the MCP server. It is read from the environment because an RPC
 URL may carry an API key. On a command line, pnpm would echo it, and the command never prints it.
+
+The command, the MCP server and the example agent all reach the node through `createNodeRpc` (`packages/client/src/node.ts`):
+- **The URL is checked first:** `isNodeUrl` refuses a URL that `fetch` would refuse. `fetch` quotes such a URL in its
+  error ("Failed to parse URL from …").
+- **Every error is cleaned:** what the node answers and what the transport throws go through `hideNodeUrl` before any
+  caller sees them. A node may repeat the key it was given ("invalid api key …"), and the MCP server hands a tool's
+  error to the model.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2277,6 +2331,55 @@ describe("stint allowance (spec §10.1)", () => {
 });
 ```
 
+`packages/client/test/node.test.ts`:
+
+```ts
+import type { RpcTransport } from "@solana/kit";
+import { describe, expect, it } from "vitest";
+import { createNodeRpc, hideNodeUrl, isNodeUrl } from "../src/node.js";
+
+/** A node URL with a key in its path and one in its query, as providers give them. */
+const KEYED = "https://node.example/v2/PATHKEY123?api-key=QUERYKEY123";
+
+/** What a failed call gives its caller: its message and its stack, where Node prints the message again. */
+async function failure(call: Promise<unknown>): Promise<string> {
+  const error = await call.then(
+    () => undefined,
+    (reason: unknown) => reason,
+  );
+  expect(error).toBeInstanceOf(Error);
+  return `${(error as Error).message}\n${(error as Error).stack}`;
+}
+
+describe("the node's URL (spec §9.1)", () => {
+  it("is an http or https URL that parses, and nothing fetch would refuse or that names another scheme", () => {
+    expect(isNodeUrl("https://api.devnet.solana.com")).toBe(true);
+    expect(isNodeUrl("http://127.0.0.1:8899")).toBe(true);
+    for (const value of ["", "https://node example/?api-key=SECRET", "node.example/?api-key=SECRET", "ftp://node.example/SECRET"]) {
+      expect(isNodeUrl(value), value).toBe(false);
+    }
+  });
+
+  it("hides what may be the URL's key wherever a text repeats it, and keeps the host", () => {
+    const hidden = hideNodeUrl(KEYED, `JSON-RPC error: invalid api key QUERYKEY123 (PATHKEY123); request to ${KEYED} failed`);
+    expect(hidden).not.toMatch(/QUERYKEY123|PATHKEY123/);
+    expect(hidden).toContain("https://node.example");
+    const unparsed = "https://node example/?api-key=SECRET";
+    expect(hideNodeUrl(unparsed, `Failed to parse URL from ${unparsed}`)).not.toContain("SECRET");
+  });
+
+  it("gives no caller the key, whether the node answers it in an error or the transport throws it", async () => {
+    const answering = (async () => ({ jsonrpc: "2.0", id: "0", error: { code: -32602, message: "invalid api key QUERYKEY123" } })) as unknown as RpcTransport;
+    expect(await failure(createNodeRpc(KEYED, answering).getGenesisHash().send())).not.toContain("QUERYKEY123");
+    const throwing = (async () => {
+      const error = new Error(`request to ${KEYED} failed`);
+      void error.stack; // formatted now, with the key in it, as when a logger has read it
+      throw error;
+    }) as unknown as RpcTransport;
+    expect(await failure(createNodeRpc(KEYED, throwing).getGenesisHash().send())).not.toMatch(/QUERYKEY123|PATHKEY123/);
+  });
+});
+```
 
 In `packages/mcp/test/config.test.ts`, add:
 
@@ -2292,22 +2395,115 @@ In `packages/mcp/test/config.test.ts`, add:
     expect(plain.rpcUrl).toBeUndefined();
   });
 
-  it("refuses a malformed allowance owner, a nonce without an owner, and an RPC URL that is not http(s), without quoting the URL", async () => {
+  it("refuses a malformed allowance owner, a nonce without an owner, and an RPC URL that is not an http(s) URL that parses, without quoting the URL", async () => {
     expect(await problemsOf({ ...required, STINT_ALLOWANCE_OWNER: "nope" })).toContainEqual(expect.stringMatching(/STINT_ALLOWANCE_OWNER/));
     expect(await problemsOf({ ...required, STINT_ALLOWANCE_NONCE: "1" })).toContainEqual(expect.stringMatching(/needs STINT_ALLOWANCE_OWNER/));
-    const problems = await problemsOf({ ...required, STINT_RPC_URL: "ftp://host/secret-key" });
-    expect(problems).toContainEqual(expect.stringMatching(/STINT_RPC_URL/));
-    expect(problems.join("\n")).not.toContain("secret-key");
+    // Another scheme, a space in the host, no scheme: fetch would refuse the last two with a message that quotes them.
+    for (const url of ["ftp://host/secret-key", "https://node example/?api-key=secret-key", "node.example/?api-key=secret-key"]) {
+      const problems = await problemsOf({ ...required, STINT_RPC_URL: url });
+      expect(problems).toContainEqual(expect.stringMatching(/STINT_RPC_URL/));
+      expect(problems.join("\n")).not.toContain("secret-key");
+    }
   });
 ```
 
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `pnpm --filter @lxfoundry/stint-client test allowance-command; pnpm --filter @lxfoundry/stint-mcp test`
-Expected: FAIL. `../src/allowance-command.js` does not exist, and the MCP config has no `allowance` or `rpcUrl`. The
-stdio test passes already: Task 5 updated it.
+Run: `pnpm --filter @lxfoundry/stint-client test allowance-command node; pnpm --filter @lxfoundry/stint-mcp test`
+Expected: FAIL. `../src/allowance-command.js` and `../src/node.js` do not exist, and the MCP config has no `allowance`
+or `rpcUrl`. The stdio test passes already: Task 5 updated it.
 
-- [ ] **Step 3: Implement `packages/client/src/allowance-command.ts`**
+- [ ] **Step 3: Implement `packages/client/src/node.ts` and `packages/client/src/allowance-command.ts`**
+
+`packages/client/src/node.ts`:
+
+```ts
+import { createDefaultRpcTransport, createSolanaRpcFromTransport, type Rpc, type RpcTransport, type SolanaRpcApi } from "@solana/kit";
+import { redactUrls } from "@lxfoundry/stint-x402";
+
+/**
+ * Whether `value` can be a node's URL (spec §9.1): an http or https URL that `URL` parses, as `fetch` will. A value with
+ * a space in its host, no scheme or another scheme cannot. A problem never quotes the value: an RPC URL may carry an API
+ * key.
+ */
+export function isNodeUrl(value: string): boolean {
+  try {
+    return /^https?:$/.test(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
+/** Shorter parts of a URL carry no key (`v2`, `rpc`), and hiding them would only garble a message. */
+const SHORTEST_SECRET = 4;
+
+/**
+ * The parts of a node's URL that may carry a key: its user info, path segments, query values and fragment, as written
+ * and decoded. For a URL that does not parse, the whole of it and each of its pieces between spaces.
+ */
+function secretParts(url: string): string[] {
+  let raw: string[];
+  try {
+    const parsed = new URL(url);
+    raw = [
+      parsed.username,
+      parsed.password,
+      ...parsed.pathname.split("/"),
+      ...parsed.search.slice(1).split("&").map((pair) => pair.slice(pair.indexOf("=") + 1)),
+      parsed.hash.slice(1),
+    ];
+  } catch {
+    raw = [url, ...url.split(/\s+/)];
+  }
+  const decoded = raw.map((part) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return part;
+    }
+  });
+  // Longest first, so that a part that holds another is hidden whole.
+  return [...new Set([...raw, ...decoded])].filter((part) => part.length >= SHORTEST_SECRET).sort((a, b) => b.length - a.length);
+}
+
+/** `text` with every part of `url` that may carry a key hidden, wherever it appears, and every URL reduced to its scheme and host. */
+export function hideNodeUrl(url: string, text: string): string {
+  let hidden = text;
+  for (const part of secretParts(url)) hidden = hidden.split(part).join("…");
+  return redactUrls(hidden);
+}
+
+/**
+ * A client of the node at `url` (spec §9.1) whose errors never carry what may be the URL's key. What the node answers in
+ * a JSON-RPC error and what the transport throws go through `hideNodeUrl` before any caller sees them: a node can repeat
+ * the key it was given ("invalid api key …"), and a failed request can quote its URL. `transport` is for tests.
+ */
+export function createNodeRpc(url: string, transport: RpcTransport = createDefaultRpcTransport({ url })): Rpc<SolanaRpcApi> {
+  const hiding = (async (request: Parameters<RpcTransport>[0]) => {
+    let response: unknown;
+    try {
+      response = await transport(request);
+    } catch (error) {
+      if (!(error instanceof Error)) throw new Error(hideNodeUrl(url, String(error)));
+      error.message = hideNodeUrl(url, error.message);
+      if (error.stack !== undefined) error.stack = hideNodeUrl(url, error.stack);
+      throw error;
+    }
+    const answered = (response as { error?: { message?: unknown } } | null)?.error;
+    if (answered && typeof answered.message === "string") answered.message = hideNodeUrl(url, answered.message);
+    return response;
+  }) as RpcTransport;
+  return createSolanaRpcFromTransport(hiding);
+}
+```
+
+Export it from `packages/client/src/index.ts`, after the `./allowance.js` line:
+
+```ts
+export { createNodeRpc, hideNodeUrl, isNodeUrl } from "./node.js";
+```
+
+`packages/client/src/allowance-command.ts`:
 
 ```ts
 import { parseArgs } from "node:util";
@@ -2485,7 +2681,6 @@ in the test passes the owner's key file contents; `readKeyFile` ignores the path
 import { readFileSync } from "node:fs";
 import {
   appendTransactionMessageInstructions,
-  createSolanaRpc,
   createTransactionMessage,
   getBase64EncodedWireTransaction,
   getSignatureFromTransaction,
@@ -2499,6 +2694,7 @@ import {
   type TransactionSigner,
 } from "@solana/kit";
 import { runAllowanceCommand } from "./allowance-command.js";
+import { createNodeRpc, isNodeUrl } from "./node.js";
 
 /** Builds, signs and sends a version 0 transaction (spec §3.5), then waits for `confirmed`, for up to 60 s. */
 async function send(rpc: Rpc<SolanaRpcApi>, payer: TransactionSigner, instructions: readonly Instruction[]): Promise<string> {
@@ -2530,18 +2726,13 @@ if (command !== "allowance") {
 }
 // From the environment, not the command line: an RPC URL may carry an API key, and pnpm echoes the command line.
 const rpcUrl = process.env.STINT_RPC_URL?.trim() ?? "";
-let isHttp = false;
-try {
-  isHttp = /^https?:$/.test(new URL(rpcUrl).protocol);
-} catch {
-  isHttp = false;
-}
-if (!isHttp) {
+if (!isNodeUrl(rpcUrl)) {
   // The value is not quoted, for the same reason.
   console.error("STINT_RPC_URL must be set to an http or https URL: the node the command reads from and sends through");
   process.exit(2);
 }
-const rpc = createSolanaRpc(rpcUrl);
+// Its errors carry no part of the URL that may be a key, so neither does anything the command prints.
+const rpc = createNodeRpc(rpcUrl);
 process.exitCode = await runAllowanceCommand(rest, {
   rpc,
   readKeyFile: (path) => readFileSync(path, "utf8"),
@@ -2558,6 +2749,7 @@ client package cannot resolve `tsx`, add `"tsx": "4.23.15"` to its devDependenci
 - [ ] **Step 4: The MCP server's settings**
 
 In `packages/mcp/src/config.ts`:
+- **Its import** from `@lxfoundry/stint-client` becomes `import { isNodeUrl, type Asset, type Policy } from "@lxfoundry/stint-client";`.
 - **`McpConfig`** gains:
 
 ```ts
@@ -2575,7 +2767,7 @@ In `packages/mcp/src/config.ts`:
   const allowanceNonce = integer("STINT_ALLOWANCE_NONCE", text("STINT_ALLOWANCE_NONCE"), 0n);
   if (allowanceNonce !== undefined && allowanceOwner === undefined) problems.push("STINT_ALLOWANCE_NONCE needs STINT_ALLOWANCE_OWNER");
   const rpcUrl = text("STINT_RPC_URL");
-  if (rpcUrl !== undefined && !/^https?:\/\//.test(rpcUrl)) problems.push("STINT_RPC_URL must be an http or https URL");
+  if (rpcUrl !== undefined && !isNodeUrl(rpcUrl)) problems.push("STINT_RPC_URL must be an http or https URL");
 ```
 
 - **In the returned object:**
@@ -2592,16 +2784,17 @@ In `packages/mcp/src/cli.ts`, create the client with them:
     signer: config.signer,
     policy: config.policy,
     ...(config.allowance ? { allowance: config.allowance } : {}),
-    ...(config.rpcUrl ? { rpc: createSolanaRpc(config.rpcUrl) } : {}),
+    ...(config.rpcUrl ? { rpc: createNodeRpc(config.rpcUrl) } : {}),
   });
 ```
 
-and import `createSolanaRpc` from `@solana/kit`. A node also enables the client's own close checks (spec §9.3), as with
-any other client given `rpc`.
+and add `createNodeRpc` to its import from `@lxfoundry/stint-client`. A node also enables the client's own close checks
+(spec §9.3), as with any other client given `rpc`.
 
 `examples/agent/src/cli.ts` loads the MCP server's configuration (`loadConfig`) and creates its client with
-`createStintClient({ signer, policy })`. Create it with the same two spreads, and import `createSolanaRpc` there too, so
-that the agent honours the variables its README says it shares with the MCP server.
+`createStintClient({ signer, policy })`. Create it with the same two spreads, and add `createNodeRpc` to its import from
+`@lxfoundry/stint-client`, so that the agent honours the variables its README says it shares with the MCP server. The
+agent does not depend on `@solana/kit` and does not need to: the client package makes the node's client.
 
 - [ ] **Step 5: Run the tests**
 
@@ -3105,7 +3298,7 @@ const POLICY: Policy = { maxRate: 10_000n, maxPerSession: 1_000_000n, budget: { 
  */
 export async function allowanceFunding(context: ScenarioContext): Promise<void> {
   const allowance = context.allowance;
-  if (!allowance) throw new Error("Scenario 12 needs the allowance capability");
+  if (!allowance) throw new Error("Scenario 12 needs the harness to grant an allowance (context.allowance), as the local and devnet targets do");
   const { offer } = await openOffers(context.gateUrl);
   const rate = BigInt(offer.extra.rate);
   const first = sessionSeconds(context.target, 20);
@@ -3223,14 +3416,18 @@ If it fails, read the scenario's failure in `e2e/report` and fix the cause. Do n
 
 - [ ] **Step 3: Five runs in a row, then make it required**
 
-Run `pnpm e2e:local` five times. Expected: scenario 12 passes every time, and every required scenario still passes.
+Run `pnpm e2e:local` five times. Expected: scenario 12 passes every time, and every required scenario still passes. If
+an earlier scenario fails, run it alone on the base commit too: a failure the base shows as well is not this stage's to
+fix. Name it in the PR, with the error it gives.
+
 Then:
 - change the line to `required(12, "Allowance funding", allowanceFunding, ["allowance"])`;
 - add 12 to the committed list of required scenario IDs that `conformance/test/catalogue.test.ts` checks;
 - in `e2e/test/local-target.test.ts`, add 12 to `REQUIRED`, and add its time to the comment above it (about 5 s);
 - in `e2e/test/devnet-target.test.ts`, add 12 to the `required` list of "passes the required scenarios with buyers
-  funded from the funding key". That runs the devnet target's grant, through its pool and funding key, and its
-  clean-up's revoke in CI's unit tests, not only in a manual devnet run.
+  funded from the funding key". That runs the devnet target's grant, through its pool and funding key, and the
+  scenario's revoke in CI's unit tests, not only in a manual devnet run. The scenario revokes its grant itself, so the
+  clean-up finds nothing to revoke there; Task 7's "finds and revokes what a held key granted" tests the clean-up's revoke.
 
 Run: `pnpm --filter @lxfoundry/stint-conformance test && pnpm e2e:local`
 Expected: PASS; the report counts scenario 12 among the required ones.
@@ -3267,7 +3464,9 @@ git commit -m "Add scenario 12, allowance funding, and make it required"
   `initSubscriptionAuthority`, unless the owner's Subscription Authority for the mint exists, then
   `createRecurringDelegation` for the agent's key (amount per period, period length in seconds, an expiry), starting
   when the transaction lands. `revoke` closes the delegation, and `--close-authority` the owner's Subscription Authority
-  too; their rent returns to the owner."
+  too; their rent returns to the owner." Then add: "The command reads its node from `STINT_RPC_URL`, never from its
+  arguments, since an RPC URL may carry an API key, and it prints no part of that URL. It sends to devnet only: it
+  checks the node's genesis hash before anything else."
 - **§10.2:**
   - Name the instruction: "one `transferRecurring` (the program's instruction 5) from the delegation". List its nine
     accounts, as in "How a pull works" above.
@@ -3299,7 +3498,7 @@ git commit -m "Add scenario 12, allowance funding, and make it required"
 - **§12.3:** the Subscriptions program's client comes from its vendored IDL; question 6 is answered with a real pull.
 - **§14:** the table stays as it is. Like questions 1, 2, 4, 5 and 7, questions 3 and 6 are answered where the answers
   apply. Section 10.2 names the instruction and its accounts, and says that a pull shares a transaction with
-  `stint.open` or `stint.top_up` through Kora. Sections 12.2 and 12.3 say the targets run it.
+  `stint.open` or `stint.top_up`. Sections 12.2 and 12.3 say the targets run it.
 
 Keep every other sentence as it is. Do not cite any document outside this repository.
 
@@ -3339,11 +3538,12 @@ git commit -m "Document allowance funding: the instruction, the checks, the comm
 
 - [ ] **Step 5: Devnet (the operator, with the devnet seed)**
 
-The program is unchanged, so the deployed one stands and is not upgraded. Check that nothing under `programs/`
-changed:
+The program is unchanged, so the deployed one stands and is not upgraded. Check that the branch changes nothing under
+`programs/`, against the point where it left `main` on the remote, whatever the local `main` holds:
 
 ```bash
-git diff --stat main -- programs/
+git fetch origin
+git diff --stat "$(git merge-base origin/main HEAD)" HEAD -- programs/
 ```
 
 Expected: no output. If there is any, stop: a program change has slipped in.
@@ -3379,7 +3579,8 @@ git commit -m "Record the devnet runs with allowance funding"
 
 - [ ] Scenario 12 is `required` and passes on `local`, five runs in a row, with every earlier required scenario.
 - [ ] `pnpm typecheck`, `pnpm test` and CI are green on the branch.
-- [ ] `pnpm e2e:devnet` passes twice with scenario 12, leaving no session or delegation, the funding key's USDC
-      unchanged, and the deployed program unchanged.
+- [ ] `pnpm e2e:devnet` passes twice with scenario 12, leaving no session or delegation, and the funding key's USDC
+      unchanged.
+- [ ] The branch changes nothing under `programs/` (Task 9, Step 5), so the deployed program is not upgraded.
 - [ ] The spec (sections 3.3, 5.4, 9.1, 9.4 to 9.6, 10, 12.2, 12.3, 12.6) and the README describe what was built.
 - [ ] The PR is reviewed and merged.
