@@ -22,7 +22,7 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEVNET_GENESIS_HASH } from "../src/devnet/config.js";
 import { cleanUp, returnSol, returnSolRetrying, returnUsdc, returnUsdcRetrying } from "../src/devnet/funds.js";
-import { deriveKeys } from "../src/devnet/keys.js";
+import { OTHER_MINT_KEY, deriveKeys, deriveNamedKey } from "../src/devnet/keys.js";
 import { newBuyer } from "../src/fixtures/buyers.js";
 import { fundSol, newHarnessKey } from "../src/fixtures/keys.js";
 import { USDC_DEVNET_MINT, mintUsdc } from "../src/fixtures/usdc.js";
@@ -127,7 +127,7 @@ describe("the devnet target, run against the local network", () => {
   it("passes the required scenarios with buyers funded from the funding key", async () => {
     // The local network reports a subscription's slot, not the change's (T6): scenario 22 asserts on the slot only when the
     // target is named devnet, so the scenarios run here under the local name. Together they take about three minutes.
-    const required = [1, 2, 3, 4, 5, 6, 7, 9, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 32, 34];
+    const required = [1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 25, 26, 32, 34, 35];
     const asLocal: Target = { name: "local", capabilities: stack.target.capabilities };
     const outcomes = await runScenarios(
       catalogue.filter((scenario) => required.includes(scenario.id)),
@@ -173,9 +173,13 @@ describe("the devnet target, run against the local network", () => {
     expect(await sessionsOnChain()).toBe(0);
     // Every base unit that the funding key lent, the seller's earnings included, is back.
     expect(await usdcOf(main.fundingUsdc)).toBe(FUNDING_USDC);
-    const lamportsAfter = (await chain.network.rpc.getBalance(main.funding, { commitment: "confirmed" }).send()).value;
-    // The funding key paid fees only: the rent it lent for token accounts, and the SOL it gave the stack, came back.
-    expect(lamportsBefore - lamportsAfter).toBeLessThan(5_000_000n);
+    const lamportsOf = async (account: Address) => (await chain.network.rpc.getBalance(account, { commitment: "confirmed" }).send()).value;
+    const lamportsAfter = await lamportsOf(main.funding);
+    // Scenario 20's second mint and the seller's account for it keep their rent, once for a seed (spec §12.6).
+    const otherMint = (await deriveNamedKey(main.seed, OTHER_MINT_KEY)).signer.address;
+    const kept = (await lamportsOf(otherMint)) + (await lamportsOf(await associatedTokenAddress(stack.keys.seller.signer.address, otherMint)));
+    // Apart from that, the funding key paid fees only: the rent it lent for token accounts, and the SOL it gave the stack, came back.
+    expect(lamportsBefore - lamportsAfter - kept).toBeLessThan(5_000_000n);
     await stack.stop(); // stopping twice is harmless
   }, 120_000);
 
