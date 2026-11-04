@@ -100,6 +100,12 @@ jobs:
           git diff --exit-code -- packages/program-client
           test -z "$(git status --porcelain -- packages/program-client)"
 
+      - name: Check the generated Subscriptions client is current
+        run: |
+          pnpm --filter @lxfoundry/stint-subscriptions-client run generate
+          git diff --exit-code -- packages/subscriptions-client
+          test -z "$(git status --porcelain -- packages/subscriptions-client)"
+
       - name: Cache the Subscriptions program copy
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
