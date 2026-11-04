@@ -32,7 +32,8 @@ tool error that names it.
 
 ## Install it in Claude Desktop
 
-Build the extension in WSL or on Linux, from the repository root:
+The [live demo guide](../../docs/live-demo.md) installs the built extension from the latest release, step by step.
+To build it yourself instead, build the extension in WSL or on Linux, from the repository root:
 
     pnpm --filter @lxfoundry/stint-claude-demo run build
     pnpm --filter @lxfoundry/stint-claude-demo run mcpb

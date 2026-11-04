@@ -10,6 +10,10 @@ network, and Kora refuses them without its API key.
 The offer: 1000 base units of devnet USDC a second (0.001 USDC/s), sessions from 5 s to 1000 s, 100 s when a request
 names no duration (0.100 USDC), and a session that nobody connects to for 30 s is closed by the gate.
 
+The stream answers `GET /` with a static page (`src/landing.ts`): the offer, drawn from the same settings, how to try it
+in Claude Desktop (the [live demo guide](../../docs/live-demo.md)), and what Stint provides. `/health` answers the
+platform's checks.
+
 ## Configuration
 
 | Variable | Meaning |

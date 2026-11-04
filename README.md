@@ -10,6 +10,27 @@ get back what they don't use:
 1. An agent pays once over [x402](https://www.x402.org) to open a time-boxed session.
 2. A Solana program releases the payment to the seller as time elapses.
 3. If the agent closes the session early, the unused remainder is refunded on-chain.
+4. An owner can fund the agent's sessions from an allowance of the Solana Foundation's Subscriptions & Allowances
+   program: a budget per period, enforced on-chain, which the agent cannot raise.
+
+**Try it:** the [live demo](docs/live-demo.md) runs a session in Claude Desktop against a seller on devnet, with nothing
+to build: download the extension, fund the agent's wallet with test USDC, and rent time on a live stream.
+
+## What Stint provides
+
+| Part | Where | What it does |
+|---|---|---|
+| The Solana program | [`programs/stint`](programs/stint) | Holds each session's deposit in a vault of its own and settles it by the chain's clock: `open`, `top_up`, `claim`, `close`. Deployed on devnet, built verifiably |
+| The `elapsed` x402 scheme | [`@lxfoundry/stint-x402`](packages/x402) | The offer (a price per second, the time bought, a minimum, a maximum), the payment transaction, its checks, and the session token |
+| The facilitator | [`@lxfoundry/stint-facilitator`](apps/facilitator) | Checks each payment against its offer before anything is signed, settles it through Kora, which pays the fees, keeps a record of each settlement, closes expired sessions, and closes a session for a buyer with no SOL |
+| The gate | [`@lxfoundry/stint-gate`](packages/gate) | Middleware in front of a long-lived connection: sells sessions, checks each one on Solana, and ends the connection when the paid time ends |
+| The client | [`@lxfoundry/stint-client`](packages/client) | Opens, tops up and closes sessions, with spending limits enforced in code, whatever a seller offers or a model asks |
+| The MCP server | [`@lxfoundry/stint-mcp`](packages/mcp) | Gives any MCP host the session tools |
+| Allowance funding | [Allowance funding](#allowance-funding) | An owner grants an agent a budget per period with the Subscriptions & Allowances program. Each open and top-up is pulled from it, refunds go back to the owner, and past the period's cap the program refuses the pull |
+| The program's client | [`@lxfoundry/stint-program-client`](packages/program-client) | Generated from the program's interface with Codama, on `@solana/kit` |
+| Examples | [`examples/`](examples) | A seller deployment, a session in Claude Desktop, an agent, and the stream it sells |
+
+All of it is MIT licensed. The packages are workspace packages of this repository; none is published to a registry.
 
 Brand assets and usage rules: [`brand/`](brand/README.md).
 
@@ -158,6 +179,8 @@ What an owner needs to know:
 its gate in one process, deployable on Fly.io as one always-on machine that sells the stream on devnet.
 [`examples/claude-demo`](examples/claude-demo/README.md) is an MCP server whose panel shows a Stint session in Claude
 Desktop: the agent's wallet, the x402 exchange, the paid time draining, a top-up, and an early close with its refund.
+The [live demo guide](docs/live-demo.md) installs it from the latest release, against the hosted seller at
+`https://stint-demo.lxfoundry.ai`, whose page at `/` describes the offer.
 
 ## Deploying to devnet
 
