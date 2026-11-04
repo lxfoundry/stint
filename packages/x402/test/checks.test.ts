@@ -14,6 +14,11 @@ import { TOKEN_PROGRAM_ADDRESS, getCreateAssociatedTokenIdempotentInstruction } 
 import { beforeAll, describe, expect, it } from "vitest";
 import { CloseKind, STINT_PROGRAM_ADDRESS, findSessionPda, type Session } from "@lxfoundry/stint-program-client";
 import {
+  SUBSCRIPTIONS_PROGRAM_ADDRESS,
+  allowanceAccounts,
+  getTransferFixedInstructionAsync,
+} from "@lxfoundry/stint-subscriptions-client";
+import {
   associatedTokenAddress,
   buildCloseTransaction,
   buildOpenOffer,
@@ -353,7 +358,10 @@ describe("top-up transactions (spec §5.3, §5.4)", () => {
     expect(tx.feePayer).toBe(feePayer);
     expect([...tx.signed]).toEqual([buyer.address]);
     expect(tx.instructions.map((ix) => ix.programAddress)).toEqual([TOKEN_PROGRAM_ADDRESS, STINT_PROGRAM_ADDRESS]);
-    expect(await check(wire)).toEqual({ ok: true, value: { session, authority: buyer.address } });
+    expect(await check(wire)).toEqual({
+      ok: true,
+      value: { session, authority: buyer.address, vault: await associatedTokenAddress(session, entry.asset as Address) },
+    });
   });
 
   it("refuses to build from an entry that is not a top-up", async () => {
@@ -424,6 +432,105 @@ describe("top-up transactions (spec §5.3, §5.4)", () => {
     const withExtra = await rebuild(wire, buyer, (ixs) => [ixs[0]!, withExtraSigner(ixs[1]!, extra)]);
     expect(await check(withExtra)).toMatchObject({ ok: false, reason: "invalid_payload" });
     expect(await check(forged(wire, buyer.address))).toMatchObject({ ok: false, reason: "invalid_payload" });
+  });
+});
+
+describe("allowance funding (spec §10.2)", () => {
+  let agent: KeyPairSigner;
+  let owner: Address;
+  let feePayer: Address;
+  let rentPayer: Address;
+  let offer: ElapsedRequirements;
+  const funding = () => ({ kind: "allowance", owner, nonce: 0n }) as const;
+
+  beforeAll(async () => {
+    agent = await generateKeyPairSigner();
+    owner = (await generateKeyPairSigner()).address;
+    feePayer = (await generateKeyPairSigner()).address;
+    rentPayer = (await generateKeyPairSigner()).address;
+    offer = buildOpenOffer(offerInput({ facilitator: { ...offerInput().facilitator, feePayer, rentPayer } }));
+  });
+  const keys = () => ({ feePayer, rentPayer });
+
+  it("accepts an open whose funding is one pull, with the owner as refund owner, signed by the agent only", async () => {
+    const built = await buildOpenTransaction({ requirements: offer, authority: agent, decimals: 6, funding: funding() });
+    expect(inspectTransaction(built.transaction)!.instructions[1]!.programAddress).toBe(SUBSCRIPTIONS_PROGRAM_ADDRESS);
+    const check = await checkOpenTransaction(inspectTransaction(built.transaction)!, offer, keys());
+    expect(check).toMatchObject({ ok: true, value: { session: built.session, authority: agent.address, refundOwner: owner } });
+  });
+
+  it("refuses a pull of another amount", async () => {
+    const built = await buildOpenTransaction({ requirements: { ...offer, amount: "29999" }, authority: agent, decimals: 6, funding: funding() });
+    expect(await checkOpenTransaction(inspectTransaction(built.transaction)!, offer, keys())).toMatchObject({ ok: false, reason: "invalid_amount" });
+  });
+
+  /** The allowance open with one account of the pull replaced. Pull accounts: delegation 0, subscription authority 1,
+   * owner's account 2, destination 3, mint 4, token program 5, delegatee 6, event authority 7, program 8. */
+  async function withPullAccount(index: number, replacement: Address): Promise<string> {
+    const built = await buildOpenTransaction({ requirements: offer, authority: agent, decimals: 6, funding: funding() });
+    return rebuild(built.transaction, agent, (ixs) =>
+      ixs.map((ix, i) => (i !== 1 ? ix : { ...ix, accounts: ix.accounts!.map((meta, at) => (at === index ? { ...meta, address: replacement } : meta)) })),
+    );
+  }
+
+  it.each([
+    ["a subscription authority that is not the owner's", 1, "invalid_terms"],
+    ["a source that is not the owner's associated token account", 2, "invalid_terms"],
+    ["a destination that is not the vault", 3, "invalid_terms"],
+    ["a mint account other than the pull's", 4, "invalid_terms"],
+    ["a token program other than SPL Token", 5, "invalid_terms"],
+    ["a delegatee other than the session's authority", 6, "invalid_payload"],
+    ["an event authority that is not the program's", 7, "invalid_terms"],
+    ["a self-program account that is not the program", 8, "invalid_terms"],
+  ] as const)("refuses %s", async (_, index, reason) => {
+    const wire = await withPullAccount(index, (await generateKeyPairSigner()).address);
+    expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason });
+  });
+
+  it("refuses a refund owner other than the allowance's owner", async () => {
+    // `open` accounts: refund owner 7.
+    const built = await buildOpenTransaction({ requirements: offer, authority: agent, decimals: 6, funding: funding() });
+    const other = (await generateKeyPairSigner()).address;
+    const wire = await rebuild(built.transaction, agent, (ixs) =>
+      ixs.map((ix, i) => (i !== 2 ? ix : { ...ix, accounts: ix.accounts!.map((meta, at) => (at === 7 ? { ...meta, address: other } : meta)) })),
+    );
+    expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason: "invalid_terms" });
+  });
+
+  it("refuses a pull with a tenth account, and a fixed-delegation pull in its place", async () => {
+    const built = await buildOpenTransaction({ requirements: offer, authority: agent, decimals: 6, funding: funding() });
+    const extra = (await generateKeyPairSigner()).address;
+    const tenth = await rebuild(built.transaction, agent, (ixs) =>
+      ixs.map((ix, i) => (i !== 1 ? ix : { ...ix, accounts: [...ix.accounts!, { address: extra, role: AccountRole.READONLY }] })),
+    );
+    expect(await checkOpenTransaction(inspectTransaction(tenth)!, offer, keys())).toMatchObject({ ok: false, reason: "unexpected_instruction" });
+
+    const accounts = await allowanceAccounts({ owner, agent: agent.address, mint: offer.asset as Address, nonce: 0n });
+    const vault = await associatedTokenAddress((await findSessionPda(agent.address, built.seed))[0], offer.asset as Address);
+    const fixed = await getTransferFixedInstructionAsync({
+      delegationPda: accounts.delegation,
+      subscriptionAuthority: accounts.subscriptionAuthority,
+      delegatorAta: accounts.ownerToken,
+      receiverAta: vault,
+      tokenMint: offer.asset as Address,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      delegatee: agent,
+      transferData: { amount: BigInt(offer.amount), delegator: owner, mint: offer.asset as Address },
+    });
+    const swapped = await rebuild(built.transaction, agent, ([create, , open]) => [create!, fixed, open!]);
+    expect(await checkOpenTransaction(inspectTransaction(swapped)!, offer, keys())).toMatchObject({ ok: false, reason: "unexpected_instruction" });
+  });
+
+  it("accepts a top-up pulled from the stored refund owner's allowance, and refuses one from another owner's", async () => {
+    const session = (await generateKeyPairSigner()).address;
+    const entry = buildTopUpOffer({ ...offerInput({ facilitator: { ...offerInput().facilitator, feePayer, rentPayer } }), seconds: 10, session });
+    const stored = { authority: agent.address, mint: entry.asset as Address, refundOwner: owner };
+    const wire = await buildTopUpTransaction({ requirements: entry, authority: agent, decimals: 6, funding: funding() });
+    const vault = await associatedTokenAddress(session, entry.asset as Address);
+    expect(await checkTopUpTransaction(inspectTransaction(wire)!, entry, stored, keys())).toMatchObject({ ok: true, value: { session, vault } });
+    const other = (await generateKeyPairSigner()).address;
+    const fromOther = await buildTopUpTransaction({ requirements: entry, authority: agent, decimals: 6, funding: { kind: "allowance", owner: other, nonce: 0n } });
+    expect(await checkTopUpTransaction(inspectTransaction(fromOther)!, entry, stored, keys())).toMatchObject({ ok: false, reason: "invalid_terms" });
   });
 });
 

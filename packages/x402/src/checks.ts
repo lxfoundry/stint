@@ -6,13 +6,8 @@ import {
 import {
   ASSOCIATED_TOKEN_PROGRAM_ADDRESS,
   AssociatedTokenInstruction,
-  TOKEN_PROGRAM_ADDRESS,
-  TokenInstruction,
   identifyAssociatedTokenInstruction,
-  identifyTokenInstruction,
   parseCreateAssociatedTokenIdempotentInstruction,
-  parseTransferCheckedInstruction,
-  type ParsedTransferCheckedInstruction,
 } from "@solana-program/token";
 import {
   address,
@@ -38,6 +33,7 @@ import {
   type CloseKind,
   type Session,
 } from "@lxfoundry/stint-program-client";
+import { readFunding, type FundingRead } from "./funding-checks.js";
 import type { InspectedTransaction } from "./inspect.js";
 import { associatedTokenAddress } from "./transactions.js";
 import { refuse, type Check, type ElapsedRequirements, type SellerTerms } from "./types.js";
@@ -66,8 +62,6 @@ function is<T>(identify: (ix: WithData) => T, ix: Instruction, programAddress: A
 const isVaultCreation = (ix: Instruction): ix is Full =>
   is(identifyAssociatedTokenInstruction, ix, ASSOCIATED_TOKEN_PROGRAM_ADDRESS, AssociatedTokenInstruction.CreateAssociatedTokenIdempotent) &&
   isInstructionWithAccounts(ix);
-const isTransferChecked = (ix: Instruction): ix is Full =>
-  is(identifyTokenInstruction, ix, TOKEN_PROGRAM_ADDRESS, TokenInstruction.TransferChecked) && isInstructionWithAccounts(ix);
 const isStint = (ix: Instruction, kind: StintInstruction): ix is Full =>
   is(identifyStintInstruction, ix, STINT_PROGRAM_ADDRESS, kind) && isInstructionWithAccounts(ix);
 
@@ -161,22 +155,35 @@ async function vaultOf(tx: InspectedTransaction): Promise<Address | undefined> {
 }
 
 /**
- * The funding transfer of an `open` or a `topUp` (spec §5.4): it moves exactly `amount` of `asset` from the refund owner's
- * associated token account into the vault, so that a refund goes back where the money came from.
+ * The funding of an `open` or a `topUp` (spec §5.4, §10.2): it moves exactly `amount` of `asset` from the refund owner's
+ * associated token account into the vault, so that a refund goes back where the money came from. A pull from an allowance
+ * must name the refund owner as the allowance's owner, and be signed by the session's authority as its delegatee.
  */
 async function checkFunding(
-  transfer: ParsedTransferCheckedInstruction<string>,
-  expected: { readonly asset: Address; readonly vault: Address; readonly refundOwner: Address; readonly amount: string },
+  funding: FundingRead,
+  expected: {
+    readonly asset: Address;
+    readonly vault: Address;
+    readonly refundOwner: Address;
+    readonly amount: string;
+    readonly authority: Address;
+  },
 ): Promise<Check<null>> {
   if (
-    transfer.accounts.mint.address !== expected.asset ||
-    transfer.accounts.destination.address !== expected.vault ||
-    transfer.accounts.source.address !== (await associatedTokenAddress(expected.refundOwner, expected.asset))
+    funding.mint !== expected.asset ||
+    funding.destination !== expected.vault ||
+    funding.source !== (await associatedTokenAddress(expected.refundOwner, expected.asset))
   ) {
     return refuse("invalid_terms", "the funding must move the asset from the refund owner's account into the vault");
   }
-  if (transfer.data.amount !== BigInt(expected.amount)) {
-    return refuse("invalid_amount", `the funding moves ${transfer.data.amount}, not ${expected.amount}`);
+  if (funding.kind === "allowance") {
+    if (funding.owner !== expected.refundOwner) return refuse("invalid_terms", "the allowance's owner must be the refund owner");
+    if (funding.signer !== expected.authority) {
+      return refuse("invalid_payload", "the allowance pull must be signed by the session's authority, as the delegation's delegatee");
+    }
+  }
+  if (funding.amount !== BigInt(expected.amount)) {
+    return refuse("invalid_amount", `the funding moves ${funding.amount}, not ${expected.amount}`);
   }
   return { ok: true, value: null };
 }
@@ -209,17 +216,16 @@ export async function checkOpenTransaction(
   const body = layoutBody(tx);
   if (!body.ok) return body;
   const [create, transfer, open, ...rest] = body.value;
-  if (!create || !transfer || !open || rest.length > 0) {
+  if (!create || !transfer || !open || rest.length > 0 || !isVaultCreation(create) || !isStint(open, StintInstruction.Open)) {
     return refuse("unexpected_instruction", "an open is: create the vault, one funding transfer, stint.open");
   }
-  if (!isVaultCreation(create) || !isTransferChecked(transfer) || !isStint(open, StintInstruction.Open)) {
-    return refuse("unexpected_instruction", "an open is: create the vault, one funding transfer, stint.open");
-  }
+  const read = await readFunding(transfer);
+  if (!read) return refuse("unexpected_instruction", "an open is: create the vault, one funding transfer, stint.open");
+  if (!read.ok) return read;
 
   const c = tryParse(() => parseCreateAssociatedTokenIdempotentInstruction(create));
-  const t = tryParse(() => parseTransferCheckedInstruction(transfer));
   const o = tryParse(() => parseOpenInstruction(open));
-  if (!c || !t || !o) return refuse("unexpected_instruction", "an instruction of the open is malformed");
+  if (!c || !o) return refuse("unexpected_instruction", "an instruction of the open is malformed");
   const extra = requirements.extra;
   const asset = address(requirements.asset);
 
@@ -251,10 +257,10 @@ export async function checkOpenTransaction(
   }
 
   const refundOwner = o.accounts.refundOwner.address;
-  const funding = await checkFunding(t, { asset, vault, refundOwner, amount: requirements.amount });
+  const funding = await checkFunding(read.value, { asset, vault, refundOwner, amount: requirements.amount, authority });
   if (!funding.ok) return funding;
-  // The authority and the transfer authority may be the same key.
-  const signers = await checkSigners(tx, new Set([keys.feePayer, keys.rentPayer, authority, t.accounts.authority.address]), keys);
+  // The authority and the funding's signer may be the same key.
+  const signers = await checkSigners(tx, new Set([keys.feePayer, keys.rentPayer, authority, read.value.signer]), keys);
   if (!signers.ok) return signers;
   return { ok: true, value: { session, authority, seed: o.data.seed, vault, refundOwner } };
 }
@@ -262,14 +268,15 @@ export async function checkOpenTransaction(
 export interface TopUpFacts {
   readonly session: Address;
   readonly authority: Address;
+  readonly vault: Address;
 }
 
 /**
  * The static checks of spec §5.4 for a `topUp`, against the session as the chain stores it: the layout (one funding
- * transfer, then `stint.top_up`), the session the entry names and its canonical vault, the session's authority, and the
- * funding, which moves exactly `amount` of the session's mint from the refund owner's associated token account, so that a
- * refund goes back where the money came from. A top-up creates nothing, so the rent payer appears nowhere. Simulation,
- * the blockhash, the margin before `paid_until` and the `maxSeconds` total are the caller's.
+ * transfer or allowance pull, then `stint.top_up`), the session the entry names and its canonical vault, the session's
+ * authority, and the funding, which moves exactly `amount` of the session's mint from the refund owner's associated token
+ * account, so that a refund goes back where the money came from. A top-up creates nothing, so the rent payer appears
+ * nowhere. Simulation, the blockhash, the margin before `paid_until` and the `maxSeconds` total are the caller's.
  */
 export async function checkTopUpTransaction(
   tx: InspectedTransaction,
@@ -282,12 +289,14 @@ export async function checkTopUpTransaction(
   const body = layoutBody(tx);
   if (!body.ok) return body;
   const [transfer, topUp, ...rest] = body.value;
-  if (!transfer || !topUp || rest.length > 0 || !isTransferChecked(transfer) || !isStint(topUp, StintInstruction.TopUp)) {
+  if (!transfer || !topUp || rest.length > 0 || !isStint(topUp, StintInstruction.TopUp)) {
     return refuse("unexpected_instruction", "a top-up is: one funding transfer, stint.top_up");
   }
-  const t = tryParse(() => parseTransferCheckedInstruction(transfer));
+  const read = await readFunding(transfer);
+  if (!read) return refuse("unexpected_instruction", "a top-up is: one funding transfer, stint.top_up");
+  if (!read.ok) return read;
   const u = tryParse(() => parseTopUpInstruction(topUp));
-  if (!t || !u) return refuse("unexpected_instruction", "an instruction of the top-up is malformed");
+  if (!u) return refuse("unexpected_instruction", "an instruction of the top-up is malformed");
 
   const extra = requirements.extra;
   if (extra.programId !== STINT_PROGRAM_ADDRESS) return refuse("invalid_payment_requirements", "another program");
@@ -301,12 +310,18 @@ export async function checkTopUpTransaction(
   if (stored.mint !== asset || u.accounts.vault.address !== vault) {
     return refuse("invalid_terms", "the session's mint or vault is not the entry's");
   }
-  const funding = await checkFunding(t, { asset, vault, refundOwner: stored.refundOwner, amount: requirements.amount });
+  const funding = await checkFunding(read.value, {
+    asset,
+    vault,
+    refundOwner: stored.refundOwner,
+    amount: requirements.amount,
+    authority: stored.authority,
+  });
   if (!funding.ok) return funding;
-  // The authority and the transfer authority may be the same key.
-  const signers = await checkSigners(tx, new Set([keys.feePayer, stored.authority, t.accounts.authority.address]), keys);
+  // The authority and the funding's signer may be the same key.
+  const signers = await checkSigners(tx, new Set([keys.feePayer, stored.authority, read.value.signer]), keys);
   if (!signers.ok) return signers;
-  return { ok: true, value: { session, authority: stored.authority } };
+  return { ok: true, value: { session, authority: stored.authority, vault } };
 }
 
 export interface CloseFacts {
