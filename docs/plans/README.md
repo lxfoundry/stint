@@ -30,7 +30,7 @@ the earlier stages confirmed (spec §14) and the versions they pinned, instead o
 | 3 | Payment refusals and settlement records | 5, 6, 13, 14, 17, 18, 19, 32 | — | [03-payment-refusals.md](03-payment-refusals.md) |
 | 4 | End of session: `claim`, `AtExpiry`, the gate's timers, the sweeper | 2, 3, 9, 16, 26 | — | [04-end-of-session.md](04-end-of-session.md) |
 | 5 | Top-up | 4, 34 | — | [05-top-up.md](05-top-up.md) |
-| 6 | Session tokens and adoption | 8, 20, 35 | — | |
+| 6 | Session tokens and adoption | 8, 20, 35 | — | [06-tokens-and-adoption.md](06-tokens-and-adoption.md) |
 | 7 | Fallback closes: unilateral, sponsored, without the gate or the facilitator | 7, 15, 24, 25 | — | [07-fallback-closes.md](07-fallback-closes.md) (part 1: the sponsored close, scenario 15); [07-fallback-closes-part-2.md](07-fallback-closes-part-2.md) (part 2: the client's fallback closes and the gate's drop of a session another party closed, scenarios 7, 24 and 25) |
 | 8 | Closes that protect the buyer: outage and admin, `WaiveMinimum` | 10, 30 | — | |
 | 9 | Account edge cases: `409 refund_account_closed`, a closed `receiver_token` recreated by a close, frozen accounts | 21, 27, 28 | — | |
@@ -40,6 +40,9 @@ the earlier stages confirmed (spec §14) and the versions they pinned, instead o
 
 Stages 0 to 2 come first, in that order. From stage 3 on, the order may change. Each plan names
 the earlier stages it needs.
+
+[claude-demo.md](claude-demo.md) is not a stage: it adds an example seller deployment and an example MCP server that
+shows a Stint session in Claude Desktop, and changes no component.
 
 ## How the program grows
 
