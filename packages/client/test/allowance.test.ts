@@ -1,4 +1,4 @@
-import { AccountState, TOKEN_PROGRAM_ADDRESS, getTokenEncoder } from "@solana-program/token";
+import { AccountState, TOKEN_PROGRAM_ADDRESS, findAssociatedTokenPda, getTokenEncoder } from "@solana-program/token";
 import {
   address,
   generateKeyPairSigner,
@@ -11,14 +11,15 @@ import {
 } from "@solana/kit";
 import { SYSVAR_CLOCK_ADDRESS, getSysvarClockEncoder } from "@solana/sysvars";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseOpenInstruction } from "@lxfoundry/stint-program-client";
+import { STINT_PROGRAM_ADDRESS, parseOpenInstruction } from "@lxfoundry/stint-program-client";
 import {
   SUBSCRIPTIONS_PROGRAM_ADDRESS,
   allowanceAccounts,
   getRecurringDelegationEncoder,
+  parseTransferRecurringInstruction,
 } from "@lxfoundry/stint-subscriptions-client";
 import { inspectTransaction, readElapsedPayload } from "@lxfoundry/stint-x402";
-import { allowanceShortfall, createSessionTools, createStintClient, readAllowance, type Policy } from "../src/index.js";
+import { StintError, allowanceShortfall, createSessionTools, createStintClient, readAllowance, type Policy } from "../src/index.js";
 import { accountsRpc } from "./accounts-rpc.js";
 import { startTestGate, type TestGate } from "./gate.js";
 
@@ -150,6 +151,108 @@ describe("allowance funding in the client (spec §10.2, §10.3)", () => {
       leftThisPeriod: "30000",
       periodEndsAt: 4_600,
       ownerBalance: "900000",
+    });
+  });
+
+  it("refuses before signing when its node cannot be read, and locks nothing", async () => {
+    // A node that answers every read of an account with an error: the client cannot check, so it must not sign.
+    const down = {
+      getAccountInfo: () => ({
+        send: async () => {
+          throw new Error("node unreachable");
+        },
+      }),
+    } as unknown as Rpc<SolanaRpcApi>;
+    const client = createStintClient({ signer: agent, policy, allowance: { owner }, rpc: down });
+    await expect(client.open(gate.url, { seconds: 30 })).rejects.toThrow(/node unreachable/);
+    expect(gate.payments).toHaveLength(0);
+    expect(client.remainingBudget()).toBe(40_000n);
+  });
+
+  it("funds a top-up from the allowance too: one pull from the owner's account into the vault, signed by the agent only", async () => {
+    const rpc = await chain({ owner, agent: agent.address, pulled: 0n, balance: 1_000_000n, now: 1_050n });
+    const client = createStintClient({ signer: agent, policy, allowance: { owner }, rpc });
+    const session = await client.open(gate.url, { seconds: 30 });
+    await session.topUp({ seconds: 5 });
+
+    const payment = gate.payments.at(-1)!;
+    expect(readElapsedPayload(payment)).toMatchObject({ type: "topUp" });
+    const tx = inspectTransaction(readElapsedPayload(payment)!.transaction)!;
+    expect([...tx.signed]).toEqual([agent.address]);
+    expect(tx.instructions).toHaveLength(2);
+    expect(tx.instructions[0]!.programAddress).toBe(SUBSCRIPTIONS_PROGRAM_ADDRESS);
+    expect(tx.instructions[1]!.programAddress).toBe(STINT_PROGRAM_ADDRESS);
+    const pull = parseTransferRecurringInstruction(tx.instructions[0] as never);
+    const [vault] = await findAssociatedTokenPda({ owner: session.id, mint: MINT, tokenProgram: TOKEN_PROGRAM_ADDRESS });
+    const accounts = await allowanceAccounts({ owner, agent: agent.address, mint: MINT, nonce: 0n });
+    expect(pull.data.transferData).toEqual({ amount: 5_000n, delegator: owner, mint: MINT });
+    expect(pull.accounts.delegatorAta.address).toBe(accounts.ownerToken);
+    expect(pull.accounts.receiverAta.address).toBe(vault);
+    expect(pull.accounts.delegatee.address).toBe(agent.address);
+  });
+
+  it("with a node, refuses before signing a top-up the allowance cannot fund, and keeps the budget and the cost", async () => {
+    // The open is covered; by the time of the top-up, other pulls have used the period up (48,000 of 50,000).
+    let current = await chain({ owner, agent: agent.address, pulled: 0n, balance: 1_000_000n, now: 1_050n });
+    const rpc = { getAccountInfo: (target: Address) => current.getAccountInfo(target) } as unknown as Rpc<SolanaRpcApi>;
+    const client = createStintClient({ signer: agent, policy, allowance: { owner }, rpc });
+    const session = await client.open(gate.url, { seconds: 30 });
+    const paidUntil = session.paidUntil;
+    current = await chain({ owner, agent: agent.address, pulled: 48_000n, balance: 1_000_000n, now: 1_050n });
+
+    await expect(session.topUp({ seconds: 5 })).rejects.toThrow(/allowance for this period is used up/);
+
+    expect(gate.payments).toHaveLength(1); // the open only: the top-up was not signed
+    expect(client.remainingBudget()).toBe(10_000n);
+    expect(session.cost).toBe(30_000n);
+    expect(session.paidUntil).toBe(paidUntil);
+  });
+
+  describe("when the facilitator's simulation refuses the payment", () => {
+    /** What the gate answers when the chain refuses a pull it cannot fund (spec §10.3). */
+    const SIMULATION_FAILED = { isValid: false, invalidReason: "simulation_failed" } as const;
+    const refusalOf = async (attempt: Promise<unknown>): Promise<StintError> => {
+      const error = await attempt.then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(StintError);
+      return error as StintError;
+    };
+
+    it("says what an allowance's refusal means when it refuses an open", async () => {
+      gate.verifyAnswer = SIMULATION_FAILED;
+      const client = createStintClient({ signer: agent, policy, allowance: { owner } });
+      const error = await refusalOf(client.open(gate.url, { seconds: 30 }));
+      expect(error).toMatchObject({ status: 402, body: { error: "simulation_failed" } });
+      expect(error.message).toMatch(/^The gate refused the payment: .*\(with an allowance, this is how a payment it cannot fund is refused: /s);
+      expect(client.remainingBudget()).toBe(40_000n);
+    });
+
+    it("says what an allowance's refusal means when it refuses a top-up", async () => {
+      const client = createStintClient({ signer: agent, policy, allowance: { owner } });
+      const session = await client.open(gate.url, { seconds: 30 });
+      gate.verifyAnswer = SIMULATION_FAILED;
+      const error = await refusalOf(session.topUp({ seconds: 5 }));
+      expect(error).toMatchObject({ status: 402, body: { error: "simulation_failed" } });
+      expect(error.message).toMatch(/^The gate refused the top-up: .*\(with an allowance, this is how a payment it cannot fund is refused: /s);
+      expect(client.remainingBudget()).toBe(10_000n);
+    });
+
+    it("leaves the refusal of a payment from the client's own USDC as the gate said it", async () => {
+      gate.verifyAnswer = SIMULATION_FAILED;
+      const client = createStintClient({ signer: agent, policy });
+      const error = await refusalOf(client.open(gate.url, { seconds: 30 }));
+      expect(error).toMatchObject({ status: 402, body: { error: "simulation_failed" } });
+      expect(error.message).toBe(`The gate refused the payment: ${JSON.stringify(error.body)}`);
+    });
+
+    it("adds nothing to an allowance payment's refusal that is not a failed simulation", async () => {
+      gate.verifyAnswer = { isValid: false, invalidReason: "invalid_terms" };
+      const client = createStintClient({ signer: agent, policy, allowance: { owner } });
+      const error = await refusalOf(client.open(gate.url, { seconds: 30 }));
+      expect(error).toMatchObject({ status: 402, body: { error: "invalid_terms" } });
+      expect(error.message).toBe(`The gate refused the payment: ${JSON.stringify(error.body)}`);
     });
   });
 });
