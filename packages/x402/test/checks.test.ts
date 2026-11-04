@@ -17,6 +17,7 @@ import { CloseKind, STINT_PROGRAM_ADDRESS, findSessionPda, type Session } from "
 import {
   SUBSCRIPTIONS_PROGRAM_ADDRESS,
   allowanceAccounts,
+  allowancePullInstruction,
   getTransferFixedInstructionAsync,
 } from "@lxfoundry/stint-subscriptions-client";
 import {
@@ -508,6 +509,28 @@ describe("allowance funding (spec §10.2)", () => {
     expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason: "invalid_terms" });
   });
 
+  it("refuses a pull whose delegator is not the refund owner, though it debits the refund owner's account", async () => {
+    // The pull's delegator and its Subscription Authority are another key's. Its source stays the refund owner's
+    // associated token account, so that the owner check is the only one that can refuse it.
+    const built = await buildOpenTransaction({ requirements: offer, authority: agent, decimals: 6, funding: funding() });
+    const other = (await generateKeyPairSigner()).address;
+    const mint = offer.asset as Address;
+    const vault = await associatedTokenAddress(built.session, mint);
+    const { ownerToken } = await allowanceAccounts({ owner, agent: agent.address, mint, nonce: 0n });
+    const pull = await allowancePullInstruction({ owner: other, agent, mint, nonce: 0n, destination: vault, amount: BigInt(offer.amount) });
+    // Pull accounts: owner's account 2.
+    const wire = await rebuild(built.transaction, agent, ([create, , open]) => [
+      create!,
+      { ...pull, accounts: pull.accounts!.map((meta, at) => (at === 2 ? { ...meta, address: ownerToken } : meta)) } as Instruction,
+      open!,
+    ]);
+    expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toEqual({
+      ok: false,
+      reason: "invalid_terms",
+      message: "the allowance's owner must be the refund owner",
+    });
+  });
+
   it("refuses a pull with a tenth account, and a fixed-delegation pull in its place", async () => {
     const built = await buildOpenTransaction({ requirements: offer, authority: agent, decimals: 6, funding: funding() });
     const extra = (await generateKeyPairSigner()).address;
@@ -542,6 +565,27 @@ describe("allowance funding (spec §10.2)", () => {
     const other = (await generateKeyPairSigner()).address;
     const fromOther = await buildTopUpTransaction({ requirements: entry, authority: agent, decimals: 6, funding: { kind: "allowance", owner: other, nonce: 0n } });
     expect(await checkTopUpTransaction(inspectTransaction(fromOther)!, entry, stored, keys())).toMatchObject({ ok: false, reason: "invalid_terms" });
+  });
+
+  it("refuses a top-up whose pull names a delegatee other than the session's authority, though that key signs", async () => {
+    const session = (await generateKeyPairSigner()).address;
+    const entry = buildTopUpOffer({ ...offerInput({ facilitator: { ...offerInput().facilitator, feePayer, rentPayer } }), seconds: 10, session });
+    const stored = { authority: agent.address, mint: entry.asset as Address, refundOwner: owner };
+    const wire = await buildTopUpTransaction({ requirements: entry, authority: agent, decimals: 6, funding: funding() });
+    // Pull accounts: delegatee 6. The replacement signs, so that the check of the signatures cannot refuse it in place of the check under test.
+    const delegatee = await generateKeyPairSigner();
+    const swapped = await rebuild(wire, agent, ([pull, topUp]) => [
+      {
+        ...pull!,
+        accounts: pull!.accounts!.map((meta, at) => (at === 6 ? { ...meta, address: delegatee.address, signer: delegatee } : meta)),
+      } as Instruction,
+      topUp!,
+    ]);
+    expect(await checkTopUpTransaction(inspectTransaction(swapped)!, entry, stored, keys())).toEqual({
+      ok: false,
+      reason: "invalid_payload",
+      message: "the allowance pull must be signed by the session's authority, as the delegation's delegatee",
+    });
   });
 });
 

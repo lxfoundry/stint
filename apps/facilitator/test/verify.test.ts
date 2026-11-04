@@ -425,7 +425,7 @@ describe("verifyPayment (spec §5.4)", () => {
     /** The session opened at 1,800,000,000 with 30,000 at 1,000 per second: paid until 1,800,000,030. */
     const STARTED_AT = 1_800_000_000n;
 
-    const storedSession = (overrides: { rate?: bigint; deposited?: bigint } = {}) => ({
+    const storedSession = (overrides: { rate?: bigint; deposited?: bigint; refundOwner?: Address } = {}) => ({
       owner: STINT_PROGRAM_ADDRESS,
       data: Uint8Array.from(
         getSessionEncoder().encode({
@@ -436,7 +436,7 @@ describe("verifyPayment (spec §5.4)", () => {
           mint: MINT,
           receiver: offer.payTo as Address,
           receiverAuthorizer: authorizer.address,
-          refundOwner: buyer.address,
+          refundOwner: overrides.refundOwner ?? buyer.address,
           rentPayer: rentPayer.address,
           rate: overrides.rate ?? 1_000n,
           minSeconds: 5,
@@ -459,7 +459,7 @@ describe("verifyPayment (spec §5.4)", () => {
     };
 
     /** A node holding the session, with the facilitator's clock 5 s into it: 25 s before the end of its paid time. */
-    const withSession = async (overrides: { rate?: bigint; deposited?: bigint } = {}) => {
+    const withSession = async (overrides: { rate?: bigint; deposited?: bigint; refundOwner?: Address } = {}) => {
       await resetNode();
       node.accounts.set(session, storedSession(overrides));
       at(5);
@@ -597,6 +597,54 @@ describe("verifyPayment (spec §5.4)", () => {
         ],
       };
       expect(await verifyPayment(ctx, await topUpPayload(), topUpOffer)).toMatchObject({ ok: false, reason: "payer_misuse" });
+    });
+
+    describe("funded from an allowance (spec §10.2)", () => {
+      /** The top-up's payload, and the inner instructions a node would report for its pull moving `moved` into the vault. */
+      async function allowanceTopUp(moved: bigint) {
+        const owner = (await generateKeyPairSigner()).address;
+        const transaction = await buildTopUpTransaction({
+          requirements: topUpOffer,
+          authority: buyer,
+          decimals: 6,
+          funding: { kind: "allowance", owner, nonce: 0n },
+        });
+        const tx = inspectTransaction(transaction)!;
+        // The pull is the first instruction. Its accounts: subscription authority 1, owner's account 2, vault 3.
+        const [authority, source, vault] = [1, 2, 3].map((at) => tx.instructions[0]!.accounts![at]!.address) as [Address, Address, Address];
+        const index = (key: Address) => tx.accounts.indexOf(key);
+        const transfer = getTransferCheckedInstruction({
+          source,
+          mint: MINT,
+          destination: vault,
+          authority: createNoopSigner(authority),
+          amount: moved,
+          decimals: 6,
+        });
+        const inner = [
+          {
+            index: 0,
+            instructions: [
+              {
+                programIdIndex: index(TOKEN_PROGRAM_ADDRESS),
+                accounts: [index(source), index(MINT), index(vault), index(authority)],
+                data: getBase58Decoder().decode(transfer.data),
+              },
+            ],
+          },
+        ];
+        return { body: payload(topUpOffer, { type: "topUp", transaction }), inner, owner };
+      }
+
+      it("refuses it when the simulation moves another amount into the vault", async () => {
+        // The offer is 12 s at 1,000 per second.
+        const { body, inner, owner } = await allowanceTopUp(11_999n);
+        await withSession({ refundOwner: owner });
+        node.simulation = { err: null, innerInstructions: inner };
+        const verified = await verifyPayment(ctx, body, topUpOffer);
+        expect(verified).toMatchObject({ ok: false, reason: "invalid_amount" });
+        expect((verified as { message: string }).message).toBe("the vault would receive 11999, not 12000");
+      });
     });
   });
 });
