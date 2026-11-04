@@ -14,6 +14,7 @@ import { closeAfterPaidUntil } from "./scenarios/16-close-after-paid-until.js";
 import { topUpUnknownSession } from "./scenarios/17-top-up-unknown-session.js";
 import { payerMisuse } from "./scenarios/18-payer-misuse.js";
 import { verifyValidOpen } from "./scenarios/19-verify-valid-open.js";
+import { otherMintRefused } from "./scenarios/20-other-mint.js";
 import { exampleAgentTask } from "./scenarios/22-example-agent-task.js";
 import { gateUnreachableAtClose } from "./scenarios/24-gate-unreachable-at-close.js";
 import { gateAndFacilitatorUnreachableAtClose } from "./scenarios/25-gate-and-facilitator-unreachable-at-close.js";
@@ -64,7 +65,7 @@ export const catalogue: readonly Scenario[] = [
   required(17, "Top-up for an unknown session", topUpUnknownSession),
   required(18, "Fee payer or rent payer in a forbidden position", payerMisuse, ["facilitatorApi"]),
   required(19, "/verify of a valid open", verifyValidOpen, ["facilitatorApi"]),
-  pending(20, "Session opened on-chain with the gate's terms but another mint"),
+  required(20, "Session opened on-chain with the gate's terms but another mint", otherMintRefused),
   pending(21, "Refund account closed, a stray base unit, then expiry"),
   required(22, "The example agent's task, scripted", exampleAgentTask, ["stack"]),
   pending(23, "The gate restarts with a session open", ["stack"], "ownStack"),
