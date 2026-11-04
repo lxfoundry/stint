@@ -54,10 +54,12 @@ const scoped = (body: (scope: Scope) => Promise<void>) => async () => {
 
 interface FakeRpc {
   readonly url: string;
-  /** From now on, `method` is never answered. */
+  /** From now on, `method` is not answered, until `release`. */
   hang(method: string): void;
-  /** How many requests for `method` wait for an answer that never comes. */
+  /** How many requests for `method` wait for an answer. */
   hung(method: string): number;
+  /** Answers the requests for `method` that wait, and those that come next. */
+  release(method: string): void;
 }
 
 /** A node on 127.0.0.1 that answers what a start needs when nothing is owed: devnet (or `genesis`), the program, the accounts, `balance`. */
@@ -69,15 +71,20 @@ async function fakeRpc(scope: Scope, options: { genesis?: string; balance?: numb
     getBalance: { context: { slot: 1 }, value: options.balance ?? 10_000_000_000 },
     getProgramAccounts: [],
   };
-  const hanging = new Map<string, number>();
+  /** The answers held back, by method. */
+  const hanging = new Map<string, (() => void)[]>();
   const server = createServer((request, response) => {
     let body = "";
     request.on("data", (chunk) => (body += String(chunk)));
     request.on("end", () => {
       const { id, method } = JSON.parse(body) as { id: unknown; method: string };
-      if (hanging.has(method)) return void hanging.set(method, hanging.get(method)! + 1);
-      response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify(method in results ? { jsonrpc: "2.0", id, result: results[method] } : { jsonrpc: "2.0", id, error: { code: -32601, message: `no ${method} here` } }));
+      const answer = () => {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify(method in results ? { jsonrpc: "2.0", id, result: results[method] } : { jsonrpc: "2.0", id, error: { code: -32601, message: `no ${method} here` } }));
+      };
+      const held = hanging.get(method);
+      if (held) return void held.push(answer);
+      answer();
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -90,8 +97,13 @@ async function fakeRpc(scope: Scope, options: { genesis?: string; balance?: numb
   );
   return {
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
-    hang: (method) => void hanging.set(method, 0),
-    hung: (method) => hanging.get(method) ?? 0,
+    hang: (method) => void hanging.set(method, []),
+    hung: (method) => hanging.get(method)?.length ?? 0,
+    release: (method) => {
+      const held = hanging.get(method) ?? [];
+      hanging.delete(method);
+      for (const answer of held) answer();
+    },
   };
 }
 
@@ -104,6 +116,8 @@ interface FakeKora {
   remove(name: string): void;
   /** Whether the process that was Kora still runs. */
   alive(): boolean;
+  /** Sends `name` to the process that is Kora, as a terminal sends Ctrl-C to every process it runs. */
+  signal(name: NodeJS.Signals): void;
 }
 
 /** What the stand-in prints when it dies: a line that quotes an RPC URL with a key, as Kora's errors do. */
@@ -168,7 +182,14 @@ setInterval(() => {
     const id = pid();
     if (id !== undefined && alive()) process.kill(id, "SIGKILL");
   });
-  return { binary, has, put: (name) => writeFileSync(join(directory, name), ""), remove: (name) => rmSync(join(directory, name), { force: true }), alive };
+  return {
+    binary,
+    has,
+    put: (name) => writeFileSync(join(directory, name), ""),
+    remove: (name) => rmSync(join(directory, name), { force: true }),
+    alive,
+    signal: (name) => void process.kill(pid()!, name),
+  };
 }
 
 function config(rpc: FakeRpc, port = 0): SellerConfig {
@@ -250,6 +271,35 @@ describe("a running seller", { timeout: SERVICE_TIMEOUT }, () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(failure).toBeUndefined();
     }),
+  );
+
+  it(
+    "does not call Kora's exit a failure when Kora ends on the stop's signal before the stop reaches it",
+    scoped(async (scope) => {
+      const kora = fakeKora(scope);
+      vi.stubEnv("KORA_BIN", kora.binary);
+      vi.stubEnv("TMPDIR", scope.directory("kora-work-"));
+      const rpc = await fakeRpc(scope);
+      const entries: Record<string, unknown>[] = [];
+      const seller = await startSeller(config(rpc), (entry) => entries.push(entry));
+      let failure: string | undefined;
+      void seller.failed.then((reason) => (failure = reason));
+      // A sweep that waits for the node holds the facilitator's stop, which comes before Kora's.
+      rpc.hang("getProgramAccounts");
+      await vi.waitFor(() => expect(rpc.hung("getProgramAccounts")).toBeGreaterThan(0), { timeout: 30_000, interval: 100 });
+
+      const stopped = seller.stop();
+      // A Ctrl-C in a terminal reaches Kora too, which ends before the stop gets to it.
+      kora.signal("SIGINT");
+      await vi.waitFor(() => expect(kora.alive()).toBe(false), { timeout: 5_000, interval: 25 });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      rpc.release("getProgramAccounts");
+      await stopped;
+
+      expect(entries.map((entry) => entry.event)).not.toContain("kora_exited");
+      expect(failure).toBeUndefined();
+    }),
+    60_000,
   );
 
   it(

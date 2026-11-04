@@ -113,7 +113,10 @@ export async function startSeller(config: SellerConfig, log: Log = jsonLog): Pro
 
   // Filled as each service starts, the last started first: the stops run in that order.
   const stops: (() => Promise<void>)[] = [];
+  // Set as the stop begins: the signal that stops the seller can reach Kora first, as a terminal's Ctrl-C does.
+  let stopping = false;
   const stop = async (): Promise<void> => {
+    stopping = true;
     for (const next of stops.splice(0)) {
       try {
         await next();
@@ -133,11 +136,7 @@ export async function startSeller(config: SellerConfig, log: Log = jsonLog): Pro
       feePayerSecretKey: keys.koraFeePayer.secretKey,
       apiKey: randomUUID(),
     });
-    let stopping = false;
-    stops.unshift(async () => {
-      stopping = true;
-      await kora.stop();
-    });
+    stops.unshift(() => kora.stop());
     // Kora's exit is the seller's failure, unless the seller is stopping it.
     const failed = kora.exit.then(async (code) => {
       if (stopping) return new Promise<string>(() => {});

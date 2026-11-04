@@ -157,7 +157,8 @@ From the repository root, with `flyctl` signed in:
   a client that falls back on the sponsored close would call that address on the buyer's own machine, so that
   fallback does not apply to this deployment. The gate's close is the path.
 - If Kora exits, the process logs `{"at":…,"event":"kora_exited","code":…,"output":…}` with the end of Kora's output,
-  stops, and exits with status 1. `fly.toml` sets the restart policy to `always`, so Fly.io starts the machine again
+  stops, and exits with status 1. Once the process is stopping, Kora's exit is part of the stop and logs nothing: a
+  Ctrl-C in a terminal reaches Kora too. `fly.toml` sets the restart policy to `always`, so Fly.io starts the machine again
   whatever the exit code; its default, `on-failure`, gives up after a number of retries. `/health` answers for the
   stream only.
 - On SIGINT or SIGTERM the process stops the stream, the facilitator, then Kora, and exits with status 0, at the latest
