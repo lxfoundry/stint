@@ -1,0 +1,48 @@
+# Read by BuildKit next to the Dockerfile, and by `fly deploy --ignorefile`. The build context is the repository root, and
+# `fly deploy` sends the working tree as it is on disk, not what git tracks.
+
+# Only what the Dockerfile copies goes into the context. Anything else at the root, an untracked file included, stays out.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!packages
+!apps
+!examples
+!conformance
+!e2e
+
+# Inside those directories: dependencies, build output, caches and test reports.
+**/node_modules
+**/dist
+**/.cache
+e2e/report
+
+# Secrets, at any depth: the patterns of the repository's own ignore list, so that a file git would never track is not
+# baked into the image either.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.asc
+**/*.gpg
+**/id_rsa*
+**/id_ed25519*
+**/*.keystore
+**/secrets
+**/credentials
+**/*credentials*.json
+**/*secret*
+**/*.mnemonic
+**/*mnemonic*
+**/*.wallet
+**/wallets
+**/keystore
+**/*keypair*.json
+**/id.json
+**/test-ledger
+**/.anchor
+**/.surfpool
