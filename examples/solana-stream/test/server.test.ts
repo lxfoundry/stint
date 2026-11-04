@@ -93,3 +93,42 @@ describe("the origin the stream announces to its gate", () => {
     await expect(started).rejects.toThrow(message);
   });
 });
+
+describe("the home page", () => {
+  let stream: RunningStream | undefined;
+  afterEach(async () => {
+    await stream?.stop();
+    stream = undefined;
+  });
+
+  it("is answered to GET / as HTML that loads nothing from elsewhere, and to HEAD / without its body", async () => {
+    const home = "<!doctype html><title>Seller</title><p>Sessions by the second.</p>";
+    stream = await startStream({ rpcWsUrl: NO_NODE, gate: await gateConfig(), home });
+    const page = await fetch(`${stream.url}/`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(page.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(page.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(await page.text()).toBe(home);
+    const head = await fetch(`${stream.url}/`, { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-length")).toBe(String(Buffer.byteLength(home)));
+    expect(await head.text()).toBe("");
+  });
+
+  it("leaves every other path and method as it was: the gate's routes, /health, and a 404", async () => {
+    stream = await startStream({ rpcWsUrl: NO_NODE, gate: await gateConfig(), home: "<p>home</p>" });
+    expect(await offeredAt(stream)).toBe(`${stream.url}/sessions`);
+    expect((await fetch(`${stream.url}/health`)).status).toBe(200);
+    expect((await fetch(`${stream.url}/?x=1`)).status).toBe(404);
+    expect((await fetch(`${stream.url}/`, { method: "POST" })).status).toBe(404);
+    expect((await fetch(`${stream.url}/index.html`)).status).toBe(404);
+  });
+
+  it("is a 404 when the stream is given none", async () => {
+    stream = await startStream({ rpcWsUrl: NO_NODE, gate: await gateConfig() });
+    const response = await fetch(`${stream.url}/`);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "not_found" });
+  });
+});
