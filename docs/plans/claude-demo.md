@@ -5843,12 +5843,12 @@ If a step fails:
 | Wallet folder from `STINT_DEMO_HOME`, files in its `stint-demo` folder, created before the election; `agent.json` 0600, never overwritten, devnet only; address on stderr; balance from the agent's USDC account, missing = 0, refreshed after actions, on request and when a close is found | 7, 9, 10, 13 |
 | The fetch recorder: request line, statuses, decoded `PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE` on the retry, decoded `PAYMENT-RESPONSE`; everything else untouched; tested with a fake fetch | 8 |
 | Explorer links from validated base58 only | 8 |
-| Two copies: election by `owner.json` (`wx`, 0600, `{ pid, port, token }`) in a folder created if missing, ping with Bearer, stale take-over, `/call` Bearer-checked on 127.0.0.1 with a body cap, re-election on a connection error, no action sent twice when its outcome is unknown (reads asked again), the owner's shutdown closing sessions then removing its file; tested with two in-process instances | 9, 13 |
+| Two copies: election by `owner.json` (`wx`, 0600, `{ pid, port, token }`) in a folder created if missing, ping with Bearer, stale take-over, `/call` Bearer-checked on 127.0.0.1 with a body cap, re-election on a connection error, no action sent twice when its outcome is unknown (reads asked again), the owner's shutdown closing sessions then removing its file, a dropped state's session closed as it is dropped; tested with two in-process instances | 9, 13 |
 | Actions through `createSessionTools`; the policy's limits (2.000 USDC an hour); the state shape; `closed`, `expired`, `ended`; `findClose` for the close link; subscription to the agent's own USDC account; frames; the last exchange kept when an action has no rows | 6, 7, 10 |
 | One log line per tool call in each copy that handles it, but none for a state read that succeeds | 11, 13 |
 | The quit-time close stated as a best effort, with the gate's idle close as what refunds otherwise | 14, 15 |
 | Tools `stint_demo` (`_meta.ui.resourceUri`), `stint_demo_state` (app only), the three actions (model and app); the UI extension declared; instructions; `InMemoryTransport` test | 11 |
-| Panel: wallet, faucet link, Refresh, Launch from 0.1 USDC, live rows, the capsule from `paidUntil` corrected by the server's clock every poll and redrawn every 250 ms, Top up refused near the end and past `maxSeconds` with the reason, Close now, the end states, host CSS variables and the brand's palette only (borders mixed from Mist, Slate, Paper and Ink), at most two primary buttons, `textContent` only, polling every 2 s and 0.5 s while busy, errors inline | 6, 12 |
+| Panel: wallet, faucet link, Refresh, Launch from 0.1 USDC, live rows, the capsule from `paidUntil` corrected by the server's clock every poll and redrawn every 250 ms, Top up refused near the end and past `maxSeconds` with the reason, Close now, the end states, host CSS variables and the brand's palette only (hairlines in the host's border colour, or Mist on a light surface and Slate on a dark one), at most two primary buttons, `textContent` only, polling every 2 s and 0.5 s while busy, errors inline | 6, 12 |
 | The bundle (`dist/claude-demo.cjs`), the `.mcpb` (manifest 0.3, no BOM, validated then packed); a stdio test of the built bundle | 13 |
 | The docs lines: README, plans README, spec §3.3 | 14 |
 | The manual run: deploy, `curl`, a fresh wallet, the faucet, Launch, Close now, top-ups from the panel and the chat, an expiry, a quit | 15 |
@@ -5859,7 +5859,9 @@ the README steps name `<your devnet endpoint>` and `<you>`, which are the operat
 
 **Test counts:** seller 11 after Task 2 (config 7, keys 4), 21 after Task 3 (Kora 6, chain 4), 22 after Task 4; demo
 9 after Task 6, 17 after Task 7, 24 after Task 8, 33 after Task 9 (owner 9), 42 after Task 10, 51 after Task 11 (tools
-5, server 4), 53 after Task 12, 57 after Task 13 (manifest 2, stdio 2).
+5, server 4), 53 after Task 12, 57 after Task 13 (manifest 2, stdio 2). Those are the counts of the listings above. As
+built, the seller has 55 tests in 6 files and the demo 194 in 16: the others cover the behaviours under As built, and
+the seller's chain code against a node on 127.0.0.1.
 
 **Type consistency:** `CallHandler` (Task 9) is what `createCallHandler` returns (Task 11) and what `createDemoServer`
 takes; `RouterOptions` has `dir` and `readOnly`, which `main.ts` fills with `DemoConfig.dir` and the two read-only
