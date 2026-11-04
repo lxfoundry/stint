@@ -1,4 +1,5 @@
-import { generateKeyPairSigner } from "@solana/kit";
+import { fetchToken } from "@solana-program/token";
+import { generateKeyPairSigner, isNone, isSome } from "@solana/kit";
 import { fetchSysvarClock } from "@solana/sysvars";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -41,10 +42,18 @@ describe("allowances on the local network (spec §10.1, §12.3)", () => {
     expect(stored.exists && stored.data).toMatchObject({ amountPerPeriod: 50_000n, periodLengthS: 3_600n, amountPulledInPeriod: 0n });
     const accounts = await allowanceAccounts({ owner: grant.owner.signer.address, agent: grant.agent.address, mint: USDC_DEVNET_MINT, nonce: 0n });
     expect(accounts.delegation).toBe(grant.delegation);
+    // The grant makes the authority the delegate of the owner's USDC account, for all of it.
+    const delegated = (await fetchToken(rpc, grant.owner.usdcAccount, { commitment: "confirmed" })).data;
+    expect(isSome(delegated.delegate) && delegated.delegate.value).toBe(accounts.subscriptionAuthority);
+    expect(delegated.delegatedAmount).toBe(2n ** 64n - 1n);
 
     await control.revoke(grant);
     expect((await fetchMaybeRecurringDelegation(rpc, grant.delegation, { commitment: "confirmed" })).exists).toBe(false);
     expect((await fetchMaybeSubscriptionAuthority(rpc, accounts.subscriptionAuthority, { commitment: "confirmed" })).exists).toBe(false);
+    // Closing the authority also takes its approval off the owner's USDC account: the account's one delegate slot is free.
+    const revoked = (await fetchToken(rpc, grant.owner.usdcAccount, { commitment: "confirmed" })).data;
+    expect(isNone(revoked.delegate)).toBe(true);
+    expect(revoked.delegatedAmount).toBe(0n);
   });
 
   it("finds and revokes what a held key granted, as the devnet clean-up does", async () => {

@@ -1373,7 +1373,11 @@ Subscription Authority for the mint and the delegation, about 0.004 SOL together
 unless the owner's Subscription Authority for the mint exists (then the owner pays the delegation's rent alone), then
 `createRecurringDelegation` for the agent's key (amount per period, period length in seconds, an expiry), starting when
 the transaction lands. `revoke` closes the delegation, and `--close-authority` the owner's Subscription Authority too;
-their rent returns to the owner.
+their rent returns to the owner. The grant makes the Subscription Authority the SPL Token delegate of the owner's
+associated token account for the mint, so `--close-authority` closes it with `revokeSubscriptionAuthority` (the
+program's instruction 14), which first removes that approval from the token account and then closes the authority; the
+token account is left with no delegate and a delegated amount of 0, and its one delegate slot is free. Closing the
+authority alone (`closeSubscriptionAuthority`) would leave the approval in place.
 
 The command reads its node from `STINT_RPC_URL`, never from its arguments, since an RPC URL may carry an API key, and it
 prints none of the URL's user info, path, query or fragment: an error may still name its scheme and host. It sends to

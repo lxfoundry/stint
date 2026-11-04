@@ -41,13 +41,17 @@ export function createAllowanceControl(options: AllowanceFixtureOptions): Allowa
       return { owner, agent, nonce, delegation, perPeriod, periodSeconds };
     },
     async revoke(grant) {
-      const { subscriptionAuthority } = await allowanceAccounts({
+      const { subscriptionAuthority, ownerToken } = await allowanceAccounts({
         owner: grant.owner.signer.address,
         agent: grant.agent.address,
         mint: USDC_DEVNET_MINT,
         nonce: grant.nonce,
       });
-      const instructions = revokeInstructions({ owner: grant.owner.signer, delegation: grant.delegation, closeAuthority: subscriptionAuthority });
+      const instructions = revokeInstructions({
+        owner: grant.owner.signer,
+        delegation: grant.delegation,
+        closeAuthority: { subscriptionAuthority, ownerToken, mint: USDC_DEVNET_MINT },
+      });
       await sendInstructions(options.rpc, grant.owner.signer, instructions, options.send);
     },
   };

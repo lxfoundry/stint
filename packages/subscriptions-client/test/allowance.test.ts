@@ -10,6 +10,7 @@ import {
   grantInstructions,
   identifySubscriptionsInstruction,
   parseCreateRecurringDelegationInstruction,
+  parseRevokeSubscriptionAuthorityInstruction,
   parseTransferRecurringInstruction,
   periodState,
   revokeInstructions,
@@ -134,15 +135,28 @@ describe("the accounts and instructions of an allowance", () => {
     await expect(grantInstructions({ owner, agent, mint: MINT, perPeriod: 1n, periodSeconds: 60n, expiresAt: 0n, nonce: 0n })).rejects.toThrow(/expiry/);
   });
 
-  it("revokes the delegation, and closes the authority only when asked", async () => {
+  it("revokes the delegation, and closes the authority only when asked, taking its approval off the owner's token account", async () => {
     const owner = await generateKeyPairSigner();
     const delegationAddress = (await generateKeyPairSigner()).address;
-    const authority = (await generateKeyPairSigner()).address;
+    const accounts = await allowanceAccounts({ owner: owner.address, agent: delegationAddress, mint: MINT, nonce: 0n });
     const kinds = (ixs: readonly unknown[]) => ixs.map((ix) => identifySubscriptionsInstruction(ix as never));
     expect(kinds(revokeInstructions({ owner, delegation: delegationAddress }))).toEqual([SubscriptionsInstruction.RevokeDelegation]);
-    expect(kinds(revokeInstructions({ owner, delegation: delegationAddress, closeAuthority: authority }))).toEqual([
-      SubscriptionsInstruction.RevokeDelegation,
-      SubscriptionsInstruction.CloseSubscriptionAuthority,
-    ]);
+
+    const closing = revokeInstructions({
+      owner,
+      delegation: delegationAddress,
+      closeAuthority: { subscriptionAuthority: accounts.subscriptionAuthority, ownerToken: accounts.ownerToken, mint: MINT },
+    });
+
+    // Not `closeSubscriptionAuthority`, which closes the account and leaves the token account naming it as its delegate.
+    expect(kinds(closing)).toEqual([SubscriptionsInstruction.RevokeDelegation, SubscriptionsInstruction.RevokeSubscriptionAuthority]);
+    const { accounts: named } = parseRevokeSubscriptionAuthorityInstruction(closing[1] as never);
+    expect(named.user.address).toBe(owner.address);
+    expect(named.userAta.address).toBe(accounts.ownerToken);
+    expect(named.tokenMint.address).toBe(MINT);
+    expect(named.tokenProgram.address).toBe(TOKEN_PROGRAM_ADDRESS);
+    expect(named.subscriptionAuthority.address).toBe(accounts.subscriptionAuthority);
+    // The owner paid for the authority, so the rent returns to it without a receiver.
+    expect(named.receiver).toBeUndefined();
   });
 });

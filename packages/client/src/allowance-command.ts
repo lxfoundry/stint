@@ -176,9 +176,12 @@ export async function runAllowanceCommand(argv: readonly string[], deps: Command
       deps.print(`transaction ${signature}`);
       return 0;
     }
-    const closeAuthority = values["close-authority"] === true ? accounts.subscriptionAuthority : undefined;
+    const closeAuthority =
+      values["close-authority"] === true ? { subscriptionAuthority: accounts.subscriptionAuthority, ownerToken: accounts.ownerToken, mint } : undefined;
     const signature = await deps.send(owner, revokeInstructions({ owner, delegation: accounts.delegation, ...(closeAuthority ? { closeAuthority } : {}) }));
-    deps.print(`revoked: delegation ${accounts.delegation}${closeAuthority ? ", and the owner's Subscription Authority closed" : ""}`);
+    deps.print(
+      `revoked: delegation ${accounts.delegation}${closeAuthority ? ", and the owner's Subscription Authority closed, with its approval on the owner's USDC account" : ""}`,
+    );
     deps.print(`transaction ${signature}`);
     return 0;
   } catch (error) {

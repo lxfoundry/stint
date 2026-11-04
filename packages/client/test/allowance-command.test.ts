@@ -3,12 +3,19 @@ import {
   generateKeyPairSigner,
   getAddressEncoder,
   getSolanaErrorFromJsonRpcError,
+  type Address,
   type Instruction,
   type Rpc,
   type SolanaRpcApi,
 } from "@solana/kit";
 import { describe, expect, it } from "vitest";
-import { SubscriptionsInstruction, identifySubscriptionsInstruction } from "@lxfoundry/stint-subscriptions-client";
+import {
+  SubscriptionsInstruction,
+  allowanceAccounts,
+  identifySubscriptionsInstruction,
+  parseRevokeSubscriptionAuthorityInstruction,
+} from "@lxfoundry/stint-subscriptions-client";
+import { USDC_DEVNET } from "@lxfoundry/stint-x402";
 import { DEVNET_GENESIS_HASH, runAllowanceCommand } from "../src/allowance-command.js";
 import { accountsRpc } from "./accounts-rpc.js";
 
@@ -108,8 +115,14 @@ describe("stint allowance (spec §10.1)", () => {
     await runAllowanceCommand(["revoke", "--keypair", "/k/owner.json", "--agent", agent, "--close-authority"], h.deps(owner.json));
     expect(h.sent.map((ixs) => ixs.map((ix) => identifySubscriptionsInstruction(ix as never)))).toEqual([
       [SubscriptionsInstruction.RevokeDelegation],
-      [SubscriptionsInstruction.RevokeDelegation, SubscriptionsInstruction.CloseSubscriptionAuthority],
+      [SubscriptionsInstruction.RevokeDelegation, SubscriptionsInstruction.RevokeSubscriptionAuthority],
     ]);
+    // The authority's approval is taken off the owner's USDC account, which the closing instruction names.
+    const { accounts } = parseRevokeSubscriptionAuthorityInstruction(h.sent[1]![1] as never);
+    const expected = await allowanceAccounts({ owner: owner.address as Address, agent, mint: USDC_DEVNET.mint, nonce: 0n });
+    expect(accounts.userAta.address).toBe(expected.ownerToken);
+    expect(accounts.subscriptionAuthority.address).toBe(expected.subscriptionAuthority);
+    expect(accounts.tokenMint.address).toBe(USDC_DEVNET.mint);
   });
 
   it("refuses a key file that is not JSON, or whose bytes are not all from 0 to 255, without printing any of it", async () => {

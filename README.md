@@ -133,9 +133,11 @@ What an owner needs to know:
 - The owner pays the grant's fee and the rent of the accounts it creates: about 0.004 SOL for a first grant, which
   creates two, a Subscription Authority and the delegation. When the owner's Subscription Authority for USDC already
   exists, a grant creates the delegation alone, and the owner pays only its rent. Revoking closes the delegation and
-  `--close-authority` the Subscription Authority too: their rent returns to the owner. Leave `--close-authority` out to
-  revoke one allowance and keep the others, since closing the Subscription Authority ends every allowance the owner
-  granted for USDC.
+  `--close-authority` the Subscription Authority too: their rent returns to the owner. `--close-authority` also removes
+  the Subscription Authority's approval on the owner's USDC account, which a grant sets with no limit on the amount and
+  which closing the authority alone would leave in place, with the account's one delegate slot taken. Leave `--close-authority`
+  out to revoke one allowance and keep the others, since closing the Subscription Authority ends every allowance the
+  owner granted for USDC.
 - A dedicated owner wallet is recommended. SPL Token allows one delegate per token account, and the allowance uses the
   owner's associated USDC account, of which a wallet has one: it takes that account's delegate slot, and refunds
   return to that account too.

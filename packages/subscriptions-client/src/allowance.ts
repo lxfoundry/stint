@@ -1,10 +1,10 @@
 import { TOKEN_PROGRAM_ADDRESS, findAssociatedTokenPda } from "@solana-program/token";
 import type { Address, Instruction, TransactionSigner } from "@solana/kit";
 import type { RecurringDelegation } from "./generated/accounts/recurringDelegation.js";
-import { getCloseSubscriptionAuthorityInstruction } from "./generated/instructions/closeSubscriptionAuthority.js";
 import { getCreateRecurringDelegationInstruction } from "./generated/instructions/createRecurringDelegation.js";
 import { getInitSubscriptionAuthorityInstructionAsync } from "./generated/instructions/initSubscriptionAuthority.js";
 import { getRevokeDelegationInstruction } from "./generated/instructions/revokeDelegation.js";
+import { getRevokeSubscriptionAuthorityInstruction } from "./generated/instructions/revokeSubscriptionAuthority.js";
 import { getTransferRecurringInstructionAsync } from "./generated/instructions/transferRecurring.js";
 import { findRecurringDelegationPda } from "./generated/pdas/recurringDelegation.js";
 import { findSubscriptionAuthorityPda } from "./generated/pdas/subscriptionAuthority.js";
@@ -170,16 +170,37 @@ export async function grantInstructions(input: GrantInput): Promise<Instruction[
   return [init, create];
 }
 
+/** The owner's Subscription Authority for a mint, with the token account that names it as its delegate. */
+export interface AuthorityToClose {
+  readonly subscriptionAuthority: Address;
+  /** The owner's associated token account for `mint`. */
+  readonly ownerToken: Address;
+  readonly mint: Address;
+}
+
 /**
  * Revokes a delegation; its rent returns to the owner. `closeAuthority` also closes the owner's Subscription Authority,
- * which returns its rent too, and ends every other delegation the owner has granted for that mint.
+ * which returns its rent too, and ends every other delegation the owner has granted for that mint. It uses the program's
+ * `revokeSubscriptionAuthority`, which first removes the authority's approval on the owner's token account (an SPL Token
+ * revoke, when the authority is that account's delegate) and then closes the authority: closing it alone would leave the
+ * token account naming a closed account as its delegate, for the whole balance, with its one delegate slot taken. The
+ * owner paid for the authority in the grant, so its rent returns to the owner without a receiver.
  */
 export function revokeInstructions(input: {
   readonly owner: TransactionSigner;
   readonly delegation: Address;
-  readonly closeAuthority?: Address;
+  readonly closeAuthority?: AuthorityToClose;
 }): Instruction[] {
   const revoke = getRevokeDelegationInstruction({ authority: input.owner, delegationAccount: input.delegation });
   if (input.closeAuthority === undefined) return [revoke];
-  return [revoke, getCloseSubscriptionAuthorityInstruction({ user: input.owner, subscriptionAuthority: input.closeAuthority })];
+  return [
+    revoke,
+    getRevokeSubscriptionAuthorityInstruction({
+      user: input.owner,
+      userAta: input.closeAuthority.ownerToken,
+      tokenMint: input.closeAuthority.mint,
+      tokenProgram: TOKEN_PROGRAM_ADDRESS,
+      subscriptionAuthority: input.closeAuthority.subscriptionAuthority,
+    }),
+  ];
 }

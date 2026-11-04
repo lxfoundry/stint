@@ -65,6 +65,8 @@ export async function revokeHeldAllowances(
         );
         continue;
       }
+      // `closeSubscriptionAuthority` and not `revokeSubscriptionAuthority`, which also reads the owner's token account: an
+      // earlier run may have closed it already, and this clean-up closes it afterwards anyway, which drops its delegate.
       const instructions = [
         ...delegations.flatMap(({ pubkey }) => revokeInstructions({ owner: signer, delegation: pubkey })),
         getCloseSubscriptionAuthorityInstruction({ user: signer, subscriptionAuthority: authority }),
