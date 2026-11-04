@@ -3,8 +3,8 @@ import { TOP_UP_MARGIN_SECONDS } from "@lxfoundry/stint-x402";
 import { describe, expect, it } from "vitest";
 import { formatUsdc, topUpRefusal } from "../app/model.js";
 import type { Demo } from "../src/demo.js";
-import { FAUCET_URL, LAUNCH_AMOUNT, LAUNCH_SECONDS, TOOL, type DemoSession, type DemoState } from "../src/state.js";
-import { TOOL_DESCRIPTIONS, createCallHandler } from "../src/tools.js";
+import { FAUCET_URL, LAUNCH_AMOUNT, LAUNCH_SECONDS, TOOL, type DemoSession, type DemoState, type LedgerEntry } from "../src/state.js";
+import { INSTRUCTIONS, TOOL_DESCRIPTIONS, createCallHandler } from "../src/tools.js";
 
 const STATE: DemoState = {
   wallet: { address: "AgentWallet", usdc: "100000", checkedAt: 1 },
@@ -12,6 +12,7 @@ const STATE: DemoState = {
   faucetUrl: FAUCET_URL,
   session: { state: "none", topUpMarginSeconds: 10, frames: 0, links: { topUps: [] } },
   exchange: { current: [] },
+  ledger: [],
   now: 1,
 };
 
@@ -68,6 +69,22 @@ describe("the owner's tool handler", () => {
       expect(result.structuredContent).toEqual(STATE);
       expect(JSON.parse(text(result))).toEqual(STATE);
     }
+  });
+
+  it("puts an action's line of the wallet's log first in its result, and tells the model to quote it", async () => {
+    const entry: LedgerEntry = { kind: "top-up", sessionId: "S", at: 1, direction: "out", amount: "100000", before: "900000", after: "800000" };
+    const after: DemoState = { ...STATE, session: { ...STATE.session, state: "open", sessionId: "S" }, ledger: [entry] };
+    const call = createCallHandler(fakeDemo({ topUp: async () => after, launch: async () => after, close: async () => after }).demo, () => {});
+    const result = await call(TOOL.topUp, {});
+    const blocks = result.content as { text: string }[];
+    expect(blocks.map((block) => block.text)).toEqual(["[top-up] 0.900 - 0.100 = 0.800 USDC", JSON.stringify(after)]);
+    expect(result.structuredContent).toEqual(after);
+    // An action whose own movement is not the last one logged answers with the state alone.
+    expect((await call(TOOL.launch, {})).content).toHaveLength(1);
+    expect((await call(TOOL.close, {})).content).toHaveLength(1);
+    // A read never carries a line: the model would quote the same movement again.
+    expect((await call(TOOL.demo, {})).content).toHaveLength(1);
+    expect(INSTRUCTIONS).toContain("quote it");
   });
 
   it("reads the balance again when the panel asks", async () => {

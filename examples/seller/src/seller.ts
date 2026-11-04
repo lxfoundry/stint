@@ -18,12 +18,15 @@ import type { SellerConfig } from "./config.js";
 import { deriveSellerKeys, type SellerKeys } from "./keys.js";
 import { KORA_ALLOWED_PROGRAMS, SUBSCRIPTIONS_PROGRAM_ADDRESS, startKora } from "./kora.js";
 
-/** 1000 base units of devnet USDC a second (0.001 USDC/s), from 5 s to 300 s. */
-export const SELLER_TERMS: Terms = { rate: 1_000n, minSeconds: 5, maxSeconds: 300 };
+/** 1000 base units of devnet USDC a second (0.001 USDC/s), from 5 s to 1000 s. */
+export const SELLER_TERMS: Terms = { rate: 1_000n, minSeconds: 5, maxSeconds: 1000 };
 /** What a request that names no duration is offered. */
 export const SELLER_DURATIONS = [100] as const;
-/** A session nobody connects to for this long is closed by the gate (spec §7.5). */
-export const IDLE_CLOSE_SECONDS = 60;
+/**
+ * A session nobody connects to for this long is closed by the gate (spec §7.5), and the rest of its deposit refunded:
+ * this is how a buyer whose process is killed gets its money back.
+ */
+export const IDLE_CLOSE_SECONDS = 30;
 /** Between the sweeper's listings of the program's sessions; within a public endpoint's rate limits. */
 export const SWEEPER_INTERVAL_MS = 10_000;
 /** What Kora's fee payer and the rent payer are topped up to at each start: 0.05 SOL. */
