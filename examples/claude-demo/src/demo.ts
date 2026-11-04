@@ -32,6 +32,11 @@ export interface DemoOptions {
   readonly log?: (line: string) => void;
   /** Milliseconds a state read waits for the chain before it answers without it. Default `STATE_READ_CAP_MS`. */
   readonly stateReadCapMs?: number;
+  /**
+   * How long a launch buys, for a seller whose longest session leaves no room for `TOP_UP_SECONDS` after
+   * `LAUNCH_SECONDS`. Default `LAUNCH_SECONDS`, which the tools' descriptions and the panel name.
+   */
+  readonly launchSeconds?: number;
 }
 
 export interface Demo {
@@ -314,7 +319,7 @@ export function createDemo(options: DemoOptions): Demo {
     session = { ...blank(), state: "opening" };
     let opened: OpenOutput;
     try {
-      opened = await tools.tools.stint_open_session.run({ url: options.gateUrl, seconds: LAUNCH_SECONDS, reason: REASON });
+      opened = await tools.tools.stint_open_session.run({ url: options.gateUrl, seconds: options.launchSeconds ?? LAUNCH_SECONDS, reason: REASON });
     } catch (error) {
       session = blank();
       throw error;

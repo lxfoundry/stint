@@ -60,9 +60,11 @@ interface Behave {
 }
 
 /** A demo over fake session tools, whose open reports to the sink as the recorder would, and over a fake chain. */
-function setup(options: { balance?: bigint; stateReadCapMs?: number } = {}) {
+function setup(options: { balance?: bigint; stateReadCapMs?: number; launchSeconds?: number } = {}) {
   let clock = START_MS;
   let paidUntil = 0;
+  /** The seconds each open asked for. */
+  const opened: (number | undefined)[] = [];
   const sent: unknown[] = [];
   const inbox: unknown[] = [];
   const logs: string[] = [];
@@ -74,8 +76,9 @@ function setup(options: { balance?: bigint; stateReadCapMs?: number } = {}) {
   const sink = () => demo!.sink;
   const tools: SessionTools = {
     tools: {
-      stint_open_session: tool<OpenInput, OpenOutput>("stint_open_session", async () => {
+      stint_open_session: tool<OpenInput, OpenOutput>("stint_open_session", async (input) => {
         counts.open++;
+        opened.push(input.seconds);
         sink().row({ kind: "request", at: clock, label: "POST /sessions?seconds=100" });
         if (behave.openFails) throw behave.openFails;
         if (behave.offer !== null) sink().offer("open", behave.offer ?? offer("open"));
@@ -143,9 +146,11 @@ function setup(options: { balance?: bigint; stateReadCapMs?: number } = {}) {
     now: () => clock,
     log: (line) => void logs.push(line),
     ...(options.stateReadCapMs === undefined ? {} : { stateReadCapMs: options.stateReadCapMs }),
+    ...(options.launchSeconds === undefined ? {} : { launchSeconds: options.launchSeconds }),
   });
   return {
     demo,
+    opened,
     sent,
     inbox,
     logs,
@@ -179,6 +184,14 @@ describe("the demo's session", () => {
     expect(state.busy).toBeUndefined();
     expect(state.exchange).toEqual({ current: [], last: { action: "launch", rows: [{ kind: "request", at: START_MS, label: "POST /sessions?seconds=100" }] } });
     expect(state.wallet).toMatchObject({ address: "AgentWallet", usdc: "1000000" });
+  });
+
+  it("asks for a 100 s session, or for the length it is given", async () => {
+    const standard = setup();
+    await standard.demo.launch();
+    const short = setup({ launchSeconds: 20 });
+    await short.demo.launch();
+    expect([standard.opened, short.opened]).toEqual([[100], [20]]);
   });
 
   it("refuses a launch the wallet cannot pay for, and a second one while a session runs", async () => {
