@@ -114,12 +114,22 @@ describe("the bundled server on stdio", () => {
   it("leaves on SIGTERM with the exit code 0 and takes its owner.json away", async () => {
     const folder = freshHome();
     const child = spawn(process.execPath, [bundle], { cwd, env: environment(folder), stdio: ["pipe", "pipe", "pipe"] });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => (stderr += chunk));
     const code = new Promise<number | null>((resolve) => child.once("exit", resolve));
-    await eventually(() => stderr, /this copy holds the demo's state/);
-    expect(existsSync(join(folder, "stint-demo", "owner.json"))).toBe(true);
-    child.kill("SIGTERM");
+    let stderr = "";
+    let owned = false;
+    // The line says the copy can be stopped: the signal goes as soon as it arrives, from the handler, with no poll's delay.
+    const sent = new Promise<void>((resolve, reject) => {
+      child.once("exit", () => reject(new Error(`the server left before it said it holds the demo's state:\n${stderr}`)));
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+        if (child.killed || !/this copy holds the demo's state/.test(stderr)) return;
+        owned = existsSync(join(folder, "stint-demo", "owner.json"));
+        child.kill("SIGTERM");
+        resolve();
+      });
+    });
+    await sent;
+    expect(owned).toBe(true);
     expect(await code).toBe(0);
     expect(existsSync(join(folder, "stint-demo", "owner.json"))).toBe(false);
   }, 60_000);

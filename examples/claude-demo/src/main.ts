@@ -109,7 +109,6 @@ async function main(panelHtml: () => Promise<string>): Promise<void> {
   ensureDemoFolder(config.dir, log);
   const side = createOwnerSide(config, log);
   const router = await createRouter({ dir: config.dir, readOnly: READ_ONLY, log, becomeOwner: side.becomeOwner, onStepDown: side.dropped });
-  log(router.role() === "owner" ? "this copy holds the demo's state" : "forwarding to the copy that holds the demo's state");
   // One line per call in a copy that forwards it too, but for the panel's state reads, which come every 2 s.
   const call: CallHandler = async (name, args) => {
     if (router.role() === "forwarder" && name !== TOOL.state) log(`${name} forwarded`);
@@ -153,6 +152,9 @@ async function main(panelHtml: () => Promise<string>): Promise<void> {
   process.stdin.once("end", () => void leave());
   process.stdin.once("close", () => void leave());
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => void leave());
+  // Last, so that the line means the copy can be stopped: a signal that arrives before its handler is registered ends the
+  // process by that signal, with no exit code.
+  log(router.role() === "owner" ? "this copy holds the demo's state" : "forwarding to the copy that holds the demo's state");
 }
 
 /** Starts the server with the panel's HTML from `panelHtml`; a start that fails says why on stderr and exits 1. */
