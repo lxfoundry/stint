@@ -109,6 +109,8 @@ export interface KoraOptions {
   readonly binary?: string;
   /** Where Kora's working directory is made. Default: the system's temporary directory. */
   readonly workDir?: string;
+  /** How long Kora has to answer `GET /liveness` once started. Default: 30 s. */
+  readonly readyTimeoutMs?: number;
 }
 
 export interface KoraProcess {
@@ -227,13 +229,15 @@ export async function startKora(options: KoraOptions): Promise<KoraProcess> {
       }
       cleanUp();
     };
-    const deadline = Date.now() + 30_000;
+    const readyTimeoutMs = options.readyTimeoutMs ?? 30_000;
+    const deadline = Date.now() + readyTimeoutMs;
     let delay = 50;
     while (Date.now() < deadline) {
       if (spawnError) throw new Error(`Could not start Kora (${binary}): ${spawnError.message}`);
       if (exited) throw new Error(`Kora exited during startup:\n${shown()}`);
       try {
-        const response = await fetch(`${url}/liveness`);
+        // A listener that takes the request and never answers would otherwise hold the start past its deadline.
+        const response = await fetch(`${url}/liveness`, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
         if (response.ok) return { url, apiKey: options.apiKey, exit, logs: shown, stop };
       } catch {
         // Not listening yet.
@@ -241,7 +245,7 @@ export async function startKora(options: KoraOptions): Promise<KoraProcess> {
       await new Promise((resolve) => setTimeout(resolve, delay));
       delay = Math.min(delay * 2, 1_000);
     }
-    throw new Error(`Kora was not ready within 30 s:\n${shown()}`);
+    throw new Error(`Kora was not ready within ${readyTimeoutMs / 1_000} s:\n${shown()}`);
   } catch (error) {
     await stop?.();
     cleanUp();

@@ -34,16 +34,21 @@ afterEach(() => {
   for (const directory of fakes.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-/** An executable standing in for Kora: it prints `output`, then exits with status 1, or serves `GET /liveness` on its `--port`. */
-function fakeKora(output: string, serve: boolean): string {
+/**
+ * An executable standing in for Kora: it prints `output`, then exits with status 1 (`exit`), or listens on its `--port`
+ * and serves `GET /liveness` (`serve`) or takes requests and never answers them (`hang`).
+ */
+function fakeKora(output: string, mode: "exit" | "serve" | "hang"): string {
   mkdirSync(scratch, { recursive: true });
   const directory = mkdtempSync(join(scratch, "fake-kora-"));
   fakes.push(directory);
   const binary = join(directory, "kora");
   const print = `process.stdout.write(${JSON.stringify(output)}`;
-  const source = serve
-    ? `import { createServer } from "node:http";\n${print});\ncreateServer((_, response) => response.end()).listen(Number(process.argv[process.argv.indexOf("--port") + 1]));\nprocess.on("SIGINT", () => process.exit(0));`
-    : `${print}, () => process.exit(1));`;
+  const answer = mode === "serve" ? "(_, response) => response.end()" : "() => {}";
+  const source =
+    mode === "exit"
+      ? `${print}, () => process.exit(1));`
+      : `import { createServer } from "node:http";\n${print});\ncreateServer(${answer}).listen(Number(process.argv[process.argv.indexOf("--port") + 1]));\nprocess.on("SIGINT", () => process.exit(0));`;
   writeFileSync(binary, `#!/usr/bin/env node\n${source}\n`, { mode: 0o755 });
   return binary;
 }
@@ -92,8 +97,15 @@ describe("starting Kora", () => {
     await expect(startKora(options("false"))).rejects.toThrow(/Kora exited during startup/);
   });
 
+  it("gives up at its deadline on a Kora that takes requests and never answers them", async () => {
+    const started = Date.now();
+    await expect(startKora({ ...options(fakeKora("", "hang")), readyTimeoutMs: 300 })).rejects.toThrow(/^Kora was not ready within 0\.3 s/);
+    // The deadline and the start's own steps (a free port, the stand-in's boot), with room for a busy machine.
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
+
   it("shows nothing of an RPC URL the output was cut through, in the error of a start that fails", async () => {
-    const message = await startKora(options(fakeKora(CUT_OUTPUT, false))).then(
+    const message = await startKora(options(fakeKora(CUT_OUTPUT, "exit"))).then(
       () => "Kora started",
       (error: Error) => error.message,
     );
@@ -104,7 +116,7 @@ describe("starting Kora", () => {
   });
 
   it("shows nothing of an RPC URL the output was cut through, in the log of a Kora that runs", async () => {
-    const kora = await startKora(options(fakeKora(CUT_OUTPUT, true)));
+    const kora = await startKora(options(fakeKora(CUT_OUTPUT, "serve")));
     try {
       await vi.waitFor(() => expect(kora.logs()).toContain(END));
       expect(kora.logs()).not.toContain(HOST);
@@ -117,7 +129,7 @@ describe("starting Kora", () => {
 
   it("kills Kora if the process exits without stopping it, and takes that hook away once Kora has exited", async () => {
     const before = process.listeners("exit");
-    const kora = await startKora(options(fakeKora("", true)));
+    const kora = await startKora(options(fakeKora("", "serve")));
     try {
       const hooks = process.listeners("exit").filter((listener) => !before.includes(listener));
       expect(hooks).toHaveLength(1);
@@ -132,7 +144,7 @@ describe("starting Kora", () => {
 
   it("leaves no hook on the process after Kora is stopped, exited during its start or could not be started", async () => {
     const before = process.listeners("exit");
-    const kora = await startKora(options(fakeKora("", true)));
+    const kora = await startKora(options(fakeKora("", "serve")));
     expect(process.listeners("exit")).toHaveLength(before.length + 1);
     await kora.stop();
     expect(process.listeners("exit")).toEqual(before);

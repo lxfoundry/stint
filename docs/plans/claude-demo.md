@@ -154,7 +154,8 @@ The code differs from the code this plan shows in these ways, each a behaviour o
 - **Kora ends with the seller.** `startKora` kills Kora (SIGKILL) when the process exits, so that a stop that hangs or a
   start that is cut short leaves no Kora running with the fee payer's key. The entry point stops the seller on SIGINT or
   SIGTERM, one that arrives while it is still starting included, and on an error nobody handles, and it ends 15 s after
-  the signal or the error at the latest, whatever the stop is doing.
+  the signal or the error at the latest, whatever the stop is doing. Kora's start gives up at its deadline (30 s) even
+  when Kora takes the `GET /liveness` request and never answers it: each request waits only for the time left.
 - **The image and the machine keep secrets and restarts apart from the command line.** The seed and the RPC URL reach
   `fly secrets import` on standard input, and seed files are made under `umask 077`. The Docker ignore file is an
   allowlist (`*`, then what the Dockerfile copies) that also repeats the repository's secret patterns at any depth. The
