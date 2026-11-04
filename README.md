@@ -44,6 +44,7 @@ The toolchain is pinned in `CLAUDE.md` (section "Toolchain") and checked by
     cargo test -p stint                       # program unit tests
     pnpm install
     pnpm generate:client                      # regenerate the program client after an interface change
+    pnpm --filter @lxfoundry/stint-subscriptions-client run generate   # regenerate the Subscriptions client from its pinned IDL
     scripts/fetch-subscriptions-program.sh    # fetch and check the Subscriptions program copy, once
     pnpm test                                 # unit and integration tests of every package but e2e
     pnpm test:e2e                             # the e2e package's tests, each file starting a local network
@@ -52,6 +53,7 @@ The toolchain is pinned in `CLAUDE.md` (section "Toolchain") and checked by
     pnpm e2e:devnet                           # the same scenarios on devnet (needs .env.devnet and a deployed program)
     pnpm e2e:devnet funds                     # the address to fund for it, and what that address holds
     pnpm e2e:devnet clean                     # the clean-up alone
+    pnpm stint allowance grant|status|revoke  # an owner's allowance for an agent (see Allowance funding)
 
 The end-to-end report is written to `e2e/report/report.md`; after a run with `--only`, it lists only the
 scenarios named.
