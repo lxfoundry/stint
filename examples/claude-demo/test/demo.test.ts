@@ -208,6 +208,15 @@ describe("the demo's session", () => {
     expect(t.counts.open).toBe(1);
   });
 
+  it("asks the wallet for what its own launch length costs", async () => {
+    const poor = setup({ balance: 19_999n, launchSeconds: 20 });
+    await expect(poor.demo.launch()).rejects.toThrow(/needs 0\.020 USDC/);
+    expect(poor.counts.open).toBe(0);
+    const enough = setup({ balance: 20_000n, launchSeconds: 20 });
+    await enough.demo.launch();
+    expect(enough.opened).toEqual([20]);
+  });
+
   it("closes the session now, with what was paid and refunded, and the close's link", async () => {
     const t = setup();
     await t.demo.launch();

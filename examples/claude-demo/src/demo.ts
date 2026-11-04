@@ -100,6 +100,9 @@ export function createDemo(options: DemoOptions): Demo {
   const now = options.now ?? Date.now;
   const { tools, chain } = options;
   const emit = options.log ?? toStderr;
+  const launchSeconds = options.launchSeconds ?? LAUNCH_SECONDS;
+  /** What a launch needs in the wallet: `launchSeconds` at the rate `LAUNCH_AMOUNT` buys `LAUNCH_SECONDS` at. */
+  const launchAmount = ((BigInt(LAUNCH_AMOUNT) * BigInt(launchSeconds)) / BigInt(LAUNCH_SECONDS)).toString();
   /** One line, each URL in it cut to its host. A log that fails must not fail what it reports on, and has nowhere left to say so. */
   const say = (line: string): void => {
     try {
@@ -373,9 +376,9 @@ export function createDemo(options: DemoOptions): Demo {
     refuseWhenLeaving();
     // The balance the wallet's log starts this session from: none if this read failed, rather than an older one.
     const before = balanceStale ? undefined : wallet.usdc;
-    if (wallet.usdc !== undefined && BigInt(wallet.usdc) < BigInt(LAUNCH_AMOUNT)) {
+    if (wallet.usdc !== undefined && BigInt(wallet.usdc) < BigInt(launchAmount)) {
       throw new DemoError(
-        `The wallet holds ${formatUsdc(wallet.usdc)} and a launch needs ${formatUsdc(LAUNCH_AMOUNT)}: get devnet USDC for ${options.address} at ${FAUCET_URL}`,
+        `The wallet holds ${formatUsdc(wallet.usdc)} and a launch needs ${formatUsdc(launchAmount)}: get devnet USDC for ${options.address} at ${FAUCET_URL}`,
       );
     }
     openOffer = undefined;
@@ -385,7 +388,7 @@ export function createDemo(options: DemoOptions): Demo {
     session = { ...blank(), state: "opening" };
     let opened: OpenOutput;
     try {
-      opened = await tools.tools.stint_open_session.run({ url: options.gateUrl, seconds: options.launchSeconds ?? LAUNCH_SECONDS, reason: REASON });
+      opened = await tools.tools.stint_open_session.run({ url: options.gateUrl, seconds: launchSeconds, reason: REASON });
     } catch (error) {
       session = blank();
       throw error;
