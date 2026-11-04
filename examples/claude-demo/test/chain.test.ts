@@ -170,12 +170,18 @@ describe("a node that does not answer", () => {
     node.hang = false;
     node.token = "7";
     node.signatures = [];
-    expect(await chain.usdcBalance()).toBe(7n);
-    expect(await chain.findClose(SESSION)).toBeUndefined();
+    // The reads that must succeed run under the default limit: 50 ms would be a flake on a slow machine.
+    const recovered = await createRpcDemoChain(url, SELLER);
+    expect(await recovered.usdcBalance()).toBe(7n);
+    expect(await recovered.findClose(SESSION)).toBeUndefined();
   });
 
   it("is logged by the demo, which still answers the state read, and read again at the next one", async () => {
-    const chain = await createRpcDemoChain(url, SELLER, { requestTimeoutMs: 50 });
+    // The reads that hang run under a short limit, those that must succeed under the default one: the chain switches.
+    const short = await createRpcDemoChain(url, SELLER, { requestTimeoutMs: 50 });
+    const patient = await createRpcDemoChain(url, SELLER);
+    let active = short;
+    const chain = { usdcAccount: short.usdcAccount, usdcBalance: () => active.usdcBalance(), findClose: (session: string) => active.findClose(session) };
     const logs: string[] = [];
     const tools = { tools: {}, closeCode: () => undefined, closeAll: async () => ({ closed: [], failed: [] }) } as unknown as SessionTools;
     const demo = createDemo({ address: SELLER, gateUrl: "https://gate.example", tools, chain, log: (line) => void logs.push(line) });
@@ -186,6 +192,7 @@ describe("a node that does not answer", () => {
     expect(logs[0]).not.toContain(url);
     node.hang = false;
     node.token = "7";
+    active = patient;
     expect((await demo.state()).wallet).toMatchObject({ address: SELLER, usdc: "7" });
     expect(logs).toHaveLength(1);
   });

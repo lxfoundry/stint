@@ -30,6 +30,8 @@ export interface DemoOptions {
   readonly now?: () => number;
   /** Where the demo's lines go, one at a time: each failure, an action's included. Default: stderr. Every line is redacted first. */
   readonly log?: (line: string) => void;
+  /** Milliseconds a state read waits for the chain before it answers without it. Default `STATE_READ_CAP_MS`. */
+  readonly stateReadCapMs?: number;
 }
 
 export interface Demo {
@@ -46,6 +48,12 @@ export interface Demo {
 
 /** How often, at most, the chain is asked for a session's close while one is awaited. */
 export const CLOSE_LOOKUP_EVERY_MS = 4_000;
+/**
+ * The longest a state read waits for the chain, the balance read and the close lookup together. A read of the state that
+ * a copy forwards to the owner is waited for 15 s, and each request to the node can take 10 s: the owner answers with
+ * what it has, and a read still running carries on, its result seen at a later state read.
+ */
+export const STATE_READ_CAP_MS = 5_000;
 /** How often, at most, the stream subscription is sent again while a session runs. */
 export const RESUBSCRIBE_EVERY_MS = 15_000;
 const REASON = "The Stint demo: watch the agent's own USDC account on the example stream";
@@ -88,6 +96,11 @@ export function createDemo(options: DemoOptions): Demo {
   let wallet: { usdc?: string; checkedAt?: number } = {};
   /** Whether the next state read reads the balance: it has not been read yet, or the last read failed. */
   let balanceStale = true;
+  /** Reads of the balance started, and the newest one whose answer was kept: an answer older than that one is dropped. */
+  let balanceReads = 0;
+  let balanceKept = 0;
+  /** The balance read that a state read waits for, while it runs: a state read starts none beside it. */
+  let balanceReading: Promise<void> | undefined;
   let session = blank();
   let current: ExchangeRow[] = [];
   let last: { action: DemoAction; rows: ExchangeRow[] } | undefined;
@@ -98,6 +111,8 @@ export function createDemo(options: DemoOptions): Demo {
   let lastLookup = -Infinity;
   let lastSubscribe = -Infinity;
   let following: Promise<void> | undefined;
+  /** The close lookup in flight, and the session it is for: another for that session is not started while it runs. */
+  let lookup: { readonly id: string; readonly done: Promise<void> } | undefined;
   /** The session whose subscription is being sent: at most one in flight for a session, however long it takes. */
   let subscribing: string | undefined;
   let leaving = false;
@@ -112,15 +127,29 @@ export function createDemo(options: DemoOptions): Demo {
     },
   };
 
+  /**
+   * Reads the balance. Reads can overlap (one that a state read gave up on, one an action ends with): the answer of the
+   * newest read decides, and an older one that arrives later is dropped.
+   */
   async function refreshBalance(): Promise<void> {
+    const read = ++balanceReads;
     try {
-      wallet = { usdc: (await chain.usdcBalance()).toString(), checkedAt: now() };
+      const usdc = (await chain.usdcBalance()).toString();
+      if (read < balanceKept) return;
+      balanceKept = read;
+      wallet = { usdc, checkedAt: now() };
       balanceStale = false;
     } catch (error) {
-      balanceStale = true;
+      if (read >= balanceKept) balanceStale = true;
       say(`reading the wallet's balance failed: ${message(error)}`);
     }
   }
+
+  /** The balance read for a state read: the one already running if there is one. It cannot reject. */
+  const readBalanceForState = (): Promise<void> =>
+    (balanceReading ??= refreshBalance().finally(() => {
+      balanceReading = undefined;
+    }));
 
   function snapshot(): DemoState {
     return {
@@ -191,12 +220,26 @@ export function createDemo(options: DemoOptions): Demo {
    * most every `CLOSE_LOOKUP_EVERY_MS` unless `force`. The close decides: `expired` at or after its `paid_until`;
    * `ended` before, unless this server closed it. A close found moves the agent's money, so the balance is read again.
    * A lookup that fails is logged, and made again at a later state read.
+   *
+   * One lookup runs at a time for a session: a call made while it runs waits for it instead of starting another. A
+   * state read does not wait for it past `STATE_READ_CAP_MS`; the lookup carries on, and its result, applied when it
+   * arrives, is seen at the next read.
    */
-  async function lookUpClose(force: boolean): Promise<void> {
+  function lookUpClose(force: boolean): Promise<void> {
     const id = session.sessionId;
-    if (!id || session.links.close) return;
-    if (!force && now() - lastLookup < CLOSE_LOOKUP_EVERY_MS) return;
+    if (!id || session.links.close) return Promise.resolve();
+    if (lookup?.id === id) return lookup.done;
+    if (!force && now() - lastLookup < CLOSE_LOOKUP_EVERY_MS) return Promise.resolve();
     lastLookup = now();
+    const done: Promise<void> = findAndApplyClose(id).finally(() => {
+      if (lookup?.done === done) lookup = undefined;
+    });
+    lookup = { id, done };
+    return done;
+  }
+
+  /** The lookup itself: what it finds is applied to the session only if that is still the session it was made for. */
+  async function findAndApplyClose(id: string): Promise<void> {
     let found: FoundClose | undefined;
     try {
       found = await chain.findClose(id);
@@ -341,13 +384,22 @@ export function createDemo(options: DemoOptions): Demo {
   return {
     sink,
     async state(request = {}) {
-      if (request.refreshBalance || balanceStale) await refreshBalance();
-      following ??= follow()
-        .catch((error: unknown) => say(`following the session failed: ${message(error)}`))
-        .finally(() => {
-          following = undefined;
-        });
-      await following;
+      // One cap for the whole read. What is still running when it expires carries on and is seen at a later read.
+      let timer: NodeJS.Timeout | undefined;
+      const expired = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, options.stateReadCapMs ?? STATE_READ_CAP_MS);
+      });
+      try {
+        if (request.refreshBalance || balanceStale) await Promise.race([readBalanceForState(), expired]);
+        following ??= follow()
+          .catch((error: unknown) => say(`following the session failed: ${message(error)}`))
+          .finally(() => {
+            following = undefined;
+          });
+        await Promise.race([following, expired]);
+      } finally {
+        clearTimeout(timer);
+      }
       return snapshot();
     },
     launch: () => run("launch", launch),

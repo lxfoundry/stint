@@ -17,8 +17,9 @@ import type {
 import type { ElapsedRequirements } from "@lxfoundry/stint-x402";
 import { describe, expect, it } from "vitest";
 import type { DemoChain, FoundClose } from "../src/chain.js";
-import { createDemo, type Demo } from "../src/demo.js";
+import { CLOSE_LOOKUP_EVERY_MS, STATE_READ_CAP_MS, createDemo, type Demo } from "../src/demo.js";
 import { explorerAddress, explorerTx } from "../src/links.js";
+import { READ_CALL_TIMEOUT_MS } from "../src/owner.js";
 import { AGENT_USDC, FEE_PAYER, SELLER, SESSION, offer, signatureOf } from "./fixtures.js";
 
 const START_MS = 1_800_000_000_000;
@@ -44,6 +45,8 @@ interface Behave {
   holdClose?: Promise<void>;
   /** The balance read waits for this before it answers. */
   holdBalance?: Promise<void>;
+  /** The close lookup waits for this before it answers. */
+  holdLookup?: Promise<void>;
   /** The stream connection never opens: a send never settles. */
   hangSend?: boolean;
   /** The address of the session the next open returns. */
@@ -57,7 +60,7 @@ interface Behave {
 }
 
 /** A demo over fake session tools, whose open reports to the sink as the recorder would, and over a fake chain. */
-function setup(options: { balance?: bigint } = {}) {
+function setup(options: { balance?: bigint; stateReadCapMs?: number } = {}) {
   let clock = START_MS;
   let paidUntil = 0;
   const sent: unknown[] = [];
@@ -65,7 +68,7 @@ function setup(options: { balance?: bigint } = {}) {
   const logs: string[] = [];
   const closeCodes = new Map<string, number>();
   const closes = new Map<string, FoundClose>();
-  const counts = { open: 0, topUp: 0, close: 0, closeAll: 0, lookups: 0 };
+  const counts = { open: 0, topUp: 0, close: 0, closeAll: 0, lookups: 0, balances: 0 };
   const behave: Behave = { openTx: OPEN_TX, topUpTx: TOP_UP_TX };
   let demo: Demo | undefined;
   const sink = () => demo!.sink;
@@ -118,17 +121,29 @@ function setup(options: { balance?: bigint } = {}) {
   const chain: DemoChain = {
     usdcAccount: AGENT_USDC,
     usdcBalance: async () => {
+      counts.balances++;
+      // The node answers with the balance it held when it was asked.
+      const asked = balance;
       await behave.holdBalance;
       if (behave.balanceFails) throw behave.balanceFails;
-      return balance;
+      return asked;
     },
     findClose: async (session) => {
       counts.lookups++;
+      await behave.holdLookup;
       if (behave.lookupFails) throw behave.lookupFails;
       return closes.get(session);
     },
   };
-  demo = createDemo({ address: "AgentWallet", gateUrl: "https://gate.example", tools, chain, now: () => clock, log: (line) => void logs.push(line) });
+  demo = createDemo({
+    address: "AgentWallet",
+    gateUrl: "https://gate.example",
+    tools,
+    chain,
+    now: () => clock,
+    log: (line) => void logs.push(line),
+    ...(options.stateReadCapMs === undefined ? {} : { stateReadCapMs: options.stateReadCapMs }),
+  });
   return {
     demo,
     sent,
@@ -564,5 +579,103 @@ describe("an action under way", () => {
     expect(await leaving).toEqual({ closed: [SESSION], failed: [] });
     expect(t.counts.closeAll).toBe(1);
     expect(t.counts.open).toBe(1);
+  });
+});
+
+describe("a chain that does not answer", () => {
+  /** A short cap, so that a hung read is given up on quickly. */
+  const CAP_MS = 40;
+  /** A promise that settles when `release` is called, and the call. */
+  const held = () => {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => (release = resolve));
+    return { promise, release };
+  };
+
+  it("answers a state read within the cap while the close lookup hangs, asks the chain once, and shows what it found at the next read", async () => {
+    const t = setup({ stateReadCapMs: CAP_MS });
+    await t.demo.launch();
+    t.advance(100_000);
+    const lookup = held();
+    t.behave.holdLookup = lookup.promise;
+    const started = Date.now();
+    expect((await t.demo.state()).session.state).toBe("open");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(t.counts.lookups).toBe(1);
+    // The lookup is still running: a read 4 s later gives up on it again, and starts no second one.
+    t.advance(CLOSE_LOOKUP_EVERY_MS);
+    expect((await t.demo.state()).session.state).toBe("open");
+    expect(t.counts.lookups).toBe(1);
+    // The chain answers while no one waits: the next read shows it, and the wallet's balance read after it.
+    t.closes.set(SESSION, { signature: CLOSE_TX, at: t.paidUntil() + 1, paidUntil: t.paidUntil(), paid: "100000", refunded: "0" });
+    t.setBalance(900_000n);
+    lookup.release();
+    await tick();
+    await tick();
+    const state = await t.demo.state();
+    expect(state.session).toMatchObject({ state: "expired", paid: "100000", refunded: "0", links: { close: explorerTx(CLOSE_TX) } });
+    expect(state.wallet.usdc).toBe("900000");
+    expect(t.counts.lookups).toBe(1);
+  }, 2_000);
+
+  it("answers a state read within the cap while the balance read hangs, reads it once, and shows it at the next read", async () => {
+    const t = setup({ stateReadCapMs: CAP_MS });
+    const read = held();
+    t.behave.holdBalance = read.promise;
+    const started = Date.now();
+    expect((await t.demo.state()).wallet).toEqual({ address: "AgentWallet" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // Asked for again, and still running: the next read does not start another.
+    expect((await t.demo.state({ refreshBalance: true })).wallet).toEqual({ address: "AgentWallet" });
+    expect(t.counts.balances).toBe(1);
+    read.release();
+    await tick();
+    expect((await t.demo.state()).wallet).toMatchObject({ usdc: "1000000", checkedAt: START_MS });
+    expect(t.counts.balances).toBe(1);
+  }, 2_000);
+
+  it("keeps a balance read that answers late from replacing a newer one", async () => {
+    const t = setup({ stateReadCapMs: CAP_MS });
+    await t.demo.launch();
+    const slow = held();
+    t.behave.holdBalance = slow.promise;
+    t.setBalance(1n);
+    await t.demo.state({ refreshBalance: true });
+    // An action ends and reads the balance again, which now answers at once.
+    t.behave.holdBalance = undefined;
+    t.setBalance(2n);
+    expect((await t.demo.close()).wallet.usdc).toBe("2");
+    slow.release();
+    await tick();
+    await tick();
+    expect((await t.demo.state()).wallet.usdc).toBe("2");
+  }, 2_000);
+
+  it("applies a close lookup that answers late to the session it was made for only", async () => {
+    const t = setup({ stateReadCapMs: CAP_MS });
+    await t.demo.launch();
+    t.advance(61_000);
+    t.closeCodes.set(SESSION, 4410);
+    const lookup = held();
+    t.behave.holdLookup = lookup.promise;
+    expect((await t.demo.state()).session.state).toBe("ended");
+    // A new session opens meanwhile.
+    t.behave.holdLookup = undefined;
+    t.behave.sessionId = FEE_PAYER;
+    await t.demo.launch();
+    t.closes.set(SESSION, { signature: CLOSE_TX, at: t.paidUntil() - 139, paidUntil: t.paidUntil() - 100, paid: "61000", refunded: "39000" });
+    lookup.release();
+    await tick();
+    await tick();
+    const state = await t.demo.state();
+    expect(state.session).toMatchObject({ state: "open", sessionId: FEE_PAYER });
+    expect(state.session.links.close).toBeUndefined();
+    expect(state.session.paid).toBeUndefined();
+  }, 2_000);
+
+  it("gives the owner time to answer a forwarded read", () => {
+    expect(STATE_READ_CAP_MS).toBe(5_000);
+    // Two RPC requests of up to 10 s each could not be waited for within a forwarded read's 15 s.
+    expect(STATE_READ_CAP_MS).toBeLessThan(READ_CALL_TIMEOUT_MS);
   });
 });
