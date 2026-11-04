@@ -6,7 +6,7 @@ import { openOffers } from "../payments.js";
 import { readUntil } from "../reads.js";
 import { readOpenedSession } from "../sessions.js";
 import { closeWith, tokenFor } from "../tokens.js";
-import type { ScenarioContext } from "../types.js";
+import type { DirectSession, ScenarioContext } from "../types.js";
 import { connectOnceSeen, expectOfferTerms } from "./35-adopted-session.js";
 
 /**
@@ -25,38 +25,43 @@ export async function otherMintRefused(context: ScenarioContext): Promise<void> 
   const signer = await direct.newKey();
   const seconds = sessionSeconds(context.target, 20);
   const account = await other.fund(signer.address, BigInt(offer.extra.rate) * BigInt(seconds));
-  // A close pays the seller in the session's mint, so the seller's account for it must exist.
-  await other.fund(address(offer.payTo), 0n);
-  const opened = await direct.open({
-    buyer: { signer, usdcAccount: account },
-    seconds,
-    mint: other.mint,
-    receiverAuthorizer: address(offer.extra.receiverAuthorizer),
-  });
-
+  let opened: DirectSession | undefined;
   let checked = false;
   try {
-    const stored = await readOpenedSession(context, opened.session);
+    // A close pays the seller in the session's mint, so the seller's account for it must exist.
+    await other.fund(address(offer.payTo), 0n);
+    opened = await direct.open({
+      buyer: { signer, usdcAccount: account },
+      seconds,
+      mint: other.mint,
+      receiverAuthorizer: address(offer.extra.receiverAuthorizer),
+    });
+    const session = opened.session;
+    const stored = await readOpenedSession(context, session);
     expectEqual(stored.mint, other.mint, "the session is in the second mint");
     expectOfferTerms(stored, offer);
-    const sign = (purpose: "connect" | "close") => tokenFor(signer, context.gateUrl, opened.session, purpose);
+    const sign = (purpose: "connect" | "close") => tokenFor(signer, context.gateUrl, session, purpose);
 
     // Each connect is tried again while the gate answers 404: its node can answer from behind right after the open.
-    const first = await connectOnceSeen(context, () => sign("connect"), opened.session);
+    const first = await connectOnceSeen(context, () => sign("connect"), session);
     expectEqual(first.status, 403, "a connect for a session in another mint is refused with 403");
-    const second = await connectOnceSeen(context, () => sign("connect"), opened.session);
+    const second = await connectOnceSeen(context, () => sign("connect"), session);
     expectEqual(second.status, 403, "a second connect is refused with 403 too");
     // The gate tracks a session it adopted, and would answer a close request for it.
-    expectEqual((await closeWith(context.gateUrl, opened.session, await sign("close"))).status, 404, "the gate has no such session to close: it adopted nothing");
-    const status = await fetch(`${context.gateUrl}/sessions/${opened.session}`);
+    expectEqual((await closeWith(context.gateUrl, session, await sign("close"))).status, 404, "the gate has no such session to close: it adopted nothing");
+    const status = await fetch(`${context.gateUrl}/sessions/${session}`);
     await status.body?.cancel();
     expectEqual(status.status, 404, "the gate reports no status for a session in another mint");
     checked = true;
   } finally {
-    // The gate never took the session up: its buyer closes it on the program, and gives back its account for the mint.
+    // The gate never took the session up: if it opened, its buyer closes it on the program. The buyer's account for the
+    // mint goes back whether or not the open or the close went through.
     const cleanUp = async () => {
-      await direct.close(opened, signer);
-      await other.reclaim(signer);
+      try {
+        if (opened) await direct.close(opened, signer);
+      } finally {
+        await other.reclaim(signer);
+      }
     };
     // A failed check is the scenario's result; a clean-up that fails after every check passed is one too.
     if (checked) await cleanUp();
