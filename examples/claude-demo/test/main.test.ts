@@ -27,13 +27,16 @@ const tool = <I, O>(run: (input: I) => Promise<O>): Tool<I, O> => ({ name: "fake
 
 /**
  * The session tools of one owner state: an open sends the request the real client sends (one POST to the gate's open
- * route, through the global `fetch`), and `closeAll` answers for the one session this state holds.
+ * route, through the global `fetch`), and `closeAll` closes the one session this state holds, as the client's does: once,
+ * and only after it was opened.
  */
 function fakeTools(sessionId: string): SessionTools {
+  let open = false;
   return {
     tools: {
       stint_open_session: tool(async () => {
         await fetch(`${GATE}/sessions?seconds=100`, { method: "POST" });
+        open = true;
         return { sessionId, paidUntil: Math.floor(Date.now() / 1000) + 100, cost: "100000", remainingBudget: "0" };
       }),
       stint_session_status: tool(async () => {
@@ -49,7 +52,11 @@ function fakeTools(sessionId: string): SessionTools {
       }),
     },
     closeCode: () => undefined,
-    closeAll: async () => ({ closed: [sessionId], failed: [] }),
+    closeAll: async () => {
+      if (!open) return { closed: [], failed: [] };
+      open = false;
+      return { closed: [sessionId], failed: [] };
+    },
   };
 }
 
@@ -87,7 +94,7 @@ describe("what a copy of the server builds when it becomes the owner", () => {
 
   const record = (line: string) => void lines.push(line);
   const routerOn = async (side: ReturnType<typeof createOwnerSide>): Promise<Router> => {
-    const router = await createRouter({ dir: config.dir, readOnly: READ_ONLY, log: record, becomeOwner: side.becomeOwner });
+    const router = await createRouter({ dir: config.dir, readOnly: READ_ONLY, log: record, becomeOwner: side.becomeOwner, onStepDown: side.dropped });
     routers.push(router);
     return router;
   };
@@ -169,7 +176,7 @@ describe("what a copy of the server builds when it becomes the owner", () => {
       }
     });
 
-    it("are those of the state a router dropped when owner.json named another copy, and of the one that replaced it", async () => {
+    it("are not those of a state the router dropped when owner.json named another copy: its session is closed as it is dropped", async () => {
       const side = createOwnerSide(config, record, makeTools);
       const router = await routerOn(side);
       await router.call(TOOL.launch, {});
@@ -178,11 +185,35 @@ describe("what a copy of the server builds when it becomes the owner", () => {
       await router.call(TOOL.demo, {});
       expect(built).toBe(2);
       expect(lines.join("\n")).toMatch(/no longer names this copy/);
+      // No one can reach the dropped state's session any more: it is closed now, not when the process leaves.
+      await vi.waitFor(() => expect(lines.join("\n")).toContain(`closed session ${SESSION} of a state this copy dropped`));
       await router.call(TOOL.launch, {});
       const outcome = await side.shutdown();
-      expect(outcome.closed.sort()).toEqual([SESSION, SELLER].sort());
+      expect(outcome.closed).toEqual([SELLER]);
       await router.close();
       expect(existsSync(join(config.dir, OWNER_FILE))).toBe(false);
+    });
+
+    it("are those of a dropped state whose close failed when it was dropped, which the shutdown tries again", async () => {
+      let attempts = 0;
+      const side = createOwnerSide(config, record, () => {
+        const tools = makeTools();
+        const closeAll = tools.closeAll;
+        return {
+          ...tools,
+          closeAll: async () => {
+            attempts++;
+            return attempts === 1 ? { closed: [], failed: [{ sessionId: SESSION, error: "the gate did not answer" }] } : closeAll();
+          },
+        };
+      });
+      const router = await routerOn(side);
+      await router.call(TOOL.launch, {});
+      writeFileSync(join(config.dir, OWNER_FILE), JSON.stringify({ pid: 4242, port: await deadPort(), token: "b".repeat(64) }));
+      await router.call(TOOL.demo, {});
+      await vi.waitFor(() => expect(lines.join("\n")).toContain(`could not close session ${SESSION} of a state this copy dropped: the gate did not answer`));
+      const outcome = await side.shutdown();
+      expect(outcome.closed).toEqual([SESSION]);
     });
 
     it("are closed for a state that is built after the shutdown began, which opens nothing", async () => {

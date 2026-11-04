@@ -196,8 +196,10 @@ The code differs from the code this plan shows in these ways, each a behaviour o
   is ignored.
 - **One `fetch` wrapper per process, and every built state is closed at shutdown.** The exchange recorder is installed
   on the `fetch` the process had at the start, so that a later state's recorder replaces an earlier one's and never
-  wraps it. On the way out, the sessions of every state the copy built are closed, those of states it dropped included,
-  and a state built while it leaves opens nothing.
+  wraps it. A state the router drops (`owner.json` names another copy) has its session closed at once, through the
+  router's `onStepDown`. On the way out, the sessions of every state the copy built are closed, those of states it
+  dropped included (a close that failed when the state was dropped is tried again), and a state built while it leaves
+  opens nothing.
 
 ## What this plan builds, and what it leaves
 

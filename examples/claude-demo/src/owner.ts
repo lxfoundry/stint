@@ -58,6 +58,11 @@ export interface RouterOptions {
   /** Builds the handler that holds the state, once this copy is the owner. Called once per election this copy wins. */
   readonly becomeOwner: () => Promise<CallHandler>;
   /**
+   * Told of the state this copy drops when `owner.json` names another copy (what `becomeOwner` gave, or is still
+   * building), once per state: no call reaches that state any more, so whatever it holds open is for its owner to end.
+   */
+  readonly onStepDown?: (dropped: Promise<CallHandler>) => void;
+  /**
    * The tools that only read: a forwarder asks again for one whose owner went away during it, and gives it the shorter
    * timeout. Any other tool is never sent twice once it may have run. Default: none.
    */
@@ -352,6 +357,7 @@ export async function createRouter(options: RouterOptions): Promise<Router> {
   function stepDown(): void {
     log(`${path} no longer names this copy: it stops serving calls`);
     const old = endpoint;
+    const dropped = handler;
     endpoint = undefined;
     handler = undefined;
     ours = undefined;
@@ -361,6 +367,7 @@ export async function createRouter(options: RouterOptions): Promise<Router> {
       old.retire();
       retired.push(old);
     }
+    if (dropped) options.onStepDown?.(dropped);
   }
 
   const names = (read: Read, term: OwnerRecord) => read.kind === "record" && read.record.pid === term.pid && read.record.token === term.token;

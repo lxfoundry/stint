@@ -36,7 +36,15 @@ const defaultTools: MakeTools = (signer, policy) => createSessionTools(createSti
 export interface OwnerSide {
   /** What the router calls each time this copy wins the election: loads the key, builds a state, and returns its handler. */
   becomeOwner(): Promise<CallHandler>;
-  /** Closes the session of every state this copy has built; nothing opens afterwards, in any of them. */
+  /**
+   * What the router calls when it drops a state: closes that state's session at once, since no call reaches it any more
+   * and a connection left open would keep the gate's idle close from refunding it. What it closed, or could not, is logged.
+   */
+  dropped(handler: Promise<CallHandler>): void;
+  /**
+   * Closes the session of every state this copy has built, those it dropped included (a close that failed when the state
+   * was dropped is tried again; one that succeeded is not repeated); nothing opens afterwards, in any of them.
+   */
   shutdown(): Promise<CloseAllOutput>;
 }
 
@@ -47,11 +55,14 @@ export interface OwnerSide {
  *
  * Two things outlive a state. The recorder is installed on the `fetch` the process had at the start, so a second state's
  * recorder replaces the first's and never wraps it (the client calls the global `fetch`, so only one recorder can be
- * current). And the session of a dropped state stays open until it is closed, so every state is kept for `shutdown`.
+ * current). And a dropped state's session is closed when the state is dropped, but a close can fail, so every state is
+ * kept for `shutdown`, which tries again.
  */
 export function createOwnerSide(config: DemoConfig, say: (line: string) => void, makeTools: MakeTools = defaultTools): OwnerSide {
   const original = globalThis.fetch;
   const built: Demo[] = [];
+  /** The state behind each handler `becomeOwner` gave, so that the router can name the one it drops. */
+  const states = new Map<CallHandler, Demo>();
   let leaving = false;
   return {
     becomeOwner: async () => {
@@ -66,7 +77,23 @@ export function createOwnerSide(config: DemoConfig, say: (line: string) => void,
       built.push(created);
       // A state built while the copy is on its way out (a call that reached the router before it closed) opens nothing.
       if (leaving) await created.shutdown();
-      return createCallHandler(created, say);
+      const handler = createCallHandler(created, say);
+      states.set(handler, created);
+      return handler;
+    },
+    dropped(handler) {
+      void (async () => {
+        let demo: Demo | undefined;
+        try {
+          demo = states.get(await handler);
+        } catch {
+          return; // A state that failed to build opened nothing.
+        }
+        if (!demo) return;
+        const outcome = await demo.shutdown();
+        for (const sessionId of outcome.closed) say(`closed session ${sessionId} of a state this copy dropped`);
+        for (const { sessionId, error } of outcome.failed) say(`could not close session ${sessionId} of a state this copy dropped: ${error}`);
+      })().catch((error: unknown) => say(`closing a dropped state failed: ${error instanceof Error ? error.message : String(error)}`));
     },
     async shutdown() {
       leaving = true;
@@ -80,7 +107,7 @@ async function main(panelHtml: () => Promise<string>): Promise<void> {
   const config = loadConfig(process.env);
   ensureDemoFolder(config.dir, log);
   const side = createOwnerSide(config, log);
-  const router = await createRouter({ dir: config.dir, readOnly: READ_ONLY, log, becomeOwner: side.becomeOwner });
+  const router = await createRouter({ dir: config.dir, readOnly: READ_ONLY, log, becomeOwner: side.becomeOwner, onStepDown: side.dropped });
   log(router.role() === "owner" ? "this copy holds the demo's state" : "forwarding to the copy that holds the demo's state");
   // One line per call in a copy that forwards it too, but for the panel's state reads, which come every 2 s.
   const call: CallHandler = async (name, args) => {

@@ -431,11 +431,12 @@ describe("which copy owns the demo's state", () => {
 
   describe("a copy that is no longer the owner", () => {
     /** An owner in `home`, a rival owner in `home/rival`, and then the rival's record in the place of the owner's. */
-    async function replacedOwner(log?: (line: string) => void) {
+    async function replacedOwner(log?: (line: string) => void, onStepDown?: (dropped: Promise<CallHandler>) => void) {
       const ran: string[] = [];
       const deposed = await createRouter({
         dir: home,
         log,
+        onStepDown,
         becomeOwner: async () => async (name, args) => {
           ran.push(name);
           return answering("deposed")(name, args);
@@ -464,6 +465,19 @@ describe("which copy owns the demo's state", () => {
       // The calls after it go straight to the rival.
       expect((await deposed.call("stint_demo_state", {})).structuredContent).toMatchObject({ who: "rival" });
       expect(ran).toEqual([]);
+    });
+
+    it("hands the state it drops to onStepDown, once, as it steps down", async () => {
+      const dropped: CallHandler[] = [];
+      const { deposed, ran } = await replacedOwner(undefined, (handler) => void handler.then((built) => dropped.push(built)));
+      await deposed.call("stint_demo_launch", {});
+      await vi.waitFor(() => expect(dropped).toHaveLength(1));
+      // It is the state the deposed copy built: running it runs that copy's tool.
+      await dropped[0]!("stint_demo", {});
+      expect(ran).toEqual(["stint_demo"]);
+      await deposed.call("stint_demo_state", {});
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(dropped).toHaveLength(1);
     });
 
     it("answers a call that was forwarded to it with 409, and runs no tool", async () => {
