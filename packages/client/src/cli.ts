@@ -14,7 +14,7 @@ import {
   type TransactionSigner,
 } from "@solana/kit";
 import { runAllowanceCommand } from "./allowance-command.js";
-import { createNodeRpc, isNodeUrl } from "./node.js";
+import { createNodeRpc, hideNodeUrl, isNodeUrl } from "./node.js";
 
 /** Builds, signs and sends a version 0 transaction (spec §3.5), then waits for `confirmed`, for up to 60 s. */
 async function send(rpc: Rpc<SolanaRpcApi>, payer: TransactionSigner, instructions: readonly Instruction[]): Promise<string> {
@@ -57,6 +57,6 @@ process.exitCode = await runAllowanceCommand(rest, {
   rpc,
   readKeyFile: (path) => readFileSync(path, "utf8"),
   send: (payer, instructions) => send(rpc, payer, instructions),
-  // Problems name no URL: an RPC URL may carry an API key.
-  print: (line) => console.log(line),
+  // Every line goes through `hideNodeUrl`, so that none of the URL's user info, path, query or fragment is printed.
+  print: (line) => console.log(hideNodeUrl(rpcUrl, line)),
 });
