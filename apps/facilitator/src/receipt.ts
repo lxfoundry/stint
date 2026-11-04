@@ -6,15 +6,12 @@ import {
   parseTransferInstruction,
 } from "@solana-program/token";
 import { AccountRole, getBase58Encoder, type Address, type ReadonlyUint8Array } from "@solana/kit";
-import type { InspectedTransaction } from "@lxfoundry/stint-x402";
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-const asIndex = (value: unknown) => (typeof value === "number" || typeof value === "bigint" ? Number(value) : undefined);
+import { UNSUMMED_TOKEN_INSTRUCTIONS, type InspectedTransaction } from "@lxfoundry/stint-x402";
+import { asIndex, isRecord, stringsIn } from "./payers.js";
 
 /**
  * A token transfer's source, destination and amount; the accounts of a token instruction that changes a balance other
- * than by a transfer (a mint, a burn); undefined for any other token instruction.
+ * than by a transfer (a mint, a burn) or whose kind cannot be told; undefined for any other token instruction.
  */
 type Movement =
   | { readonly source: string; readonly destination: string; readonly amount: bigint }
@@ -22,23 +19,18 @@ type Movement =
   | undefined;
 
 /**
- * Token instructions that change a balance other than by a transfer, which a sum of transfers cannot account for: the set
- * that the scheme's `tokenTransferChanges` (`packages/x402/src/chain.ts`) refuses. A node parses only some of them.
+ * The names under which a node reports the instructions of `UNSUMMED_TOKEN_INSTRUCTIONS` in its parsed form. It parses
+ * only some of them: the others are named here as well, so that one it does parse is refused all the same.
  */
-const UNSUMMED: ReadonlySet<TokenInstruction> = new Set([
-  TokenInstruction.MintTo,
-  TokenInstruction.MintToChecked,
-  TokenInstruction.Burn,
-  TokenInstruction.BurnChecked,
-  TokenInstruction.SyncNative,
-  TokenInstruction.UnwrapLamports,
-  TokenInstruction.Batch,
+const UNSUMMED_PARSED: ReadonlySet<string> = new Set([
+  "mintTo",
+  "mintToChecked",
+  "burn",
+  "burnChecked",
+  "syncNative",
+  "unwrapLamports",
+  "batch",
 ]);
-const UNSUMMED_PARSED: ReadonlySet<string> = new Set(["mintTo", "mintToChecked", "burn", "burnChecked", "syncNative"]);
-
-/** Every string anywhere in a parsed instruction's `info`: a superset of the addresses it names. */
-const stringsIn = (value: unknown): string[] =>
-  typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(stringsIn) : isRecord(value) ? Object.values(value).flatMap(stringsIn) : [];
 
 function compiledMovement(accounts: readonly Address[], data: ReadonlyUint8Array): Movement {
   const ix = {
@@ -50,7 +42,8 @@ function compiledMovement(accounts: readonly Address[], data: ReadonlyUint8Array
   try {
     type = identifyTokenInstruction(ix);
   } catch {
-    return undefined;
+    // What it does is unknown: it may change the vault's balance, so it is treated as an instruction that does.
+    return { unsummed: accounts };
   }
   if (type === TokenInstruction.Transfer) {
     const t = parseTransferInstruction(ix);
@@ -60,14 +53,16 @@ function compiledMovement(accounts: readonly Address[], data: ReadonlyUint8Array
     const t = parseTransferCheckedInstruction(ix);
     return { source: t.accounts.source.address, destination: t.accounts.destination.address, amount: t.data.amount };
   }
-  return UNSUMMED.has(type) ? { unsummed: accounts } : undefined;
+  return UNSUMMED_TOKEN_INSTRUCTIONS.has(type) ? { unsummed: accounts } : undefined;
 }
 
 function parsedMovement(parsed: unknown): Movement {
-  if (!isRecord(parsed) || !isRecord(parsed.info)) throw new Error("The node returned an unreadable parsed token instruction");
+  if (!isRecord(parsed) || typeof parsed.type !== "string" || !isRecord(parsed.info)) {
+    throw new Error("The node returned an unreadable parsed token instruction");
+  }
   const { type, info } = parsed;
-  const amount = type === "transfer" ? info.amount : type === "transferChecked" && isRecord(info.tokenAmount) ? info.tokenAmount.amount : undefined;
-  if (amount === undefined) return typeof type === "string" && UNSUMMED_PARSED.has(type) ? { unsummed: stringsIn(info) } : undefined;
+  if (type !== "transfer" && type !== "transferChecked") return UNSUMMED_PARSED.has(type) ? { unsummed: stringsIn(info) } : undefined;
+  const amount = type === "transfer" ? info.amount : isRecord(info.tokenAmount) ? info.tokenAmount.amount : undefined;
   if (typeof info.source !== "string" || typeof info.destination !== "string" || typeof amount !== "string") {
     throw new Error("The node returned an unreadable token transfer");
   }
@@ -78,8 +73,8 @@ function parsedMovement(parsed: unknown): Movement {
  * What the simulated transaction would move into `vault` (spec §5.4, §10.2): its SPL Token transfers into the vault, less
  * those out of it, its own and those its programs invoke. A pull from an allowance moves its tokens in an inner
  * instruction, which the static checks cannot see. Inner account indices refer to the static keys: there are no lookup
- * tables (spec §3.5). Throws on an inner instruction it cannot read, as the payer check does, and on a mint or a burn
- * that names the vault, whose effect a sum of transfers cannot tell.
+ * tables (spec §3.5). Throws on an inner instruction it cannot read, as the payer check does, and on a mint, a burn or
+ * a token instruction of a kind it cannot identify that names the vault, whose effect a sum of transfers cannot tell.
  */
 export function vaultReceipt(tx: InspectedTransaction, innerInstructions: unknown, vault: Address): bigint {
   if (!Array.isArray(innerInstructions)) throw new Error("The node's simulation returned no inner instructions");

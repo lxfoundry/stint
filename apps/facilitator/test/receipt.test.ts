@@ -131,6 +131,69 @@ describe("vaultReceipt (spec §5.4, §10.2)", () => {
     expect(() => vaultReceipt(tx, inner, vault)).toThrow(/other than by a transfer/);
   });
 
+  /** The inner instructions of a node that parses them, one token instruction among them. */
+  const parsedInner = (parsed: unknown) => [{ index: 1, instructions: [{ program: "spl-token", programId: TOKEN_PROGRAM_ADDRESS, parsed }] }];
+
+  it("throws on a parsed transfer out of the vault that has no amount", async () => {
+    const { tx, source, vault } = await allowanceOpen();
+    const inner = [
+      ...parsedInner({ type: "transferChecked", info: { source, destination: vault, mint: MINT, tokenAmount: { amount: "30000", decimals: 6 } } }),
+      ...parsedInner({ type: "transfer", info: { source: vault, destination: source } }),
+    ];
+    expect(() => vaultReceipt(tx, inner, vault)).toThrow(/unreadable/);
+  });
+
+  it("throws on a parsed transferChecked whose token amount is not an object", async () => {
+    const { tx, source, vault } = await allowanceOpen();
+    const inner = [
+      ...parsedInner({ type: "transferChecked", info: { source, destination: vault, mint: MINT, tokenAmount: { amount: "30000", decimals: 6 } } }),
+      ...parsedInner({ type: "transferChecked", info: { source: vault, destination: source, mint: MINT, tokenAmount: "5" } }),
+    ];
+    expect(() => vaultReceipt(tx, inner, vault)).toThrow(/unreadable/);
+  });
+
+  it("throws on a parsed token instruction that has no type", async () => {
+    const { tx, source, vault } = await allowanceOpen();
+    expect(() => vaultReceipt(tx, parsedInner({ info: { source: vault, destination: source, amount: "5" } }), vault)).toThrow(/unreadable/);
+    expect(() => vaultReceipt(tx, parsedInner({ type: 7, info: { source: vault, destination: source, amount: "5" } }), vault)).toThrow(/unreadable/);
+  });
+
+  it("throws on a token instruction of a kind it cannot identify that names the vault", async () => {
+    const { tx, authority, vault } = await allowanceOpen();
+    const index = (key: Address) => tx.accounts.indexOf(key);
+    // No SPL Token instruction has the discriminator 100 (255 is `Batch`).
+    const inner = [
+      {
+        index: 1,
+        instructions: [
+          { programIdIndex: index(TOKEN_PROGRAM_ADDRESS), accounts: [index(vault), index(authority)], data: getBase58Decoder().decode(Uint8Array.of(100)) },
+        ],
+      },
+    ];
+    expect(() => vaultReceipt(tx, inner, vault)).toThrow(/other than by a transfer/);
+  });
+
+  it("ignores a token instruction of a kind it cannot identify that does not name the vault", async () => {
+    const { tx, authority, source, vault } = await allowanceOpen();
+    const index = (key: Address) => tx.accounts.indexOf(key);
+    const inner = [
+      {
+        index: 1,
+        instructions: [
+          { programIdIndex: index(TOKEN_PROGRAM_ADDRESS), accounts: [index(source), index(authority)], data: getBase58Decoder().decode(Uint8Array.of(100)) },
+        ],
+      },
+    ];
+    expect(vaultReceipt(tx, inner, vault)).toBe(0n);
+  });
+
+  it("throws on a parsed unwrapLamports or batch that names the vault", async () => {
+    const { tx, source, vault } = await allowanceOpen();
+    for (const type of ["unwrapLamports", "batch"]) {
+      expect(() => vaultReceipt(tx, parsedInner({ type, info: { source: vault, destination: source } }), vault), type).toThrow(/other than by a transfer/);
+    }
+  });
+
   it("throws on inner instructions it cannot read", async () => {
     const { tx, vault } = await allowanceOpen();
     expect(() => vaultReceipt(tx, "nope", vault)).toThrow();

@@ -208,11 +208,11 @@ export async function simulate(
     const message = `${json(value.err)} ${last}`.trim();
     // Only `top_up` raises it, from `paid_until` on (spec §4.3): the chain's clock had reached the end, though the
     // facilitator's had not.
-    if (programError(tx, value.err) === STINT_ERROR__SESSION_EXPIRED) return refuse("session_expired", message);
+    if (customErrorOf(tx, value.err, STINT_PROGRAM_ADDRESS) === STINT_ERROR__SESSION_EXPIRED) return refuse("session_expired", message);
     // The chain has processed this very message (S16): the payment may have landed, and this facilitator holds no record
     // of it, or it would not be verifying it (spec §5.5, "Already processed, with no record").
     if (value.err === "AlreadyProcessed") return refuse("already_processed", message);
-    const allowance = ALLOWANCE_REFUSALS.get(allowanceError(tx, value.err) ?? -1);
+    const allowance = ALLOWANCE_REFUSALS.get(customErrorOf(tx, value.err, SUBSCRIPTIONS_PROGRAM_ADDRESS) ?? -1);
     if (allowance) return refuse("simulation_failed", `${allowance}: ${message}`);
     return refuse("simulation_failed", message);
   }
@@ -230,14 +230,14 @@ export async function simulate(
 }
 
 /**
- * The custom error code reported against one of the program's own instructions: its own error, or that of a program it
- * invoked.
+ * The custom error code reported against one of `program`'s instructions in the transaction: its own error, or that of a
+ * program it invoked.
  */
-function programError(tx: InspectedTransaction, err: TransactionError): number | undefined {
+function customErrorOf(tx: InspectedTransaction, err: TransactionError, program: Address): number | undefined {
   if (typeof err !== "object" || !("InstructionError" in err)) return undefined;
   // Kit's RPC returns the index and the code as bigints, though `TransactionError` types them as numbers.
   const [index, error] = err.InstructionError;
-  if (tx.instructions[Number(index)]?.programAddress !== STINT_PROGRAM_ADDRESS) return undefined;
+  if (tx.instructions[Number(index)]?.programAddress !== program) return undefined;
   return typeof error === "object" && "Custom" in error ? Number(error.Custom) : undefined;
 }
 
@@ -247,12 +247,3 @@ const ALLOWANCE_REFUSALS: ReadonlyMap<number, string> = new Map([
   [SUBSCRIPTIONS_ERROR__DELEGATION_EXPIRED, "the allowance has expired"],
   [SUBSCRIPTIONS_ERROR__DELEGATION_NOT_STARTED, "the allowance has not started yet"],
 ]);
-
-/** The custom error code reported against an allowance pull in the transaction, if that is where it failed. */
-function allowanceError(tx: InspectedTransaction, err: TransactionError): number | undefined {
-  if (typeof err !== "object" || !("InstructionError" in err)) return undefined;
-  // Kit's RPC returns the index and the code as bigints, though `TransactionError` types them as numbers.
-  const [index, error] = err.InstructionError;
-  if (tx.instructions[Number(index)]?.programAddress !== SUBSCRIPTIONS_PROGRAM_ADDRESS) return undefined;
-  return typeof error === "object" && "Custom" in error ? Number(error.Custom) : undefined;
-}
