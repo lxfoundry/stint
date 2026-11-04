@@ -82,13 +82,15 @@ function setup(options: { balance?: bigint; stateReadCapMs?: number; launchSecon
       stint_open_session: tool<OpenInput, OpenOutput>("stint_open_session", async (input) => {
         counts.open++;
         opened.push(input.seconds);
-        sink().row({ kind: "request", at: clock, label: "POST /sessions?seconds=100" });
+        // What the open buys: the seconds asked for, else the seller's 100 s, at the offer's rate of 1000 a second.
+        const seconds = input.seconds ?? 100;
+        sink().row({ kind: "request", at: clock, label: `POST /sessions?seconds=${seconds}` });
         if (behave.openFails) throw behave.openFails;
         if (behave.offer !== null) sink().offer("open", behave.offer ?? offer("open"));
         sink().settled("open", behave.openTx);
-        paidUntil = Math.floor(clock / 1000) + 100;
+        paidUntil = Math.floor(clock / 1000) + seconds;
         await behave.hold;
-        return { sessionId: behave.sessionId ?? SESSION, paidUntil, cost: "100000", remainingBudget: "500000" };
+        return { sessionId: behave.sessionId ?? SESSION, paidUntil, cost: String(seconds * 1000), remainingBudget: "500000" };
       }),
       stint_session_status: tool<StatusInput, StatusOutput>("stint_session_status", async () => {
         throw new Error("not used by the demo");
@@ -193,8 +195,9 @@ describe("the demo's session", () => {
     const standard = setup();
     await standard.demo.launch();
     const short = setup({ launchSeconds: 20 });
-    await short.demo.launch();
+    const state = await short.demo.launch();
     expect([standard.opened, short.opened]).toEqual([[100], [20]]);
+    expect(state.session).toMatchObject({ deposited: "20000", startedAt: short.paidUntil() - 20 });
   });
 
   it("refuses a launch the wallet cannot pay for, and a second one while a session runs", async () => {
