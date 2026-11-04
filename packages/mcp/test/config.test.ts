@@ -123,8 +123,8 @@ describe("loadConfig", () => {
   it("refuses a malformed allowance owner, a nonce without an owner, and an RPC URL that is not an http(s) URL that parses, without quoting the URL", async () => {
     expect(await problemsOf({ ...required, STINT_ALLOWANCE_OWNER: "nope" })).toContainEqual(expect.stringMatching(/STINT_ALLOWANCE_OWNER/));
     expect(await problemsOf({ ...required, STINT_ALLOWANCE_NONCE: "1" })).toContainEqual(expect.stringMatching(/needs STINT_ALLOWANCE_OWNER/));
-    // Another scheme, a space in the host, no scheme: fetch would refuse the last two with a message that quotes them.
-    for (const url of ["ftp://host/secret-key", "https://node example/?api-key=secret-key", "node.example/?api-key=secret-key"]) {
+    // Another scheme, a space in the host, no scheme, user info: fetch would refuse the last three with a message that quotes them.
+    for (const url of ["ftp://host/secret-key", "https://node example/?api-key=secret-key", "node.example/?api-key=secret-key", "https://user:secret-key@node.example/"]) {
       const problems = await problemsOf({ ...required, STINT_RPC_URL: url });
       expect(problems).toContainEqual(expect.stringMatching(/STINT_RPC_URL/));
       expect(problems.join("\n")).not.toContain("secret-key");

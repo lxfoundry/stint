@@ -2,13 +2,14 @@ import { createDefaultRpcTransport, createSolanaRpcFromTransport, type Rpc, type
 import { redactUrls } from "@lxfoundry/stint-x402";
 
 /**
- * Whether `value` can be a node's URL (spec §9.1): an http or https URL that `URL` parses, as `fetch` will. A value with
- * a space in its host, no scheme or another scheme cannot. A problem never quotes the value: an RPC URL may carry an API
- * key.
+ * Whether `value` can be a node's URL (spec §9.1): an http or https URL that `URL` parses, as `fetch` will, with no user
+ * name or password, which `fetch` refuses. A value with a space in its host, no scheme, another scheme or user info
+ * cannot. A problem never quotes the value: an RPC URL may carry an API key.
  */
 export function isNodeUrl(value: string): boolean {
   try {
-    return /^https?:$/.test(new URL(value).protocol);
+    const url = new URL(value);
+    return /^https?:$/.test(url.protocol) && url.username === "" && url.password === "";
   } catch {
     return false;
   }
@@ -54,9 +55,26 @@ export function hideNodeUrl(url: string, text: string): string {
 }
 
 /**
+ * `error` with its message and its stack passed through `hideNodeUrl`, and otherwise as it was: the same object, class
+ * and name, so that a caller can tell a time-out (`TimeoutError`) from an abort. An error with nothing to hide is
+ * left alone. The properties are defined, not assigned: a `DOMException`, which is what `fetch` aborts with, has a
+ * `message` that is a getter only.
+ */
+function hideInError(url: string, error: Error): Error {
+  for (const key of ["message", "stack"] as const) {
+    const value = error[key];
+    if (typeof value !== "string") continue;
+    const hidden = hideNodeUrl(url, value);
+    if (hidden !== value) Object.defineProperty(error, key, { value: hidden, writable: true, configurable: true, enumerable: false });
+  }
+  return error;
+}
+
+/**
  * A client of the node at `url` (spec §9.1) whose errors never carry what may be the URL's key. What the node answers in
  * a JSON-RPC error and what the transport throws go through `hideNodeUrl` before any caller sees them: a node can repeat
- * the key it was given ("invalid api key …"), and a failed request can quote its URL. `transport` is for tests.
+ * the key it was given ("invalid api key …"), and a failed request can quote its URL. What the transport throws keeps
+ * its class and its name. `transport` is for tests.
  */
 export function createNodeRpc(url: string, transport: RpcTransport = createDefaultRpcTransport({ url })): Rpc<SolanaRpcApi> {
   const hiding = (async (request: Parameters<RpcTransport>[0]) => {
@@ -65,9 +83,7 @@ export function createNodeRpc(url: string, transport: RpcTransport = createDefau
       response = await transport(request);
     } catch (error) {
       if (!(error instanceof Error)) throw new Error(hideNodeUrl(url, String(error)));
-      error.message = hideNodeUrl(url, error.message);
-      if (error.stack !== undefined) error.stack = hideNodeUrl(url, error.stack);
-      throw error;
+      throw hideInError(url, error);
     }
     const answered = (response as { error?: { message?: unknown } } | null)?.error;
     if (answered && typeof answered.message === "string") answered.message = hideNodeUrl(url, answered.message);

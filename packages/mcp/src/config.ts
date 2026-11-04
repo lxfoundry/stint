@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
-import { createKeyPairSignerFromBytes, isAddress, type Address, type KeyPairSigner } from "@solana/kit";
-import { isNodeUrl, type Asset, type Policy } from "@lxfoundry/stint-client";
+import { isAddress, type Address, type KeyPairSigner } from "@solana/kit";
+import { KeyFileError, isNodeUrl, parseKeyFile, type Asset, type Policy } from "@lxfoundry/stint-client";
 
 /** Every problem with the environment, so that one run of the server shows them all. */
 export class ConfigError extends Error {
@@ -86,16 +86,14 @@ export async function loadConfig(
   if (keyPath !== undefined) {
     let failure: string | undefined;
     try {
-      const bytes = JSON.parse(readKeyFile(keyPath)) as unknown;
-      if (Array.isArray(bytes) && bytes.length === 64 && bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
-        signer = await createKeyPairSignerFromBytes(Uint8Array.from(bytes as number[]));
-      } else {
-        failure = "a keypair file holds a JSON array of 64 bytes";
-      }
-    } catch {
-      // Nothing is taken from the error: a parser's message quotes the start of the text it was given,
+      signer = await parseKeyFile(readKeyFile(keyPath));
+    } catch (error) {
+      // Nothing is taken from the error but the reason: a parser's message quotes the start of the text it was given,
       // and the contents of a key file never reach a log.
-      failure = "the file cannot be read, is not JSON, or its public half is not its seed's";
+      failure =
+        error instanceof KeyFileError && error.reason === "shape"
+          ? "a keypair file holds a JSON array of 64 bytes"
+          : "the file cannot be read, is not JSON, or its public half is not its seed's";
     }
     if (failure !== undefined) problems.push(`STINT_KEYPAIR_PATH ${keyPath}: ${failure}`);
   }

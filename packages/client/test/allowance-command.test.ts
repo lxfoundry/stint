@@ -1,4 +1,12 @@
-import { createKeyPairSignerFromPrivateKeyBytes, generateKeyPairSigner, getAddressEncoder, type Instruction, type Rpc, type SolanaRpcApi } from "@solana/kit";
+import {
+  createKeyPairSignerFromPrivateKeyBytes,
+  generateKeyPairSigner,
+  getAddressEncoder,
+  getSolanaErrorFromJsonRpcError,
+  type Instruction,
+  type Rpc,
+  type SolanaRpcApi,
+} from "@solana/kit";
 import { describe, expect, it } from "vitest";
 import { SubscriptionsInstruction, identifySubscriptionsInstruction } from "@lxfoundry/stint-subscriptions-client";
 import { DEVNET_GENESIS_HASH, runAllowanceCommand } from "../src/allowance-command.js";
@@ -102,5 +110,74 @@ describe("stint allowance (spec §10.1)", () => {
       [SubscriptionsInstruction.RevokeDelegation],
       [SubscriptionsInstruction.RevokeDelegation, SubscriptionsInstruction.CloseSubscriptionAuthority],
     ]);
+  });
+
+  it("refuses a key file that is not JSON, or whose bytes are not all from 0 to 255, without printing any of it", async () => {
+    const owner = await ownerFile();
+    const agent = (await generateKeyPairSigner()).address;
+    // A Uint8Array wraps 256 to 0, so this file would read as a valid keypair if its bytes were coerced.
+    const bytes = JSON.parse(owner.json) as number[];
+    const wrapped = JSON.stringify([bytes[0]! + 256, ...bytes.slice(1)]);
+    for (const contents of [wrapped, "MARKER-hunter2 is not JSON"]) {
+      const h = harness();
+      const code = await runAllowanceCommand(["revoke", "--keypair", "/k/owner.json", "--agent", agent], h.deps(contents));
+      expect(code).toBe(1);
+      expect(h.sent).toHaveLength(0);
+      const out = h.printed.join("\n");
+      expect(out).toMatch(/--keypair \/k\/owner\.json/);
+      expect(out).not.toContain(contents);
+      expect(out).not.toMatch(/MARKER|hunter2/);
+    }
+  });
+
+  it("prints why a transaction was refused: the program's error in its cause, and the logs of its simulation", async () => {
+    const owner = await ownerFile();
+    const agent = (await generateKeyPairSigner()).address;
+    const refused = getSolanaErrorFromJsonRpcError({
+      code: -32002,
+      message: "Transaction simulation failed: Error processing Instruction 1: custom program error: 0x190",
+      data: {
+        accounts: null,
+        err: { InstructionError: [1, { Custom: 400 }] },
+        innerInstructions: null,
+        loadedAccountsDataSize: null,
+        logs: ["Program De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44 invoke [1]", "Program De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44 failed: custom program error: 0x190"],
+        replacementBlockhash: null,
+        returnData: null,
+        unitsConsumed: 1_200n,
+      },
+    });
+    const h = harness();
+    const code = await runAllowanceCommand(
+      ["grant", "--keypair", "/k/owner.json", "--agent", agent, "--per-period", "1", "--period", "60", "--expires", "2030-01-01T00:00:00Z"],
+      { ...h.deps(owner.json), send: async () => { throw refused; } },
+    );
+    expect(code).toBe(1);
+    const out = h.printed.join("\n");
+    expect(out).toContain(refused.message);
+    expect(out).toContain((refused.cause as Error).message);
+    expect(out).toContain("failed: custom program error: 0x190");
+  });
+
+  it("reduces every URL in what it prints of a failure: its message, its causes and its logs", async () => {
+    const owner = await ownerFile();
+    const agent = (await generateKeyPairSigner()).address;
+    const failed = Object.assign(new Error("send failed", { cause: new Error("fetch failed", { cause: new Error("connect to https://node.example/?api-key=SECRET refused") }) }), {
+      context: { logs: ["Program log: via https://node.example/v2/SECRET"] },
+    });
+    const h = harness();
+    const code = await runAllowanceCommand(["revoke", "--keypair", "/k/owner.json", "--agent", agent], {
+      ...h.deps(owner.json),
+      send: async () => {
+        throw failed;
+      },
+    });
+    expect(code).toBe(1);
+    const out = h.printed.join("\n");
+    expect(out).toContain("send failed");
+    expect(out).toContain("fetch failed");
+    expect(out).toContain("connect to https://node.example");
+    expect(out).toContain("Program log: via https://node.example");
+    expect(out).not.toContain("SECRET");
   });
 });

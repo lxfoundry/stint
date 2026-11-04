@@ -1,6 +1,5 @@
 import { parseArgs } from "node:util";
 import {
-  createKeyPairSignerFromBytes,
   isAddress,
   type Address,
   type Instruction,
@@ -17,6 +16,7 @@ import {
 } from "@lxfoundry/stint-subscriptions-client";
 import { USDC_DEVNET, redactUrls } from "@lxfoundry/stint-x402";
 import { readAllowance } from "./allowance.js";
+import { parseKeyFile } from "./keypair.js";
 
 /** Devnet's genesis hash: the command sends nothing to any other network. */
 export const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
@@ -42,13 +42,38 @@ const MAX_PERIOD_SECONDS = 31_536_000n;
 
 async function readKeypair(deps: CommandDeps, path: string): Promise<KeyPairSigner> {
   try {
-    const bytes = JSON.parse(deps.readKeyFile(path)) as unknown;
-    if (!Array.isArray(bytes) || bytes.length !== 64) throw new Error();
-    return await createKeyPairSignerFromBytes(Uint8Array.from(bytes as number[]));
+    return await parseKeyFile(deps.readKeyFile(path));
   } catch {
     // Nothing is taken from the error: a parser's message quotes the start of the text it was given.
     throw new Error(`--keypair ${path}: the file cannot be read, or does not hold a keypair as a JSON array of 64 bytes`);
   }
+}
+
+/** The most causes followed: a chain is short, and the bound keeps a cycle from running for ever. */
+const MAX_CAUSES = 8;
+
+/**
+ * Why a call failed, a line each: the error's message, then the message of each cause in turn, then the logs of a
+ * simulation. Kit reports a refused transaction as "Transaction simulation failed", and keeps the program's error in
+ * the cause and the program's logs in the context.
+ */
+function describeFailure(error: unknown): string[] {
+  const lines: string[] = [];
+  const logs: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth <= MAX_CAUSES; depth++) {
+    const prefix = depth === 0 ? "" : "caused by: ";
+    if (current instanceof Error) {
+      lines.push(`${prefix}${current.message}`);
+      const found = (current as { context?: { logs?: unknown } }).context?.logs;
+      if (Array.isArray(found)) logs.push(...found.filter((line): line is string => typeof line === "string"));
+      current = current.cause;
+    } else {
+      if (depth === 0 || typeof current === "string") lines.push(`${prefix}${String(current)}`);
+      break;
+    }
+  }
+  return logs.length === 0 ? lines : [...lines, "logs:", ...logs.map((line) => `  ${line}`)];
 }
 
 /**
@@ -158,7 +183,7 @@ export async function runAllowanceCommand(argv: readonly string[], deps: Command
     return 0;
   } catch (error) {
     // A node's error can quote its URL, which may carry an API key: every URL is reduced to its scheme and host.
-    deps.print(redactUrls(error instanceof Error ? error.message : String(error)));
+    for (const line of describeFailure(error)) deps.print(redactUrls(line));
     return 1;
   }
 }

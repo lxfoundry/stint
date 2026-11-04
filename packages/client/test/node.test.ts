@@ -5,21 +5,27 @@ import { createNodeRpc, hideNodeUrl, isNodeUrl } from "../src/node.js";
 /** A node URL with a key in its path and one in its query, as providers give them. */
 const KEYED = "https://node.example/v2/PATHKEY123?api-key=QUERYKEY123";
 
-/** What a failed call gives its caller: its message and its stack, where Node prints the message again. */
-async function failure(call: Promise<unknown>): Promise<string> {
+/** What a failed call rejects with. */
+async function rejection(call: Promise<unknown>): Promise<Error> {
   const error = await call.then(
     () => undefined,
     (reason: unknown) => reason,
   );
   expect(error).toBeInstanceOf(Error);
-  return `${(error as Error).message}\n${(error as Error).stack}`;
+  return error as Error;
+}
+
+/** What a failed call gives its caller: its message and its stack, where Node prints the message again. */
+async function failure(call: Promise<unknown>): Promise<string> {
+  const error = await rejection(call);
+  return `${error.message}\n${error.stack}`;
 }
 
 describe("the node's URL (spec §9.1)", () => {
-  it("is an http or https URL that parses, and nothing fetch would refuse or that names another scheme", () => {
+  it("is an http or https URL that parses, without user info, and nothing fetch would refuse or that names another scheme", () => {
     expect(isNodeUrl("https://api.devnet.solana.com")).toBe(true);
     expect(isNodeUrl("http://127.0.0.1:8899")).toBe(true);
-    for (const value of ["", "https://node example/?api-key=SECRET", "node.example/?api-key=SECRET", "ftp://node.example/SECRET"]) {
+    for (const value of ["", "https://node example/?api-key=SECRET", "node.example/?api-key=SECRET", "ftp://node.example/SECRET", "https://user:pass@node.example/"]) {
       expect(isNodeUrl(value), value).toBe(false);
     }
   });
@@ -41,5 +47,27 @@ describe("the node's URL (spec §9.1)", () => {
       throw error;
     }) as unknown as RpcTransport;
     expect(await failure(createNodeRpc(KEYED, throwing).getGenesisHash().send())).not.toMatch(/QUERYKEY123|PATHKEY123/);
+  });
+
+  it("gives a caller a time-out or an abort as it came, with its name, since the client tells them apart by it", async () => {
+    const timeout = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    const aborting = (async () => {
+      throw timeout;
+    }) as unknown as RpcTransport;
+    const error = await rejection(createNodeRpc(KEYED, aborting).getGenesisHash().send());
+    expect(error).toBe(timeout);
+    expect(error.name).toBe("TimeoutError");
+  });
+
+  it("hides the key in an error whose message is a getter, as a DOMException's is, and keeps its name", async () => {
+    const aborted = new DOMException(`request to ${KEYED} was aborted`, "AbortError");
+    void aborted.stack;
+    const aborting = (async () => {
+      throw aborted;
+    }) as unknown as RpcTransport;
+    const error = await rejection(createNodeRpc(KEYED, aborting).getGenesisHash().send());
+    expect(error.name).toBe("AbortError");
+    expect(error.message).toContain("was aborted");
+    expect(`${error.message}\n${error.stack}`).not.toMatch(/QUERYKEY123|PATHKEY123/);
   });
 });

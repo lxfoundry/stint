@@ -1,4 +1,5 @@
 export { allowanceShortfall, readAllowance, type AllowanceReport } from "./allowance.js";
+export { KeyFileError, parseKeyFile } from "./keypair.js";
 export { createNodeRpc, hideNodeUrl, isNodeUrl } from "./node.js";
 export { checkOffer, checkTopUp, type Asset, type Policy, type PolicyCheck, type TopUpContext } from "./policy.js";
 export {
