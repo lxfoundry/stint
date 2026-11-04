@@ -132,7 +132,7 @@ building the panel at start. `pnpm --filter @lxfoundry/stint-claude-demo test` r
   only). So the panel's buttons and the chat's tool calls act on the same session, whichever copy receives them.
 - Before each call, the owner reads `owner.json` again, and runs the call only if the file still names it. If another
   copy's record is there, it stops serving and forwards, and closes the session of the state it drops, with its refund:
-  no call reaches that session any more, and its open connection would keep the gate's idle close from refunding it. If
+  no new call reaches that session, and its open connection would keep the gate's idle close from refunding it. If
   the file is gone, it writes it again, which succeeds only while no other copy has.
 - A forwarder waits at most 120 s for the owner's answer to a launch, top-up or close, and 15 s for a read. When a
   forwarded call fails because the owner went away, the forwarder takes over, with a fresh state: at once if the owner's

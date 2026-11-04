@@ -37,8 +37,9 @@ export interface OwnerSide {
   /** What the router calls each time this copy wins the election: loads the key, builds a state, and returns its handler. */
   becomeOwner(): Promise<CallHandler>;
   /**
-   * What the router calls when it drops a state: closes that state's session at once, since no call reaches it any more
-   * and a connection left open would keep the gate's idle close from refunding it. What it closed, or could not, is logged.
+   * What the router calls when it drops a state: closes that state's session at once, since no new call reaches it (one
+   * already past the fence runs on, and an open still in flight is waited for) and a connection left open would keep the
+   * gate's idle close from refunding it. What it closed, or could not, is logged.
    */
   dropped(handler: Promise<CallHandler>): void;
   /**
