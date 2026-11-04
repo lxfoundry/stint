@@ -3,6 +3,7 @@ import {
   createNoopSigner,
   generateKeyPairSigner,
   getBase64EncodedWireTransaction,
+  isSignerRole,
   partiallySignTransaction,
   type Address,
   type Instruction,
@@ -465,11 +466,21 @@ describe("allowance funding (spec §10.2)", () => {
   });
 
   /** The allowance open with one account of the pull replaced. Pull accounts: delegation 0, subscription authority 1,
-   * owner's account 2, destination 3, mint 4, token program 5, delegatee 6, event authority 7, program 8. */
-  async function withPullAccount(index: number, replacement: Address): Promise<string> {
+   * owner's account 2, destination 3, mint 4, token program 5, delegatee 6, event authority 7, program 8. A replaced signer
+   * (the delegatee) signs, so that the check of the signatures cannot refuse it in place of the check under test. */
+  async function withPullAccount(index: number, replacement: KeyPairSigner): Promise<string> {
     const built = await buildOpenTransaction({ requirements: offer, authority: agent, decimals: 6, funding: funding() });
     return rebuild(built.transaction, agent, (ixs) =>
-      ixs.map((ix, i) => (i !== 1 ? ix : { ...ix, accounts: ix.accounts!.map((meta, at) => (at === index ? { ...meta, address: replacement } : meta)) })),
+      ixs.map((ix, i) =>
+        i !== 1
+          ? ix
+          : {
+              ...ix,
+              accounts: ix.accounts!.map((meta, at) =>
+                at === index ? { ...meta, address: replacement.address, ...(isSignerRole(meta.role) ? { signer: replacement } : {}) } : meta,
+              ),
+            },
+      ),
     );
   }
 
@@ -483,7 +494,7 @@ describe("allowance funding (spec §10.2)", () => {
     ["an event authority that is not the program's", 7, "invalid_terms"],
     ["a self-program account that is not the program", 8, "invalid_terms"],
   ] as const)("refuses %s", async (_, index, reason) => {
-    const wire = await withPullAccount(index, (await generateKeyPairSigner()).address);
+    const wire = await withPullAccount(index, await generateKeyPairSigner());
     expect(await checkOpenTransaction(inspectTransaction(wire)!, offer, keys())).toMatchObject({ ok: false, reason });
   });
 
