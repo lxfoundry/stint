@@ -2996,13 +2996,10 @@ In `e2e/test/local-target.test.ts`:
 - rename the test "offers chain control, stack control and the facilitator's API, but not allowance funding yet" to
   "offers chain control, stack control, the facilitator's API and allowance funding", expect
   `["allowance", "chain", "facilitatorApi", "stack"]`, and add `expect(stack.context().allowance).toBeDefined();`;
-- in "passes every required scenario, and reports the others", scenario 12 now runs where the capability is, but
-  until Task 8 it has no `run`. Replace the comment and the two lines after it with:
-
-  ```ts
-    // Every scenario that is not required is pending, scenario 12 included until it is written.
-    expect(outcomes.filter((outcome) => outcome.result === "pending")).toHaveLength(35 - REQUIRED.length);
-  ```
+- the test that ran every required scenario on `local` is gone from this file: the target's tests check that `local`
+  offers what every required scenario declares in `needs`, and `pnpm e2e:local` runs the scenarios themselves. Scenario 12
+  declares `needs: ["allowance"]`, so the capability test above is the only change here, and it covers scenario 12 once it
+  is required.
 
 In `e2e/test/devnet-target.test.ts`, expect `["allowance", "facilitatorApi", "stack"]` in "offers stack control and the
 facilitator's API, and no chain control".
@@ -3423,10 +3420,12 @@ fix. Name it in the PR, with the error it gives.
 Then:
 - change the line to `required(12, "Allowance funding", allowanceFunding, ["allowance"])`;
 - add 12 to the committed list of required scenario IDs that `conformance/test/catalogue.test.ts` checks;
-- in `e2e/test/local-target.test.ts`, add 12 to `REQUIRED`, and add its time to the comment above it (about 5 s);
-- in `e2e/test/devnet-target.test.ts`, add 12 to the `required` list of "passes the required scenarios with buyers
-  funded from the funding key". That runs the devnet target's grant, through its pool and funding key, and the
-  scenario's revoke in CI's unit tests, not only in a manual devnet run. The scenario revokes its grant itself, so the
+- in `e2e/test/devnet-target.test.ts`, add 12 to `covering`, the list of scenarios in "passes a scenario for each part of
+  the context it provides, with buyers funded from the funding key", and say what 12 covers in the comment above it. That
+  runs the devnet target's grant, through its pool and funding key, and the scenario's revoke in CI's unit tests, not only
+  in a manual devnet run;
+- in `e2e/src/budget.ts`, the tally of `pnpm e2e:local` counts a grant as the USDC lent to its owner and two pool keys, so
+  that the budget a devnet run is given still covers every scenario. The scenario revokes its grant itself, so the
   clean-up finds nothing to revoke there; Task 7's "finds and revokes what a held key granted" tests the clean-up's revoke.
 
 Run: `pnpm --filter @lxfoundry/stint-conformance test && pnpm e2e:local`

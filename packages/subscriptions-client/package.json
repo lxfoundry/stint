@@ -1,0 +1,23 @@
+{
+  "name": "@lxfoundry/stint-subscriptions-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@solana-program/token": "0.18.0",
+    "@solana/kit": "8.5.0",
+    "@solana/program-client-core": "8.5.0"
+  },
+  "devDependencies": {
+    "@codama/renderers-js": "2.8.0",
+    "codama": "1.11.0"
+  }
+}

@@ -55,6 +55,7 @@ describe("the stdio entry point", () => {
 
     const { tools } = await client.listTools();
     expect(tools.map((tool) => tool.name).sort()).toEqual([
+      "stint_allowance",
       "stint_close_session",
       "stint_open_session",
       "stint_receive",
@@ -79,6 +80,6 @@ describe("the stdio entry point", () => {
       }
     }
     expect(alive).toBe(false);
-    expect(stderr).toMatch(/serving 6 tools on stdio/);
+    expect(stderr).toMatch(/serving 7 tools on stdio/);
   }, 30_000);
 });

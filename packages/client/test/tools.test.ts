@@ -14,6 +14,8 @@ async function controlledClient(count: number) {
   let next = 0;
   const client: StintClient = {
     remainingBudget: () => 0n,
+    funding: { kind: "own" },
+    allowance: async () => undefined,
     async open() {
       const id = ids[next++] as Address;
       return {
@@ -331,6 +333,8 @@ describe("session tools (spec §9.5)", () => {
     let sent = 0;
     const client: StintClient = {
       remainingBudget: () => 0n,
+      funding: { kind: "own" },
+      allowance: async () => undefined,
       async open() {
         return {
           id,

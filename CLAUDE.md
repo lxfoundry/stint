@@ -69,7 +69,8 @@ Named in section 3.5 of `docs/specs/stint-system.md` and pinned by
 | Kora | 2.0.5 |
 
 `scripts/check-toolchain.sh` checks the installed tools and the files that pin them. Commands: `anchor build` builds the program;
-`pnpm generate:client` regenerates its client; `pnpm test` runs the unit and integration tests of every package but `e2e`, and
+`pnpm generate:client` regenerates its client, and `pnpm --filter @lxfoundry/stint-subscriptions-client run generate` regenerates the
+Subscriptions program's client from its pinned IDL (CI checks that both are current); `pnpm test` runs the unit and integration tests of every package but `e2e`, and
 `pnpm test:e2e` runs the `e2e` package's own tests, each file starting a local network (both need `anchor build` first, and the e2e
 tests and scenarios also `scripts/fetch-subscriptions-program.sh` and the `surfpool` and `kora` binaries); `pnpm e2e:local`
 runs the end-to-end scenarios on the `local` target, and `pnpm e2e:local --only=4,34` only those named. `pnpm e2e:devnet` runs them

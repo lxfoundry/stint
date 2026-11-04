@@ -11,6 +11,7 @@
   "dependencies": {
     "@lxfoundry/stint-client": "workspace:*",
     "@lxfoundry/stint-program-client": "workspace:*",
+    "@lxfoundry/stint-subscriptions-client": "workspace:*",
     "@lxfoundry/stint-x402": "workspace:*",
     "@solana/kit": "8.5.0"
   }
