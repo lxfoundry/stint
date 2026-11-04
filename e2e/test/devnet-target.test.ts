@@ -124,18 +124,26 @@ describe("the devnet target, run against the local network", () => {
     expect(stack.context().facilitator).toBeDefined();
   });
 
-  it("passes the required scenarios with buyers funded from the funding key", async () => {
+  it("passes a scenario for each part of the context it provides, with buyers funded from the funding key", async () => {
+    // One required scenario for each part of the scenarios' context that the devnet target provides in its own way. Every
+    // scenario draws its buyers from the pool; 15 opens and closes sessions straight on the program and reads the rent
+    // payer; 19 calls the facilitator's API; 22 sends USDC; 25 funds a key with SOL, and stops and starts the gate and the
+    // facilitator; 34 tops a session up straight on the program, and starts the gate with options. A scenario that comes
+    // to use a part that none of these uses joins the list. `pnpm e2e:devnet` runs every scenario on devnet itself.
+    // That every scenario together fits what a devnet run lends and its key pool is checked by `pnpm e2e:local`, which counts both.
     // The local network reports a subscription's slot, not the change's (T6): scenario 22 asserts on the slot only when the
-    // target is named devnet, so the scenarios run here under the local name. Together they take about three minutes.
-    const required = [1, 2, 3, 4, 5, 6, 7, 9, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 32, 34];
+    // target is named devnet, so the scenarios run here under the local name. Together they take about a minute.
+    const covering = [15, 19, 22, 25, 34];
     const asLocal: Target = { name: "local", capabilities: stack.target.capabilities };
     const outcomes = await runScenarios(
-      catalogue.filter((scenario) => required.includes(scenario.id)),
+      catalogue.filter((scenario) => covering.includes(scenario.id)),
       asLocal,
       () => ({ ...stack.context(), target: asLocal }),
     );
-    expect(outcomes.map((outcome) => [outcome.id, outcome.result, outcome.error])).toEqual(required.map((id) => [id, "pass", undefined]));
-  }, 600_000);
+    expect(outcomes.map((outcome) => [outcome.id, outcome.status, outcome.result, outcome.error])).toEqual(
+      covering.map((id) => [id, "required", "pass", undefined]),
+    );
+  }, 300_000);
 
   it("gives its context stack control and direct sessions, paid for by a key of the buyer pool and by the funding key", async () => {
     const { seed, funding, fundingUsdc } = await fundedSeed();
