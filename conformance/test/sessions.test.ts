@@ -26,6 +26,7 @@ describe("directSessionOf", () => {
     expect(await directSessionOf(session!, stored)).toEqual({
       session,
       vault: await associatedTokenAddress(session!, mint!),
+      mint: mint!,
       rentPayer,
       receiverToken: await associatedTokenAddress(receiver!, mint!),
       refundTo: await associatedTokenAddress(refundOwner!, mint!),

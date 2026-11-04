@@ -17,11 +17,27 @@ const FIRST_BUYER_INDEX = 5;
  */
 export const BUYER_POOL = 96;
 
-/** The key at `index` of `seed`, of any length: HMAC-SHA-256 of the index, keyed by the seed, taken as an Ed25519 private key. */
-export async function deriveKey(seed: Uint8Array, index: number): Promise<HarnessKey> {
-  const privateKey = Uint8Array.from(createHmac("sha256", seed).update(`stint-devnet-harness/${index}`).digest());
+/** The key of `label` under `seed`: HMAC-SHA-256 of the label, keyed by the seed, taken as an Ed25519 private key. */
+async function keyOf(seed: Uint8Array, label: string): Promise<HarnessKey> {
+  const privateKey = Uint8Array.from(createHmac("sha256", seed).update(`stint-devnet-harness/${label}`).digest());
   const signer = await createKeyPairSignerFromPrivateKeyBytes(privateKey);
   return { signer, secretKey: Uint8Array.from([...privateKey, ...getAddressEncoder().encode(signer.address)]) };
+}
+
+/** The key at `index` of `seed`, of any length: HMAC-SHA-256 of the index, keyed by the seed, taken as an Ed25519 private key. */
+export function deriveKey(seed: Uint8Array, index: number): Promise<HarnessKey> {
+  return keyOf(seed, String(index));
+}
+
+/** The name of the second mint's key (spec §12.6): the mint's address, and its mint authority. */
+export const OTHER_MINT_KEY = "other-mint";
+
+/**
+ * A key of `seed` named rather than numbered: it lies outside `KEY_INDEX` and the buyer pool, so it never moves when the
+ * pool grows. It is not one of `holders`: the clean-up neither empties it nor signs with it.
+ */
+export function deriveNamedKey(seed: Uint8Array, name: string): Promise<HarnessKey> {
+  return keyOf(seed, name);
 }
 
 export interface DevnetKeys {

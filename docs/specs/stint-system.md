@@ -1471,6 +1471,16 @@ run is repeatable.
 A scenario states the capabilities it needs (section 12.7). On a target that lacks one, it is
 reported as not applicable, not as failed.
 
+**Sessions opened directly on-chain** (scenarios 15, 16, 20 and 35). Where the harness holds the keys to do so, it
+opens a session straight on the program, with no gate and no facilitator. The buyer funds the vault, and a harness key
+pays the rent, so the facilitator neither sweeps the session nor closes it for its buyer (scenarios 15 and 16). The
+receiver authorizer is one of two keys:
+- a throwaway key, so that no gate takes the session up;
+- or the gate's own, read from its offer, so that the gate may adopt the session (scenarios 20 and 35).
+
+For scenario 20 it opens the session in a second mint that it holds, of 6 decimals like USDC, so that only the mint
+differs from the gate's terms (S5).
+
 **The example agent's task, scripted** (scenario 22): `stint_open_session` → `stint_send`
 (subscribe to a watched account) → the harness sends a payment to that account →
 `stint_receive` with `match` returns the notification → `stint_close_session` → the `paid`
@@ -1625,7 +1635,10 @@ itself):
   (S14), since some buyers hold no SOL. Before a run, and again after it, the harness cleans up: it
   closes every session still open, of the USDC mint, that one of its keys opened or paid the rent of, including
   those left open when a scenario stopped its stack or a run ended abnormally, and returns what its keys
-  hold to the funding key. A session that names one of its keys only as its receiver is reported and left
+  hold to the funding key. The second mint of scenario 20 is derived from the seed too, as its own mint authority: the
+  first run that needs it creates it, with the seller's token account for it, and both are kept for later runs. The
+  scenario closes its own session in that mint and gives back the buyer's account for it.
+  A session that names one of its keys only as its receiver is reported and left
   alone: an open is signed by its `authority` and `rent_payer` only (section 4.3), so anyone may name the
   seller, for as long as they choose to pay for, and such a session is its opener's to close. A close is a
   `Standard` close (section 4.3) signed by the session's authority,

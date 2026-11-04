@@ -5,7 +5,7 @@ import { createFacilitatorClient } from "@lxfoundry/stint-gate";
 import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import { assertDevnet, assertProgramDeployed } from "../devnet/config.js";
 import { cleanUp, fundUsdcAccount, sendSol, type Funding } from "../devnet/funds.js";
-import { KEY_INDEX, deriveKey, deriveKeys, type DevnetKeys } from "../devnet/keys.js";
+import { KEY_INDEX, OTHER_MINT_KEY, deriveKey, deriveKeys, deriveNamedKey, type DevnetKeys } from "../devnet/keys.js";
 import { sendUsdc } from "../fixtures/transfers.js";
 import { USDC_DEVNET_MINT } from "../fixtures/usdc.js";
 import { createDirectChain } from "./direct.js";
@@ -200,6 +200,8 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
     },
     readRetry: READ_RETRY,
     send,
+    // Derived from the seed, so that every run finds the mint an earlier run made (spec §12.6).
+    otherMint: async () => (await deriveNamedKey(options.seed, OTHER_MINT_KEY)).signer,
   });
   return {
     target,
