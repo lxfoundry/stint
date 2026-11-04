@@ -3,8 +3,19 @@ import {
   TOKEN_PROGRAM_ADDRESS,
   getTokenEncoder,
   getTokenSize,
+  getTransferCheckedInstruction,
 } from "@solana-program/token";
-import { generateKeyPairSigner, getBase64Decoder, none, type Address, type KeyPairSigner, type Rpc, type SolanaRpcApi } from "@solana/kit";
+import {
+  createNoopSigner,
+  generateKeyPairSigner,
+  getBase58Decoder,
+  getBase64Decoder,
+  none,
+  type Address,
+  type KeyPairSigner,
+  type Rpc,
+  type SolanaRpcApi,
+} from "@solana/kit";
 import { STINT_PROGRAM_ADDRESS, findSessionPda, getSessionEncoder, getSessionSize } from "@lxfoundry/stint-program-client";
 import {
   associatedTokenAddress,
@@ -14,6 +25,7 @@ import {
   buildCloseRequirements,
   buildTopUpOffer,
   buildTopUpTransaction,
+  inspectTransaction,
   type ElapsedRequirements,
 } from "@lxfoundry/stint-x402";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -240,6 +252,80 @@ describe("verifyPayment (spec §5.4)", () => {
       await resetNode();
       node.simulation = { err: "AlreadyProcessed" };
       expect(await verifyPayment(ctx, await openPayload(), offer)).toMatchObject({ ok: false, reason: "already_processed" });
+    });
+  });
+
+  describe("an open funded from an allowance (spec §10.2)", () => {
+    /** The open's payload, and the inner instructions a node would report for its pull moving `moved` into the vault. */
+    async function allowanceOpen(moved: bigint) {
+      const owner = (await generateKeyPairSigner()).address;
+      const built = await buildOpenTransaction({ requirements: offer, authority: buyer, decimals: 6, funding: { kind: "allowance", owner, nonce: 0n } });
+      const tx = inspectTransaction(built.transaction)!;
+      // Pull accounts: subscription authority 1, owner's account 2, vault 3.
+      const [authority, source, vault] = [1, 2, 3].map((at) => tx.instructions[1]!.accounts![at]!.address) as [Address, Address, Address];
+      const index = (key: Address) => tx.accounts.indexOf(key);
+      const transfer = getTransferCheckedInstruction({
+        source,
+        mint: MINT,
+        destination: vault,
+        authority: createNoopSigner(authority),
+        amount: moved,
+        decimals: 6,
+      });
+      const inner = [
+        {
+          index: 1,
+          instructions: [
+            {
+              programIdIndex: index(TOKEN_PROGRAM_ADDRESS),
+              accounts: [index(source), index(MINT), index(vault), index(authority)],
+              data: getBase58Decoder().decode(transfer.data),
+            },
+          ],
+        },
+      ];
+      return { body: payload(offer, { type: "open", transaction: built.transaction, session: built.session }), inner, vault };
+    }
+
+    it("accepts it when the simulated pull moves exactly the amount into the vault", async () => {
+      await resetNode();
+      const { body, inner } = await allowanceOpen(30_000n);
+      node.simulation = { err: null, innerInstructions: inner };
+      expect(await verifyPayment(ctx, body, offer)).toMatchObject({ ok: true, type: "open", payer: buyer.address });
+    });
+
+    it("refuses it when the simulation moves another amount into the vault", async () => {
+      await resetNode();
+      const { body, inner } = await allowanceOpen(29_999n);
+      node.simulation = { err: null, innerInstructions: inner };
+      expect(await verifyPayment(ctx, body, offer)).toMatchObject({ ok: false, reason: "invalid_amount" });
+    });
+
+    it("refuses it, without throwing, when what the vault receives cannot be told", async () => {
+      await resetNode();
+      const { body, vault } = await allowanceOpen(30_000n);
+      const minting = [
+        {
+          index: 1,
+          instructions: [
+            { program: "spl-token", programId: TOKEN_PROGRAM_ADDRESS, parsed: { type: "mintTo", info: { mint: MINT, account: vault, mintAuthority: buyer.address, amount: "1" } } },
+          ],
+        },
+      ];
+      node.simulation = { err: null, innerInstructions: minting };
+      expect(await verifyPayment(ctx, body, offer)).toMatchObject({ ok: false, reason: "invalid_amount", message: expect.stringMatching(/cannot be told/) });
+    });
+
+    it("names an allowance that is used up for the period", async () => {
+      await resetNode();
+      const { body } = await allowanceOpen(30_000n);
+      node.simulation = {
+        err: { InstructionError: [1n, { Custom: 400n }] },
+        logs: ["Program De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44 failed: custom program error: 0x190"],
+      };
+      const verified = await verifyPayment(ctx, body, offer);
+      expect(verified).toMatchObject({ ok: false, reason: "simulation_failed" });
+      expect((verified as { message: string }).message).toMatch(/allowance for this period is used up/);
     });
   });
 
