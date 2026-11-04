@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
-import { address } from "@solana/kit";
+import { SUBSCRIPTIONS_PROGRAM_ADDRESS } from "@lxfoundry/stint-subscriptions-client";
 import { STINT_SO_PATH, SUBSCRIPTIONS_PIN_PATH, SUBSCRIPTIONS_SO_PATH } from "../paths.js";
 import type { LocalNetwork } from "../network/surfnet.js";
 
 /** The Subscriptions & Allowances program, at its devnet address (spec section 10). */
-export const SUBSCRIPTIONS_PROGRAM_ADDRESS = address("De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44");
+export { SUBSCRIPTIONS_PROGRAM_ADDRESS };
 
 /** Deploys the Stint program, built by `anchor build`, at its program ID. */
 export function deployStintProgram(network: LocalNetwork): void {

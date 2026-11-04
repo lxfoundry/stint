@@ -1,7 +1,9 @@
+import { generateKeyPairSigner } from "@solana/kit";
 import type { DirectChain, ScenarioContext, StackControl, Target } from "@lxfoundry/stint-conformance";
 import type { RunningStream } from "@lxfoundry/stint-example-stream";
 import type { RunningFacilitator } from "@lxfoundry/stint-facilitator";
 import { createFacilitatorClient } from "@lxfoundry/stint-gate";
+import { GRANT_LAMPORTS, createAllowanceControl } from "../fixtures/allowance.js";
 import { newBuyer } from "../fixtures/buyers.js";
 import { fundSol, newHarnessKey } from "../fixtures/keys.js";
 import { sendUsdc } from "../fixtures/transfers.js";
@@ -50,7 +52,7 @@ export interface LocalStack {
 
 /**
  * The `local` target (spec §12.2): the local chain, Kora, the facilitator, and the example stream
- * with its gate. Allowance funding joins its capabilities once the facilitator supports it.
+ * with its gate.
  */
 export async function startLocalStack(): Promise<LocalStack> {
   const chain = await startLocalChain();
@@ -73,7 +75,7 @@ export async function startLocalStack(): Promise<LocalStack> {
       stopFacilitator: () => services.stopFacilitator(),
       startFacilitator: () => services.startFacilitator(),
     };
-    const target: Target = { name: "local", capabilities: new Set(["chain", "stack", "facilitatorApi"]) };
+    const target: Target = { name: "local", capabilities: new Set(["chain", "stack", "allowance", "facilitatorApi"]) };
     return {
       target,
       network: chain.network,
@@ -97,6 +99,17 @@ export async function startLocalStack(): Promise<LocalStack> {
         stack: control,
         direct,
         facilitator: facilitatorApi,
+        allowance: createAllowanceControl({
+          rpc: chain.network.rpc,
+          newOwner: async (usdc) => {
+            const owner = await newBuyer(chain.network.rpc, chain.keys.mintAuthority.signer, usdc);
+            // A cheatcode sets the balance; the next slot makes it visible.
+            chain.network.surfnet.fundSol(owner.signer.address, Number(GRANT_LAMPORTS));
+            await waitForNewSlot(chain.network.rpc);
+            return owner;
+          },
+          newAgent: () => generateKeyPairSigner(),
+        }),
         // A cheatcode sets the balance; the next slot makes it visible.
         fundSol: async (owner, lamports) => {
           chain.network.surfnet.fundSol(owner, Number(lamports));

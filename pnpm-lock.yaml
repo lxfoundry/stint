@@ -208,6 +208,9 @@ importers:
       '@lxfoundry/stint-program-client':
         specifier: workspace:*
         version: link:../packages/program-client
+      '@lxfoundry/stint-subscriptions-client':
+        specifier: workspace:*
+        version: link:../packages/subscriptions-client
       '@lxfoundry/stint-x402':
         specifier: workspace:*
         version: link:../packages/x402
@@ -238,6 +241,9 @@ importers:
       '@lxfoundry/stint-program-client':
         specifier: workspace:*
         version: link:../packages/program-client
+      '@lxfoundry/stint-subscriptions-client':
+        specifier: workspace:*
+        version: link:../packages/subscriptions-client
       '@lxfoundry/stint-x402':
         specifier: workspace:*
         version: link:../packages/x402

@@ -1,7 +1,14 @@
 import { fetchMint, fetchToken } from "@solana-program/token";
-import { address, some } from "@solana/kit";
+import { address, generateKeyPairSigner, some, type Address } from "@solana/kit";
 import { fetchSysvarClock } from "@solana/sysvars";
+import { rejectedWithProgramError } from "@lxfoundry/stint-conformance";
 import { STINT_PROGRAM_ADDRESS } from "@lxfoundry/stint-program-client";
+import {
+  allowanceAccounts,
+  allowancePullInstruction,
+  fetchMaybeRecurringDelegation,
+  grantInstructions,
+} from "@lxfoundry/stint-subscriptions-client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { newHarnessKey, fundSol, type HarnessKey } from "../src/fixtures/keys.js";
 import {
@@ -9,9 +16,9 @@ import {
   deployStintProgram,
   deploySubscriptionsProgram,
 } from "../src/fixtures/programs.js";
-import { USDC_DECIMALS, USDC_DEVNET_MINT, mintUsdc, writeUsdcMint } from "../src/fixtures/usdc.js";
+import { USDC_DECIMALS, USDC_DEVNET_MINT, createUsdcAccount, mintUsdc, writeUsdcMint } from "../src/fixtures/usdc.js";
 import { startLocalNetwork, waitForNewSlot, type LocalNetwork } from "../src/network/surfnet.js";
-import { simulateInstruction } from "../src/network/transactions.js";
+import { sendInstructions, simulateInstruction } from "../src/network/transactions.js";
 
 describe("local network", () => {
   let network: LocalNetwork;
@@ -61,9 +68,44 @@ describe("local network", () => {
     expect(result.logs.some((line) => line.startsWith(`Program ${STINT_PROGRAM_ADDRESS} consumed`))).toBe(true);
   });
 
-  it("runs the Subscriptions program from its devnet copy (spec section 14, question 6)", async () => {
-    const result = await simulateInstruction(network.rpc, mintAuthority.signer, SUBSCRIPTIONS_PROGRAM_ADDRESS);
-    expect(result.logs.some((line) => line.startsWith(`Program ${SUBSCRIPTIONS_PROGRAM_ADDRESS} consumed`))).toBe(true);
+  it("runs the Subscriptions program from its devnet copy: a pull lands, and one over the cap is refused (spec section 14, question 6)", async () => {
+    const rpc = network.rpc;
+    const owner = await newHarnessKey();
+    const agent = await generateKeyPairSigner();
+    fundSol(network, owner.signer.address, 1);
+    await waitForNewSlot(rpc);
+    const ownerToken = await mintUsdc(rpc, mintAuthority.signer, owner.signer.address, 100_000n);
+    const clock = await fetchSysvarClock(rpc, { commitment: "confirmed" });
+    await sendInstructions(
+      rpc,
+      owner.signer,
+      await grantInstructions({
+        owner: owner.signer,
+        agent: agent.address,
+        mint: USDC_DEVNET_MINT,
+        perPeriod: 50_000n,
+        periodSeconds: 3_600n,
+        expiresAt: BigInt(clock.unixTimestamp) + 3_600n,
+        nonce: 0n,
+      }),
+    );
+    const destination = await createUsdcAccount(rpc, mintAuthority.signer, (await generateKeyPairSigner()).address);
+    // The agent signs as the delegatee; a harness key pays the fee.
+    const pull = (amount: bigint) =>
+      allowancePullInstruction({ owner: owner.signer.address, agent, mint: USDC_DEVNET_MINT, nonce: 0n, destination, amount });
+    await sendInstructions(rpc, mintAuthority.signer, [await pull(10_000n)]);
+    const balance = async (account: Address) => (await rpc.getTokenAccountBalance(account, { commitment: "confirmed" }).send()).value.amount;
+    expect(await balance(destination)).toBe("10000");
+    expect(await balance(ownerToken)).toBe("90000");
+    const { delegation } = await allowanceAccounts({ owner: owner.signer.address, agent: agent.address, mint: USDC_DEVNET_MINT, nonce: 0n });
+    const stored = await fetchMaybeRecurringDelegation(rpc, delegation, { commitment: "confirmed" });
+    expect(stored.exists && stored.data.amountPulledInPeriod).toBe(10_000n);
+
+    const over = await sendInstructions(rpc, mintAuthority.signer, [await pull(45_000n)]).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(rejectedWithProgramError(over, 400)).toBe(true);
   });
 
   it("keeps the Subscriptions program at its devnet address", () => {

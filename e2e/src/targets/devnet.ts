@@ -6,6 +6,7 @@ import { associatedTokenAddress } from "@lxfoundry/stint-x402";
 import { assertDevnet, assertProgramDeployed } from "../devnet/config.js";
 import { cleanUp, fundUsdcAccount, sendSol, type Funding } from "../devnet/funds.js";
 import { KEY_INDEX, deriveKey, deriveKeys, type DevnetKeys } from "../devnet/keys.js";
+import { GRANT_LAMPORTS, createAllowanceControl } from "../fixtures/allowance.js";
 import { sendUsdc } from "../fixtures/transfers.js";
 import { USDC_DEVNET_MINT } from "../fixtures/usdc.js";
 import { createDirectChain } from "./direct.js";
@@ -168,7 +169,7 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
   // The facilitator keeps its address when it restarts, so one client serves every context.
   const facilitatorApi = createFacilitatorClient(services.facilitator.url, services.facilitatorApiKey);
 
-  const target: Target = { name: "devnet", capabilities: new Set(["stack", "facilitatorApi"]) };
+  const target: Target = { name: "devnet", capabilities: new Set(["stack", "allowance", "facilitatorApi"]) };
   let nextBuyer = 0;
   let stopping: Promise<void> | undefined;
   /** What the run has lent its buyers from the funding key. It comes back only at the clean-up, so it must fit in what a start-up requires. */
@@ -228,6 +229,19 @@ export async function startDevnetStack(options: DevnetStackOptions): Promise<Dev
       stack: control,
       direct,
       facilitator: facilitatorApi,
+      allowance: createAllowanceControl({
+        rpc,
+        send,
+        newOwner: async (usdc) => {
+          if (lent + usdc > MINIMUM_FUNDS.usdc) throw new Error(`The run has lent ${lent} USDC base units and this owner asks for ${usdc} more`);
+          lent += usdc;
+          const key = takeKey();
+          const usdcAccount = await fundUsdcAccount(rpc, funding, key.signer.address, usdc, send);
+          await sendSol(rpc, funding.signer, key.signer.address, GRANT_LAMPORTS, send);
+          return { signer: key.signer, usdcAccount };
+        },
+        newAgent: async () => takeKey().signer,
+      }),
       // From the funding key, to a buyer of the pool, whose SOL the clean-up returns.
       fundSol: async (owner, lamports) => {
         if (!keys.holders.has(owner)) throw new Error(`SOL goes only to a key of the pool, which the clean-up empties: ${owner} is not one`);

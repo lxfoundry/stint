@@ -20,8 +20,9 @@ describe("local target", () => {
     await stack?.stop();
   });
 
-  it("offers chain control, stack control and the facilitator's API, but not allowance funding yet", () => {
-    expect([...stack.target.capabilities].sort()).toEqual(["chain", "facilitatorApi", "stack"]);
+  it("offers chain control, stack control, the facilitator's API and allowance funding", () => {
+    expect([...stack.target.capabilities].sort()).toEqual(["allowance", "chain", "facilitatorApi", "stack"]);
+    expect(stack.context().allowance).toBeDefined();
   });
 
   it("creates the seller's USDC account", async () => {
@@ -35,9 +36,8 @@ describe("local target", () => {
     for (const id of REQUIRED) {
       expect(outcomes.find((outcome) => outcome.id === id), `scenario ${id}`).toMatchObject({ status: "required", result: "pass" });
     }
-    // Scenario 12 needs allowance funding, which `local` lacks; every other scenario that is not required is pending.
-    expect(outcomes.find((outcome) => outcome.id === 12)?.result).toBe("not applicable");
-    expect(outcomes.filter((outcome) => outcome.result === "pending")).toHaveLength(35 - 1 - REQUIRED.length);
+    // Every scenario that is not required is pending, scenario 12 included until it is written.
+    expect(outcomes.filter((outcome) => outcome.result === "pending")).toHaveLength(35 - REQUIRED.length);
     expect(exitCodeFor(outcomes)).toBe(0);
   }, 540_000);
 
