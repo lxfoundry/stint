@@ -211,7 +211,7 @@ describe("the gate's adoption of a session it does not track (spec §7.3)", () =
     };
 
     const answer = connect(session, await token(session, "connect"));
-    await Promise.race([second, answer]); // the connect is at its second read, or, before Task 1, already refused
+    await Promise.race([second, answer]); // the connect is at its second read, or, on a gate that does not adopt, already refused
     await h.gate.close();
     release();
 
