@@ -91,9 +91,9 @@ describe("the allowance example on the local stack", () => {
       const refused = await call(ALLOWANCE_TOOL.launch);
 
       expect(refused.isError).toBe(true);
-      expect(refused.text).toMatch(/^Refused on-chain: the allowance for this period is used up \(0\.020 of 0\.030 USDC pulled; the period ends at \d\d:\d\d UTC\)\. The gate refused the payment: /);
+      expect(refused.text).toMatch(/^Refused on-chain: the allowance for this period has 0\.010 USDC left, less than the 0\.020 USDC needed \(0\.020 of 0\.030 USDC pulled; the period ends at \d\d:\d\d UTC\)\. The gate refused the payment: /);
       expect(refused.text).toContain("simulation_failed");
-      expect(refused.state.error?.message).toMatch(/^Refused on-chain: the allowance for this period is used up .* The gate answered simulation_failed\.$/);
+      expect(refused.state.error?.message).toMatch(/^Refused on-chain: the allowance for this period has 0\.010 USDC left, less than the 0\.020 USDC needed .* The gate answered simulation_failed\.$/);
       expect(await balanceOf(grant.owner.usdcAccount)).toBe(before - LAUNCH_COST + refunded);
     } finally {
       await demo?.shutdown();
