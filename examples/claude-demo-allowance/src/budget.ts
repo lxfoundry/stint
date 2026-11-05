@@ -27,7 +27,7 @@ export interface AllowanceView {
   readonly read?: AllowanceRead;
   /** When `read` was made, in milliseconds. */
   readonly readAt?: number;
-  /** The latest read failed: `read` is the one before. */
+  /** The latest read failed: `read`, if any, is the one before. */
   readonly stale: boolean;
 }
 
@@ -45,7 +45,7 @@ export function utcTime(unixSeconds: number): string {
 
 export function budgetLine(view: AllowanceView): string {
   const read = view.read;
-  if (!read) return "Reading the allowance…";
+  if (!read) return view.stale ? "The allowance could not be read: the node did not answer, trying again" : "Reading the allowance…";
   const stale = view.stale ? " (the latest read failed: this is the one before)" : "";
   switch (read.status) {
     case "none":
@@ -64,6 +64,14 @@ export function budgetShare(view: AllowanceView): number {
   const read = view.read;
   if (!read || read.status === "none" || BigInt(read.perPeriod) === 0n) return 0;
   return Math.min(1, Number(BigInt(read.pulled) * 10_000n / BigInt(read.perPeriod)) / 10_000);
+}
+
+/**
+ * What the panel shows after an action failed: the tool's text, except for a refusal by the chain, where the state's own
+ * short error is shown instead (the tool's text carries the gate's whole answer).
+ */
+export function actionErrorText(toolText: string, stateError: string | undefined): string | undefined {
+  return stateError?.startsWith("Refused on-chain:") ? undefined : toolText;
 }
 
 /** The command the owner runs, from the repository, to grant this agent the suggested allowance. */

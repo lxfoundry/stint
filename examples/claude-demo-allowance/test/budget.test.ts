@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { TOOL } from "../../claude-demo/src/state.js";
-import { budgetLine, budgetShare, grantCommand, launchHint, utcTime, type AllowanceView } from "../src/budget.js";
+import { actionErrorText, budgetLine, budgetShare, grantCommand, launchHint, utcTime, type AllowanceView } from "../src/budget.js";
 import { ALLOWANCE_TOOL, PANEL_URI, TO_HANDLER } from "../src/names.js";
 
 const OWNER = "CciCZMJsih7NY5pet9kc1siPSj7169WSFZoTTQ5dGezx";
@@ -63,6 +63,10 @@ describe("the allowance's words", () => {
     expect(budgetShare(view({ status: "none" }))).toBe(0);
   });
 
+  it("says so when no read has ever succeeded", () => {
+    expect(budgetLine(view(undefined, { stale: true }))).toBe("The allowance could not be read: the node did not answer, trying again");
+  });
+
   it("marks a read that could not be made again", () => {
     expect(budgetLine(view(active("0", "200000"), { stale: true }))).toBe(
       "0.000 of 0.200 USDC pulled this period · 0.200 USDC left · the period ends at 17:15 UTC (the latest read failed: this is the one before)",
@@ -85,5 +89,21 @@ describe("the allowance's words", () => {
     );
     expect(launchHint(view(active("100000", "100000")), 100_000n)).toBeUndefined();
     expect(launchHint(view(), 100_000n)).toBeUndefined();
+  });
+});
+
+describe("the error the panel shows after an action", () => {
+  const gate = 'Refused on-chain: the allowance for this period is used up. The gate refused the payment: {"error":"simulation_failed"}';
+  it("is the state's short error for a refusal by the chain", () => {
+    expect(actionErrorText(gate, "Refused on-chain: the allowance for this period is used up. The gate answered simulation_failed.")).toBeUndefined();
+  });
+
+  it("is the tool's text for any other failure", () => {
+    expect(actionErrorText("A session is already running", "A session is already running")).toBe("A session is already running");
+    expect(actionErrorText("The gate refused the payment: {}", "The gate refused the payment: {}")).toBe("The gate refused the payment: {}");
+  });
+
+  it("is the tool's text when the state holds no error", () => {
+    expect(actionErrorText("no answer", undefined)).toBe("no answer");
   });
 });

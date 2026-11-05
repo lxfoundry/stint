@@ -20,7 +20,7 @@ describe("the allowance demo's panel", () => {
     const start = html.indexOf("<script>");
     const end = html.lastIndexOf("</script>");
     expect(html.slice(start + "<script>".length, end)).not.toMatch(/<\/script/i);
-    for (const id of ["address", "balance", "agent", "budget", "budget-pulled", "grant", "grant-command", "launch-hint", "launch", "top-up", "close", "ledger", "rows", "links", "error"]) {
+    for (const id of ["address", "balance", "agent", "budget", "budget-pulled", "grant", "grant-command", "copy-grant", "launch-hint", "launch", "top-up", "close", "ledger", "rows", "links", "error"]) {
       expect(html).toContain(`id="${id}"`);
     }
   });

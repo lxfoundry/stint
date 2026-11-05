@@ -24,7 +24,7 @@ import {
   topUpRefusal,
 } from "../../claude-demo/app/model.js";
 import { createPoller } from "../../claude-demo/app/poller.js";
-import { budgetLine, budgetShare, grantCommand, launchHint, type AllowanceState } from "../src/budget.js";
+import { actionErrorText, budgetLine, budgetShare, grantCommand, launchHint, type AllowanceState } from "../src/budget.js";
 // This extension's names under the first demo's identifier, so that every call below names this server's tools.
 import { ALLOWANCE_TOOL as TOOL } from "../src/names.js";
 
@@ -59,6 +59,8 @@ let actionError: string | undefined;
 let pollFailure: string | undefined;
 /** What the last link, copy or chat update did, when the person should know; `url` is shown to be selected. */
 let notice: { readonly text: string; readonly url?: string } | undefined;
+/** When the grant command was first shown: its expiry is counted from then, so that the text stays as it is while it is selected. */
+let grantShownAt: number | undefined;
 let rowsKey = "";
 let linksKey = "";
 let ledgerKey = "";
@@ -188,8 +190,10 @@ async function act(action: DemoAction, name: ActionTool): Promise<void> {
   poller.schedule(BUSY_POLL_MS);
   try {
     const answer = await callTool(name, {});
-    if (answer.isError) actionError = textOf(answer);
-    else void tellModel();
+    if (answer.isError) {
+      const stateError = isDemoState(answer.structuredContent) ? answer.structuredContent.error?.message : undefined;
+      actionError = actionErrorText(textOf(answer), stateError);
+    } else void tellModel();
   } catch (error) {
     actionError = messageOf(error);
   } finally {
@@ -228,18 +232,28 @@ async function openLink(url: string): Promise<void> {
   if (notice?.url) getSelection()?.selectAllChildren(element("notice-url"));
 }
 
-/** Copies the wallet's address (optional); a frame that may not write the clipboard selects it instead. */
-async function copyAddress(): Promise<void> {
-  if (!state) return;
+/** Copies `text` (optional); a frame that may not write the clipboard has `target` selected instead, and the line says so. */
+async function copyText(text: string, target: string, copied: string, what: string): Promise<void> {
   try {
-    await navigator.clipboard.writeText(state.wallet.address);
-    notice = { text: "Address copied" };
+    await navigator.clipboard.writeText(text);
+    notice = { text: copied };
   } catch {
-    // The frame may not write the clipboard: the address is selected to copy by hand, and the line says so.
-    getSelection()?.selectAllChildren(element("address"));
-    notice = { text: "The clipboard is not available here. The address is selected: copy it with Ctrl+C or Cmd+C" };
+    // The frame may not write the clipboard: the text is selected to copy by hand, and the line says so.
+    getSelection()?.selectAllChildren(element(target));
+    notice = { text: `The clipboard is not available here. The ${what} is selected: copy it with Ctrl+C or Cmd+C` };
   }
   renderMessages();
+}
+
+/** Copies the wallet's address. */
+async function copyAddress(): Promise<void> {
+  if (state) await copyText(state.wallet.address, "address", "Address copied", "address");
+}
+
+/** Copies the command that grants the allowance. */
+async function copyGrant(): Promise<void> {
+  const command = element("grant-command").textContent;
+  if (command) await copyText(command, "grant-command", "Command copied", "command");
 }
 
 function show(id: string, visible: boolean, enabled: boolean): void {
@@ -348,8 +362,11 @@ function renderState(current: AllowanceState): void {
   setText("budget", budgetLine(allowance));
   element("budget-pulled").style.width = `${(budgetShare(allowance) * 100).toFixed(2)}%`;
   const none = allowance.read?.status === "none";
+  // The command's expiry is counted from when it was first shown, not from each state: a selection of it survives the polls.
+  if (none) grantShownAt ??= current.now;
+  else grantShownAt = undefined;
   element("grant").hidden = !none;
-  setText("grant-command", none ? grantCommand(allowance, current.now) : "");
+  setText("grant-command", none && grantShownAt !== undefined ? grantCommand(allowance, grantShownAt) : "");
   setText("launch-hint", isRunning(session) ? "" : (launchHint(allowance, BigInt(LAUNCH_AMOUNT)) ?? ""));
   setText("headline", headline(current, nowMs));
   const { used, paid } = capsule(session, nowMs);
@@ -398,6 +415,7 @@ async function main(): Promise<void> {
   element("refresh").addEventListener("click", () => void refresh().catch(fail));
   element("faucet").addEventListener("click", () => void openLink(FAUCET_URL).catch(fail));
   element("copy").addEventListener("click", () => void copyAddress().catch(fail));
+  element("copy-grant").addEventListener("click", () => void copyGrant().catch(fail));
   await app.connect();
   applyHost(app.getHostContext() ?? {});
   poller.schedule(0);

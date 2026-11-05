@@ -58,7 +58,7 @@
   #notice, #offline { overflow-wrap: anywhere; user-select: text; }
   #budget-track { height: 8px; margin: 6px 0; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
   #budget-pulled { height: 100%; width: 0; background: var(--used); transition: width 0.3s; }
-  #grant code { display: block; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius); user-select: all; }
+  #grant code { display: block; flex: 1 1 16em; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius); user-select: all; }
   p { margin: 4px 0; }
 </style>
 </head>
@@ -79,7 +79,7 @@
   <div id="budget-track"><div id="budget-pulled"></div></div>
   <div id="grant" hidden>
     <p class="reason">No allowance yet. The owner grants one from the repository (its README, "Allowance funding"):</p>
-    <code id="grant-command"></code>
+    <div class="row"><code id="grant-command"></code><button id="copy-grant" type="button">Copy</button></div>
   </div>
   <p id="launch-hint" class="reason"></p>
 </section>
