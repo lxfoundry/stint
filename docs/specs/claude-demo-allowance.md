@@ -19,7 +19,8 @@ It is an example, like `examples/claude-demo`: nothing in `packages/`, `apps/` o
    - **the budget strip:** pulled and the cap this period, what is left, and when the period ends, read from the
      chain;
    - with no allowance granted yet, the exact grant command, with the agent's address in it and a suggested
-     0.200 USDC an hour for one day.
+     0.200 USDC an hour for one day, with a Copy button beside it. The command is not rewritten while it is shown, so
+     that a selection of it stays.
 3. **Launch** (100 s, 0.100 USDC) and **Top up +100 s** are pulled from the owner. The wallet log has one line per
    movement of the **owner's** USDC (`[launch] 19.896 - 0.100 = 19.796 USDC`), and the stream counts the messages about
    the owner's account.
@@ -27,7 +28,7 @@ It is an example, like `examples/claude-demo`: nothing in `packages/`, `apps/` o
 5. **Launch** past the cap is sent, and refused by the chain: the seller's facilitator simulates the transaction, the
    program fails the pull, and the gate answers `402` with `simulation_failed`. The panel says so in words, from a read
    of the allowance made after the refusal: "Refused on-chain: the allowance for this period is used up (0.200 of
-   0.200 pulled; it resets at 17:15 UTC)". Launch stays enabled when nothing is left, so that the refusal can be seen;
+   0.200 USDC pulled; the period ends at 17:15 UTC)". Launch stays enabled when nothing is left: the chain decides, and
    a hint says that it will be refused.
 
 ## Settings

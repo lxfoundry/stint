@@ -131,8 +131,9 @@ at each pull.
 ## 5. The agent in Claude Desktop: the allowance extension
 
 1. Download **`stint-claude-demo-allowance.mcpb`** from the allowance extension's release (the release page of
-   `claude-demo-allowance-v0.1.0`), and open it with Claude Desktop (Settings → Extensions → Advanced settings →
-   Install Extension).
+   `claude-demo-allowance-v0.1.0`), or build it from the repository, as the extension's
+   [README](../examples/claude-demo-allowance/README.md#install-it-in-claude-desktop) says, and open it with Claude
+   Desktop (Settings → Extensions → Advanced settings → Install Extension).
 2. Settings: keep the wallet folder and the gate URL; put the owner's address (`echo $OWNER`) in **Owner's address**;
    leave the nonce empty. The extension makes the agent its own key.
 3. In a new chat, ask: "Start the Stint allowance demo." The panel shows the owner's USDC, the agent's address, and,
@@ -327,7 +328,7 @@ With Claude Code, remove the server (the extension route has no such step):
 
 Then revoke, on both routes. With the extension, `$AGENT` is the agent's address shown in the panel:
 
-    export STINT_RPC_URL=https://api.devnet.solana.com     # again, if step 8 unset it
+    export STINT_RPC_URL=https://api.devnet.solana.com     # again, in a new terminal or if step 8 unset it
     pnpm stint allowance revoke --keypair "$HOME/.config/stint/allowance-owner.json" --agent "$AGENT" --close-authority
 
     revoked: delegation 55HZmMwLy4icQoTtnUjoApY7HNKLGmDKpXcE6a7CdHb4, and the owner's Subscription Authority closed, with its approval on the owner's USDC account
@@ -356,6 +357,7 @@ end (`status` prints when), and the cap is free again.
 | In step 8, the refusal still starts `The allowance cannot fund this payment` | The server still has a node: `unset STINT_RPC_URL` in the terminal before starting `claude` |
 | `SessionStart:startup hook error … python: not found` when Claude Code starts | The repository's own development hook, which needs `python`. It does not affect the demo |
 | HTTP 429 from the node | The public devnet node limits requests: use a devnet URL from an RPC provider for `STINT_RPC_URL` |
+| No panel, and the extension stopped: `STINT_DEMO_ALLOWANCE_OWNER is required…` or `…must be a Solana address…` after `stint-claude-demo-allowance:` in Claude Desktop's log (on the Windows Store build, `%LOCALAPPDATA%\Claude\Logs\main.log`, the lines after `[UtilityProcess stderr]`) | Set the owner's address in the extension's settings |
 | Claude declines to pay or to top up | Start a new session and ask again |
 
 ## What the owner should know
