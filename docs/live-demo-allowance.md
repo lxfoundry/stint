@@ -7,9 +7,9 @@ transaction as the open or the top-up. An early close refunds the owner, and a p
 refused. From start to end, the agent's key holds no USDC and no SOL.
 
 It runs against the same seller, [`stint-demo.lxfoundry.ai`](https://stint-demo.lxfoundry.ai), on Solana devnet: test
-USDC, no real money. Unlike the live demo, the owner needs a terminal and the repository,
-to grant the allowance. The agent runs either in Claude Desktop, with the allowance extension (step 5), or in Claude
-Code, with the repository's MCP server (steps 5b to 8). It takes about 20 minutes, most of them setting up.
+USDC, no real money. Unlike the live demo, the owner needs a terminal and the repository, to grant the allowance. The
+agent runs either in Claude Desktop, with the allowance extension (step 5), or in Claude Code, with the repository's MCP
+server (steps 5b to 8). It takes about 20 minutes, most of them setting up.
 
 | Step | Who | What happens on-chain |
 |---|---|---|
@@ -56,8 +56,11 @@ Run every later command from this folder.
 
 The **owner** holds the budget; the **agent** is the key that the session tools sign with. Make both new, for this
 alone: the allowance takes the owner's USDC account's one delegate slot, and until the allowance is revoked or expires,
-the agent's key can pull up to the cap into any USDC account. With the extension (step 5), make the owner's key only: the
-extension makes the agent's.
+the agent's key can pull up to the cap into any USDC account.
+
+**Extension route (step 5):** make the owner's key only: leave out the `allowance-agent.json` line and the `AGENT=` line
+below. The extension makes the agent's key, and its panel shows the address in step 5. In step 3, skip the agent's
+check. In step 4, run only the `export` line: the panel gives the grant command there, with the agent's address in it.
 
     mkdir -p "$HOME/.config/stint"
     solana-keygen new --no-bip39-passphrase -o "$HOME/.config/stint/allowance-owner.json"
@@ -72,7 +75,7 @@ Then keep their addresses, and the owner's USDC account, in the shell:
     echo "owner $OWNER, its USDC account $OWNER_USDC, agent $AGENT"
 
 `USDC` is Circle's devnet USDC mint. The later steps use these four variables: in a new terminal, run the four lines
-again.
+again. On the extension route, `AGENT` stays empty until step 5 sets it from the panel's address.
 
 ## 3. Fund the owner, not the agent
 
@@ -88,11 +91,13 @@ again.
 
 The agent gets nothing: `solana balance "$AGENT" --url devnet` prints `0 SOL`, and
 `spl-token balance "$USDC" --owner "$AGENT" -u devnet` answers `Could not find token account …`. Both stay that way.
+On the extension route, make these two checks after step 5 sets `AGENT`.
 
 ## 4. Grant the allowance
 
 The command reads its node from `STINT_RPC_URL`, and works on devnet only: it checks the node's genesis hash before it
-sends anything.
+sends anything. On the extension route, run only the `export` line below, and go on to step 5: the rest of this step is
+the Claude Code route's.
 
     export STINT_RPC_URL=https://api.devnet.solana.com
     EXPIRES=$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)     # on macOS: date -u -v+1d +%Y-%m-%dT%H:%M:%SZ
@@ -129,13 +134,12 @@ at each pull.
    `claude-demo-allowance-v0.1.0`), and open it with Claude Desktop (Settings → Extensions → Advanced settings →
    Install Extension).
 2. Settings: keep the wallet folder and the gate URL; put the owner's address (`echo $OWNER`) in **Owner's address**;
-   leave the nonce empty. The extension makes the agent its own key: in step 2, skip the `allowance-agent.json` line
-   and the `AGENT=` line.
+   leave the nonce empty. The extension makes the agent its own key.
 3. In a new chat, ask: "Start the Stint allowance demo." The panel shows the owner's USDC, the agent's address, and,
    with no allowance yet, the command that grants one, with the agent's address in it. Set `AGENT` to that address in
-   your terminal: steps 3, 7 and 9 use it.
+   your terminal: step 3's agent check, and steps 7 and 9, use it.
 4. Run that command in the terminal, from the repository, with `STINT_RPC_URL` exported (step 4). The strip then shows
-   0.200 USDC per hour, nothing pulled.
+   that nothing is pulled of 0.200 USDC this period, and when the period ends.
 5. **Launch**, then **Top up +100 s**: each 0.100 USDC is pulled from the owner, and the strip shows the cap used up.
    **Close now** refunds the owner; the strip still shows 0.200 pulled. **Launch** again: refused on-chain, with the
    reason in words.
@@ -181,8 +185,8 @@ take longer than that.
 
 ## 6. Run the session
 
-This step is the Claude Code route's. Ask Claude, one prompt at a time. The session's 200 s start at the open, in the second prompt. Claude's own wording
-varies; the tool results it reads are quoted below.
+This step is the Claude Code route's. Ask Claude, one prompt at a time. The session's 200 s start at the open, in the
+second prompt. Claude's own wording varies; the tool results it reads are quoted below.
 
 **1. What the agent pays with.**
 
@@ -277,10 +281,10 @@ The figures are from the Claude Code run. With the extension, the grant and the 
 
 ## 8. Optional: the program's own refusal
 
-This step is the Claude Code route's. With `STINT_RPC_URL`, the client reads the allowance and refuses a payment before it signs. Without it, the client
-signs and sends the payment, and the chain's rules refuse it: the seller's facilitator simulates the transaction, the
-Subscriptions & Allowances program fails the pull, and the gate answers `402`. Do this before the period ends, while
-the cap is still used up.
+This step is the Claude Code route's. With `STINT_RPC_URL`, the client reads the allowance and refuses a payment before
+it signs. Without it, the client signs and sends the payment, and the chain's rules refuse it: the seller's facilitator
+simulates the transaction, the Subscriptions & Allowances program fails the pull, and the gate answers `402`. Do this
+before the period ends, while the cap is still used up.
 
 Quit Claude Code, register the server again without `STINT_RPC_URL`, and start it again. The server also inherits
 Claude Code's own environment, so unset the variable that step 4 exported first, or the server still reads it:

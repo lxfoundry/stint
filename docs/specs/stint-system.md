@@ -266,23 +266,23 @@ sequenceDiagram
 ### 3.3 Repository layout
 
 ```
-programs/stint/            on-chain program (Anchor)
-packages/program-client/   generated client (Codama, @solana/kit)
-packages/subscriptions-client/  generated client of the Subscriptions & Allowances program (Codama, from its vendored IDL)
-packages/x402/             the elapsed scheme mechanism
-packages/gate/             gate middleware and core
-packages/client/           session runtime, tools, CLI
-packages/mcp/              MCP server
-apps/facilitator/          facilitator service, Compose stack with Kora
-apps/gate-proxy/           gate proxy image
-examples/solana-stream/    example resource
-examples/agent/            example agent
-examples/seller/           example seller deployment: Kora, facilitator and stream in one process
-examples/claude-demo/      example MCP server that shows a session in Claude Desktop
+programs/stint/                  on-chain program (Anchor)
+packages/program-client/         generated client (Codama, @solana/kit)
+packages/subscriptions-client/   generated client of the Subscriptions & Allowances program (Codama, from its vendored IDL)
+packages/x402/                   the elapsed scheme mechanism
+packages/gate/                   gate middleware and core
+packages/client/                 session runtime, tools, CLI
+packages/mcp/                    MCP server
+apps/facilitator/                facilitator service, Compose stack with Kora
+apps/gate-proxy/                 gate proxy image
+examples/solana-stream/          example resource
+examples/agent/                  example agent
+examples/seller/                 example seller deployment: Kora, facilitator and stream in one process
+examples/claude-demo/            example MCP server that shows a session in Claude Desktop
 examples/claude-demo-allowance/  the same, with the session funded by an owner's allowance
-conformance/               conformance suite: the scenario library and its CLI
-e2e/                       end-to-end harness: targets, fixtures, report
-docs/specs/                specifications
+conformance/                     conformance suite: the scenario library and its CLI
+e2e/                             end-to-end harness: targets, fixtures, report
+docs/specs/                      specifications
 ```
 
 ### 3.4 Network and token
