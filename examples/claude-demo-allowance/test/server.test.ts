@@ -34,12 +34,16 @@ describe("the allowance demo's MCP server", () => {
     expect(c.getServerVersion()?.name).toBe("stint-claude-demo-allowance");
     expect(c.getInstructions()).toMatch(/pulled from the owner's USDC account/);
     expect(c.getInstructions()).toMatch(/Refused on-chain/);
+    expect(c.getInstructions()).toContain("The state's ledger lists every movement, those made with the panel's buttons included.");
   });
 
   it("offers its own tool names, and runs each as the first demo's tool", async () => {
     const c = await connect(answering);
     const { tools } = await c.listTools();
     expect(tools.map((tool) => tool.name).sort()).toEqual(Object.values(ALLOWANCE_TOOL).sort());
+    expect(tools.find((tool) => tool.name === ALLOWANCE_TOOL.launch)?.description).toContain(
+      `Open the panel first with ${ALLOWANCE_TOOL.demo}: the panel shows the session, and this tool does not open it.`,
+    );
     expect(tools.find((tool) => tool.name === ALLOWANCE_TOOL.demo)?._meta).toMatchObject({ ui: { resourceUri: PANEL_URI } });
     expect(tools.find((tool) => tool.name === ALLOWANCE_TOOL.state)?._meta).toMatchObject({ ui: { visibility: ["app"] } });
     await c.callTool({ name: ALLOWANCE_TOOL.demo, arguments: {} });

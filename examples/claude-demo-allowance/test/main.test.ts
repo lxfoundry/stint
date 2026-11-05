@@ -45,6 +45,7 @@ describe("the owner side", () => {
         return async (): Promise<AllowanceReport> => ({ owner: OWNER, delegation: OWNER, ownerBalance: 19_896_000n, delegatedAmount: 0n });
       },
     };
+    const realFetch = globalThis.fetch;
     const side = createOwnerSide(config, () => {}, deps);
     try {
       const handler = await side.becomeOwner();
@@ -57,6 +58,7 @@ describe("the owner side", () => {
       expect(state.wallet).toMatchObject({ address: OWNER, usdc: "19896000" });
       expect(state.allowance).toMatchObject({ owner: OWNER, agent, nonce: "2", read: { status: "none" }, stale: false });
     } finally {
+      globalThis.fetch = realFetch;
       await side.shutdown();
     }
   });

@@ -17,7 +17,7 @@ export const TOOL_DESCRIPTIONS: Readonly<Record<AllowanceToolName, string>> = {
     "Shows the Stint allowance demo panel and returns the demo's state, with the owner's allowance. Call it when the person asks to start, open or see the Stint allowance demo.",
   [ALLOWANCE_TOOL.state]:
     "The demo's state, for the panel: the owner's account, the allowance, the session, the x402 exchange. Set refreshBalance to read the owner's USDC again.",
-  [ALLOWANCE_TOOL.launch]: `Opens a ${LAUNCH_SECONDS} s Stint session at the demo's gate, paid ${formatUsdc(LAUNCH_AMOUNT)} on devnet over x402, pulled from the owner's allowance on the Solana Foundation's Subscriptions & Allowances program into the session's escrow. The agent's key holds nothing. Past the allowance's cap for the period, the chain refuses the payment. Open the panel first with ${ALLOWANCE_TOOL.demo}.`,
+  [ALLOWANCE_TOOL.launch]: `Opens a ${LAUNCH_SECONDS} s Stint session at the demo's gate, paid ${formatUsdc(LAUNCH_AMOUNT)} on devnet over x402, pulled from the owner's allowance on the Solana Foundation's Subscriptions & Allowances program into the session's escrow. The agent's key holds nothing. Past the allowance's cap for the period, the chain refuses the payment. Open the panel first with ${ALLOWANCE_TOOL.demo}: the panel shows the session, and this tool does not open it.`,
   [ALLOWANCE_TOOL.topUp]: `Buys ${TOP_UP_SECONDS} s more on the running session, pulled from the owner's allowance like the launch. Refused when ${TOP_UP_REFUSED_WITHIN_SECONDS} s or less of paid time is left, when ${TOP_UP_SECONDS} s more would pass the seller's longest session, and by the chain past the allowance's cap.`,
   [ALLOWANCE_TOOL.close]:
     "Closes the running session now: the seller is paid for the time used, and the rest of the deposit is refunded to the owner's account. A refund does not restore the allowance.",
@@ -28,7 +28,7 @@ export const INSTRUCTIONS = [
   "This server shows a Stint session in a panel, funded by an allowance: an owner granted this agent a cap per period on the Solana Foundation's Subscriptions & Allowances program, and every launch and top-up is pulled from the owner's USDC account. The agent's own key holds nothing, and it cannot raise the allowance.",
   `${ALLOWANCE_TOOL.demo} shows the panel: call it when the person asks to start or see the Stint allowance demo.`,
   `The panel's buttons and the tools ${ALLOWANCE_TOOL.launch}, ${ALLOWANCE_TOOL.topUp} and ${ALLOWANCE_TOOL.close} act on the same session, so a result saying that a session is already running, is closed or has ended may mean that the person used the panel: say what the result says.`,
-  "The first line of a launch, top-up or close that succeeds is its line of the owner's USDC log: the balance before, the amount pulled or refunded, and the balance after. Tell the person what the action did and quote it as it is.",
+  "The first line of a launch, top-up or close that succeeds is its line of the owner's USDC log: the balance before, the amount pulled or refunded, and the balance after. Tell the person what the action did and quote it as it is. The state's ledger lists every movement, those made with the panel's buttons included.",
   "A failure that starts with 'Refused on-chain' was refused by the chain, not by this server: say so, and quote its first sentence.",
   "The panel shows the time left and the allowance as they change: do not poll for them.",
 ].join(" ");
