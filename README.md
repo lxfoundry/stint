@@ -16,6 +16,19 @@ get back what they don't use:
 **Try it:** the [live demo](docs/live-demo.md) runs a session in Claude Desktop against a seller on devnet, with nothing
 to build: download the extension, fund the agent's wallet with test USDC, and rent time on a live stream.
 
+## Demo
+
+| The demo video | The slides |
+|---|---|
+| [![The Stint demo video](docs/media/video-thumbnail.png)](https://youtu.be/PBlbQeD2K1M) | [![The Stint slides](docs/media/deck-cover.png)](docs/media/stint-deck.pdf) |
+
+- **Live demo:** [stint-demo.lxfoundry.ai](https://stint-demo.lxfoundry.ai), a seller on devnet that sells a live
+  stream of Solana account changes over WebSocket, at 0.001 USDC a second. Run a session against it in Claude Desktop
+  with the extension from the [latest release](https://github.com/lxfoundry/stint/releases/latest), following the
+  [live demo guide](docs/live-demo.md).
+- **On devnet:** the program
+  [`5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr`](https://explorer.solana.com/address/5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr?cluster=devnet).
+
 ## What Stint provides
 
 | Part | Where | What it does |
@@ -36,7 +49,14 @@ Brand assets and usage rules: [`brand/`](brand/README.md).
 
 ## Status
 
-Work in progress. Working today: the Solana program, deployed on devnet (`open`, `top_up`, `claim`, and `close`,
+Stint works end to end on Solana devnet, released as
+[v0.1.0](https://github.com/lxfoundry/stint/releases/tag/v0.1.0). Payments and their refusals, early closes and
+refunds, expiry, top-ups, fallback closes, session tokens and allowance funding pass the end-to-end scenarios of the
+[specification](docs/specs/stint-system.md) (section 12.7) on a local network and on devnet; "Running the scenarios on
+devnet" lists them. What a production release still needs is tracked as issues (see
+[Before a production release](#before-a-production-release)).
+
+Working today: the Solana program, deployed on devnet (`open`, `top_up`, `claim`, and `close`,
 which pays the seller for the time used, or for the whole paid time once it has run out, and refunds the rest); the
 x402 `elapsed` scheme; the facilitator with its sweeper and its sponsored close (a buyer with no SOL closes its
 session through the facilitator when the gate cannot), the gate with its timers, the client library, which falls back
@@ -51,12 +71,35 @@ which moves its end; a session whose paid time has run out cannot be extended. T
 does not match its offer with its reason before anything is signed, and keeps a record of each settlement, so that a
 payment sent twice is settled once and answered twice. The gate refuses a session token that has expired, names
 another audience or purpose, or was used before, and adopts a session opened directly on-chain on the seller's terms
-when its buyer connects; one in another mint is refused. Twenty-five of the 35 end-to-end scenarios of the
-[specification](docs/specs/stint-system.md) (section 12.7) pass on a local network, and the run report lists the
-other 10 as pending; the ones that pass on devnet are listed under "Running the scenarios on devnet". Not built yet:
-a store for settlement records that survives a restart of the facilitator (it keeps them in memory), the gate's watch
-of a payment whose settlement is pending, the facilitator's rate limits, and resilience across restarts.
-The [plans](docs/plans/README.md) list the stages that remain.
+when its buyer connects; one in another mint is refused. The [plans](docs/plans/README.md) record how each stage was
+built.
+
+### Before a production release
+
+The remaining scenarios of the specification, and what a deployment beyond devnet needs, are tracked as issues in
+the [Production release](https://github.com/lxfoundry/stint/milestone/1) milestone, with a checklist in
+[#44](https://github.com/lxfoundry/stint/issues/44).
+
+| Area | What is missing | Scenario | Issue |
+|---|---|---|---|
+| Closes that protect the buyer | Close without the minimum charge when the resource fails | 10 | [#30](https://github.com/lxfoundry/stint/issues/30) |
+| Closes that protect the buyer | Let the resource close a session through a private admin port | 30 | [#31](https://github.com/lxfoundry/stint/issues/31) |
+| Account edge cases | Answer `409 refund_account_closed` when the buyer's refund account is gone | 21 | [#32](https://github.com/lxfoundry/stint/issues/32) |
+| Account edge cases | Recreate a closed `receiver_token` before a close that pays it | 27 | [#33](https://github.com/lxfoundry/stint/issues/33) |
+| Account edge cases | Frozen accounts: back off in the sweeper, and freeze and thaw in the local harness | 28 | [#34](https://github.com/lxfoundry/stint/issues/34) |
+| Scale and restarts | Run a seller's gate as several instances | 11 | [#35](https://github.com/lxfoundry/stint/issues/35) |
+| Scale and restarts | Restore a gate's sessions and timers after a restart | 23 | [#36](https://github.com/lxfoundry/stint/issues/36) |
+| Scale and restarts | A client state store, and recovery of leftover sessions at start-up | 29 | [#37](https://github.com/lxfoundry/stint/issues/37) |
+| Scale and restarts | Follow a payment whose settlement is pending, in the gate and in the client | 33 | [#38](https://github.com/lxfoundry/stint/issues/38) |
+| Test harness | Move the network's time forward in the local harness | 31 | [#39](https://github.com/lxfoundry/stint/issues/39) |
+| Production | A settlement store that survives restarts and is shared by facilitator instances | — | [#40](https://github.com/lxfoundry/stint/issues/40) |
+| Production | The facilitator's limits: per API key, rate limits, seller allowlist, sponsorship policy | — | [#41](https://github.com/lxfoundry/stint/issues/41) |
+| Production | Mainnet: upgrade authority, configuration, and an independent security review | — | [#42](https://github.com/lxfoundry/stint/issues/42) |
+| Production | Packaging: the gate as a proxy, the facilitator's Compose stack, published packages | — | [#43](https://github.com/lxfoundry/stint/issues/43) |
+
+Scenarios 28 and 31 need controls that only a local network offers, a mint's freeze authority and moving the network's
+time, so the devnet run reports them as not applicable. Out of scope, as section 13 of the specification states: a
+remote-browser resource, Token-2022 mints, and a facilitator fee paid by the buyer.
 
 ## Development
 
@@ -234,7 +277,7 @@ watch: it plays no part in any scenario, and the fees that runs spend are the on
 come back to it, apart from the rent, paid once for a seed, of scenario 20's second mint and of the seller's account
 for it.
 
-Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 25, 26, 32, 34 and 35 pass on devnet.
+Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 25, 26, 32, 34 and 35 pass on devnet.
 
 A run checks that the endpoint is devnet and that the program is deployed, then cleans up: it closes
 every session that the seed's keys have open, revokes the allowances they granted, and returns what they hold to
