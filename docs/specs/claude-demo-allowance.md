@@ -78,8 +78,9 @@ The new package imports these modules of `examples/claude-demo` by relative path
   - each read is bounded in time; a read that fails keeps the last value, marked stale, and is logged;
   - the error of a launch or a top-up that the gate refused with `simulation_failed` is reworded from a read of the
     allowance made after it: used up for the period, larger than the cap, expired, not started, no allowance, or the
-    owner's balance too low. When the read explains nothing, it names the general reasons. The original message is
-    kept, after the words.
+    owner's balance too low. When the read explains nothing, it names the general reasons. The error thrown, which the
+    model reads, carries the words and then the original message; the state's error, which the panel shows, carries
+    the words and the gate's reason, `simulation_failed`.
 - **`src/server.ts`:** the first extension's MCP server, with its own server name (`stint-claude-demo-allowance`),
   instructions and tool descriptions (each payment pulled from the owner's allowance, the strip, the refusal), and its
   own tool names, each mapped onto the call handler's: `stint_allowance_demo`, `stint_allowance_demo_state`,
