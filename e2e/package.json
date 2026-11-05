@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@lxfoundry/stint-claude-demo": "workspace:*",
+    "@lxfoundry/stint-claude-demo-allowance": "workspace:*",
     "@lxfoundry/stint-client": "workspace:*",
     "@lxfoundry/stint-conformance": "workspace:*",
     "@lxfoundry/stint-example-seller": "workspace:*",

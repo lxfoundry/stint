@@ -230,6 +230,9 @@ importers:
       '@lxfoundry/stint-claude-demo':
         specifier: workspace:*
         version: link:../examples/claude-demo
+      '@lxfoundry/stint-claude-demo-allowance':
+        specifier: workspace:*
+        version: link:../examples/claude-demo-allowance
       '@lxfoundry/stint-client':
         specifier: workspace:*
         version: link:../packages/client
