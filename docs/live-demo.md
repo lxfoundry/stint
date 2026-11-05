@@ -127,6 +127,12 @@ To see the offer without Claude, ask the seller's gate for a session:
 
 It answers `402 Payment Required`, with the `elapsed` terms in its `PAYMENT-REQUIRED` header.
 
+## Optional: fund the agent from an allowance
+
+Instead of USDC on the agent's key, an owner can grant the agent an allowance on the Solana Foundation's Subscriptions &
+Allowances program, a cap per period enforced on-chain. It needs a terminal and Claude Code: see
+[An agent funded by an allowance](live-demo-allowance.md).
+
 ## How it works
 
 - [`examples/claude-demo`](../examples/claude-demo/README.md): the extension, its panel, the agent's wallet, and why
