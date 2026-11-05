@@ -19,20 +19,27 @@ Code, with the repository's MCP server (steps 5b to 8). It takes about 20 minute
 | Close early | the agent | the seller is paid for the time used, and the rest goes back to the owner. The cap stays used |
 | Open again | the agent | refused: the allowance for this period is used up |
 
-This guide was checked with Claude Code 2.1.318 in WSL 2 (Ubuntu 24.04) on Windows 11. The sample outputs below are
-from that run.
+The table and the sample outputs below are from the Claude Code route (steps 5b to 8): it was checked with Claude Code
+2.1.318 in WSL 2 (Ubuntu 24.04) on Windows 11. With the extension (step 5), the panel suggests a grant of 0.200 USDC per
+hour, and each open and top-up is 0.100 USDC.
 
 ## What you need
 
-- **Linux or macOS, or WSL 2 on Windows.** On Windows, run every command below inside WSL.
+For the owner, on both routes:
+
+- **Linux or macOS, or WSL 2 on Windows.** On Windows, run every terminal command below inside WSL.
 - **git, Node.js 24.22.0 and pnpm 12.14.0**, the versions the repository pins (`.nvmrc`, and `engines` and
   `packageManager` in `package.json`). `pnpm install` stops on any other Node.js version. With nvm, `nvm install` in the
   repository's folder installs the pinned one.
 - **The Solana CLI** (Agave), which includes `solana-keygen` and `spl-token`:
   [Install the Solana CLI](https://docs.anza.xyz/cli/install).
-- **Claude Code**, installed in the same environment (inside WSL on Windows):
-  [set up Claude Code](https://code.claude.com/docs/en/setup).
 - A browser, for the faucets and devnet's Explorer.
+
+For the agent, on one route:
+
+- **The extension route (step 5):** Claude Desktop, on Windows or macOS.
+- **The Claude Code route (steps 5b to 8):** Claude Code, installed in the same environment as the commands above
+  (inside WSL on Windows): [set up Claude Code](https://code.claude.com/docs/en/setup).
 
 What it costs, all on devnet: the owner needs less than 0.004 SOL for the grant (the rent of two accounts and the fee;
 the rent comes back at the revoke) and at least 0.300 USDC. The agent needs nothing.
@@ -47,9 +54,10 @@ Run every later command from this folder.
 
 ## 2. Make two keys
 
-The **owner** holds the budget; the **agent** is the key that Claude Code's session tools sign with. Make both new, for
-this alone: the allowance takes the owner's USDC account's one delegate slot, and until the allowance is revoked or
-expires, the agent's key can pull up to the cap into any USDC account.
+The **owner** holds the budget; the **agent** is the key that the session tools sign with. Make both new, for this
+alone: the allowance takes the owner's USDC account's one delegate slot, and until the allowance is revoked or expires,
+the agent's key can pull up to the cap into any USDC account. With the extension (step 5), make the owner's key only: the
+extension makes the agent's.
 
     mkdir -p "$HOME/.config/stint"
     solana-keygen new --no-bip39-passphrase -o "$HOME/.config/stint/allowance-owner.json"
@@ -121,17 +129,19 @@ at each pull.
    `claude-demo-allowance-v0.1.0`), and open it with Claude Desktop (Settings → Extensions → Advanced settings →
    Install Extension).
 2. Settings: keep the wallet folder and the gate URL; put the owner's address (`echo $OWNER`) in **Owner's address**;
-   leave the nonce empty. The extension makes the agent its own key: skip `allowance-agent.json` in step 2.
+   leave the nonce empty. The extension makes the agent its own key: in step 2, skip the `allowance-agent.json` line
+   and the `AGENT=` line.
 3. In a new chat, ask: "Start the Stint allowance demo." The panel shows the owner's USDC, the agent's address, and,
-   with no allowance yet, the command that grants one, with the agent's address in it.
+   with no allowance yet, the command that grants one, with the agent's address in it. Set `AGENT` to that address in
+   your terminal: steps 3, 7 and 9 use it.
 4. Run that command in the terminal, from the repository, with `STINT_RPC_URL` exported (step 4). The strip then shows
    0.200 USDC per hour, nothing pulled.
 5. **Launch**, then **Top up +100 s**: each 0.100 USDC is pulled from the owner, and the strip shows the cap used up.
    **Close now** refunds the owner; the strip still shows 0.200 pulled. **Launch** again: refused on-chain, with the
    reason in words.
-6. Clean up with step 9's revoke, giving `--agent` the agent's address from the panel.
+6. Check the money with step 7, and clean up with step 9.
 
-The rest of this guide runs the agent in Claude Code instead.
+Steps 5b, 6 and 8 run the agent in Claude Code instead; steps 7 and 9 serve both routes.
 
 ## 5b. Give Claude Code the session tools, funded by the allowance
 
@@ -171,7 +181,7 @@ take longer than that.
 
 ## 6. Run the session
 
-Ask Claude, one prompt at a time. The session's 200 s start at the open, in the second prompt. Claude's own wording
+This step is the Claude Code route's. Ask Claude, one prompt at a time. The session's 200 s start at the open, in the second prompt. Claude's own wording
 varies; the tool results it reads are quoted below.
 
 **1. What the agent pays with.**
@@ -253,6 +263,8 @@ on with prompt 6. A top-up is refused with 13 s or less left.
 
 ## 7. Check the money
 
+The figures are from the Claude Code run. With the extension, the grant and the pulls are 0.200 USDC, not 0.300.
+
 - **The owner's USDC account:** `solana transaction-history "$OWNER_USDC" --url devnet` lists five transactions,
   newest first: the close (the refund in), the top-up and the open (each a pull out), the grant, and the faucet's
   transfer. Each signature opens on devnet's Explorer at `https://explorer.solana.com/tx/<signature>?cluster=devnet`.
@@ -265,7 +277,7 @@ on with prompt 6. A top-up is refused with 13 s or less left.
 
 ## 8. Optional: the program's own refusal
 
-With `STINT_RPC_URL`, the client reads the allowance and refuses a payment before it signs. Without it, the client
+This step is the Claude Code route's. With `STINT_RPC_URL`, the client reads the allowance and refuses a payment before it signs. Without it, the client
 signs and sends the payment, and the chain's rules refuse it: the seller's facilitator simulates the transaction, the
 Subscriptions & Allowances program fails the pull, and the gate answers `402`. Do this before the period ends, while
 the cap is still used up.
@@ -300,11 +312,17 @@ above.
 
 ## 9. Clean up
 
-Close any session before you quit Claude Code. Claude Code stops its servers within a second when its session ends,
-too soon for a close. A session left running loses its connection, and the gate closes it 30 s later, refunding the
-owner. A session with less than 30 s left runs to its end.
+Close any session before you quit the agent's app. With the extension, press **Close now** in the panel before you quit
+Claude Desktop. With Claude Code, ask Claude to close it: Claude Code stops its servers within a second when its
+session ends, too soon for a close. A session left running loses its connection, and the gate closes it 30 s later,
+refunding the owner. A session with less than 30 s left runs to its end.
+
+With Claude Code, remove the server (the extension route has no such step):
 
     claude mcp remove stint
+
+Then revoke, on both routes. With the extension, `$AGENT` is the agent's address shown in the panel:
+
     export STINT_RPC_URL=https://api.devnet.solana.com     # again, if step 8 unset it
     pnpm stint allowance revoke --keypair "$HOME/.config/stint/allowance-owner.json" --agent "$AGENT" --close-authority
 
@@ -316,8 +334,8 @@ approval on the owner's USDC account: `spl-token display "$OWNER_USDC" -u devnet
 rent of both comes back to the owner. In the run above, the grant took 0.0029 SOL, and the whole run cost the owner two
 fees of 0.000005 SOL.
 
-To run steps 6 to 8 again with the same keys, do it before this step: wait for the period to end (`status` prints
-when), and the cap is free again.
+To run the session again with the same keys (step 5, or steps 6 to 8), do it before the revoke: wait for the period to
+end (`status` prints when), and the cap is free again.
 
 ## If something goes wrong
 
@@ -326,7 +344,7 @@ when), and the cap is free again.
 | `STINT_RPC_URL must be set to an http or https URL…` | Export it in this terminal (step 4) |
 | The grant fails on the owner's token account | The owner has no USDC account yet: get USDC from Circle's faucet first (step 3) |
 | The grant fails for lack of SOL | Fund the owner with devnet SOL (step 3) |
-| `no such allowance`, or the agent reports none | The grant names another agent: check that `--agent` is the address of `allowance-agent.json` |
+| `no such allowance`, or the agent reports none | The grant names another agent: check that `--agent` is the address of `allowance-agent.json`, or, with the extension, the address in the panel |
 | The allowance is used up at the first open | A run earlier in the same period used it: wait for the period to end (`status` prints when) |
 | Claude looks for `OWNER_USDC` and finds it empty | Claude Code does not see your shell's variables: paste the prompt that step 5b printed, with the address in it |
 | The session ended before the stream's first message | The gate's 30 s idle close: open and subscribe in the same prompt, with the tools allowed up front (step 5b) |
@@ -349,4 +367,5 @@ when), and the cap is free again.
 - [Allowance funding](../README.md#allowance-funding) in the README: the command, the owner's costs, and the variables
   for the MCP server and the example agent.
 - [The MCP server](../README.md#mcp-server): every variable, and the seven tools.
+- [The allowance extension](../examples/claude-demo-allowance/README.md): its tools and its settings.
 - The [specification](specs/stint-system.md), section 10: the grant, the transactions, and the refusals.
