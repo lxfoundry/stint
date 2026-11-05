@@ -47,7 +47,7 @@ describe("the allowance demo's settings", () => {
 
   it("refuses an owner that is not an address", () => {
     expect(problemsOf({ ...base, STINT_DEMO_ALLOWANCE_OWNER: "not-an-address" })).toEqual([
-      'STINT_DEMO_ALLOWANCE_OWNER must be a Solana address, got "not-an-address"',
+      "STINT_DEMO_ALLOWANCE_OWNER must be a Solana address (a base58 public key)",
     ]);
   });
 
