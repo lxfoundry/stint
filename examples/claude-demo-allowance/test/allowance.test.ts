@@ -83,6 +83,9 @@ describe("the chain's refusal", () => {
     expect(refusalWords(report({ pulled: 200_000n, available: 0n }), 100_000n)).toBe(
       "Refused on-chain: the allowance for this period is used up (0.200 of 0.200 USDC pulled; the period ends at 17:15 UTC).",
     );
+    expect(refusalWords(report({ pulled: 150_000n, available: 50_000n }), 100_000n)).toBe(
+      "Refused on-chain: the allowance for this period has 0.050 USDC left, less than the 0.100 USDC needed (0.150 of 0.200 USDC pulled; the period ends at 17:15 UTC).",
+    );
     expect(refusalWords(report({ perPeriod: 50_000n, available: 50_000n }), 100_000n)).toBe(
       "Refused on-chain: the payment, 0.100 USDC, is larger than the allowance's cap per period, 0.050 USDC.",
     );
@@ -149,6 +152,62 @@ describe("withAllowance", () => {
     expect(lines).toEqual(["reading the allowance failed: node down"]);
   });
 
+  it("marks the allowance stale, with no read, when the first read fails", async () => {
+    const demo = withAllowance(failingDemo(REFUSED), {
+      owner: OWNER,
+      agent: AGENT,
+      nonce: 0n,
+      read: async () => {
+        throw new Error("node down");
+      },
+      amounts,
+      log: () => {},
+    });
+    const view = (await demo.state()).allowance;
+    expect(view.stale).toBe(true);
+    expect(view.read).toBeUndefined();
+  });
+
+  it("is not stopped by a log that throws", async () => {
+    const demo = withAllowance(failingDemo(REFUSED), {
+      owner: OWNER,
+      agent: AGENT,
+      nonce: 0n,
+      read: async () => {
+        throw new Error("node down");
+      },
+      amounts,
+      log: () => {
+        throw new Error("no stderr");
+      },
+    });
+    expect((await demo.state()).allowance.stale).toBe(true);
+    await expect(demo.launch()).rejects.toThrow(/Refused on-chain/);
+  });
+
+  it("rejects a failure that is no refusal without waiting for a read", async () => {
+    let reads = 0;
+    const demo = withAllowance(failingDemo("A session is already running: top it up, close it, or let it end"), {
+      owner: OWNER,
+      agent: AGENT,
+      nonce: 0n,
+      read: () => {
+        reads++;
+        return new Promise<AllowanceReport>(() => {});
+      },
+      amounts,
+    });
+    const outcome = await Promise.race([
+      demo.launch().then(
+        () => "resolved",
+        (error: unknown) => (error instanceof Error ? error.message : "rejected"),
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve("waited"), 100)),
+    ]);
+    expect(outcome).toBe("A session is already running: top it up, close it, or let it end");
+    expect(reads).toBe(1);
+  });
+
   it("reads at most every 5 s on state reads", async () => {
     let clock = 0;
     let reads = 0;
@@ -183,6 +242,11 @@ describe("withAllowance", () => {
   it("rewords a top-up the chain refused", async () => {
     const demo = withAllowance(failingDemo(REFUSED_TOP_UP), { owner: OWNER, agent: AGENT, nonce: 0n, read: async () => report({ pulled: 200_000n, available: 0n }), amounts });
     await expect(demo.topUp()).rejects.toThrow(/^Refused on-chain: the allowance for this period is used up/);
+  });
+
+  it("says a launch the allowance has some left for, but not enough, with what is left", async () => {
+    const demo = withAllowance(failingDemo(REFUSED), { owner: OWNER, agent: AGENT, nonce: 0n, read: async () => report({ pulled: 150_000n, available: 50_000n }), amounts });
+    await expect(demo.launch()).rejects.toThrow(/^Refused on-chain: the allowance for this period has 0\.050 USDC left, less than the 0\.100 USDC needed/);
   });
 
   it("passes any other failure on as it is", async () => {

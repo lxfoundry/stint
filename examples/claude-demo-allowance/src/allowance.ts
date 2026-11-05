@@ -47,7 +47,9 @@ function shortfall(report: AllowanceReport, amount: bigint): string | undefined 
   if (period.status === "notStarted") return "the allowance has not started yet";
   if (period.available < amount) {
     if (amount > period.perPeriod) return `the payment, ${usdc(amount)}, is larger than the allowance's cap per period, ${usdc(period.perPeriod)}`;
-    return `the allowance for this period is used up (${formatAmount(period.pulled.toString())} of ${usdc(period.perPeriod)} pulled; the period ends at ${utcTime(Number(period.periodEnd))})`;
+    const pulled = `${formatAmount(period.pulled.toString())} of ${usdc(period.perPeriod)} pulled; the period ends at ${utcTime(Number(period.periodEnd))}`;
+    if (period.available > 0n) return `the allowance for this period has ${usdc(period.available)} left, less than the ${usdc(amount)} needed (${pulled})`;
+    return `the allowance for this period is used up (${pulled})`;
   }
   if (report.ownerBalance < amount) return `the owner's account holds ${usdc(report.ownerBalance)}, less than the ${usdc(amount)} needed`;
   if (report.delegatedAmount < amount) return "the owner's USDC account no longer lets the allowance program move its tokens";
@@ -90,7 +92,13 @@ const message = (error: unknown): string => (error instanceof Error ? error.mess
  */
 export function withAllowance(demo: Demo, options: WithAllowanceOptions): AllowanceDemo {
   const now = options.now ?? Date.now;
-  const say = options.log ?? (() => {});
+  const say = (line: string): void => {
+    try {
+      options.log?.(line);
+    } catch {
+      // Nowhere left to say so.
+    }
+  };
   let latest: { readonly read: AllowanceRead; readonly at: number } | undefined;
   let stale = false;
   let reading: Promise<AllowanceReport | undefined> | undefined;
@@ -105,7 +113,7 @@ export function withAllowance(demo: Demo, options: WithAllowanceOptions): Allowa
       stale = false;
       return report;
     } catch (error) {
-      stale = latest !== undefined;
+      stale = true;
       say(`reading the allowance failed: ${message(error)}`);
       return undefined;
     }
@@ -145,9 +153,14 @@ export function withAllowance(demo: Demo, options: WithAllowanceOptions): Allowa
       state = await work();
     } catch (error) {
       const original = message(error);
-      const report = await fresh();
-      if (!isChainRefusal(original)) throw error;
-      const words = refusalWords(report, amount);
+      if (!isChainRefusal(original)) {
+        // The failure waits for no read: the next state carries the allowance as it is by then.
+        void refresh();
+        throw error;
+      }
+      // The general words at once, so that a state read while the allowance is read again does not show the raw message.
+      refusal = { original, words: refusalWords(undefined, amount) };
+      const words = refusalWords(await fresh(), amount);
       refusal = { original, words };
       throw new Error(`${words} ${original}`);
     }
