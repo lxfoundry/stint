@@ -1,24 +1,28 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
-import { createSessionTools, createStintClient } from "@lxfoundry/stint-client";
-import { DEMO_POLICY, createCallHandler, createDemo, createRpcDemoChain, recordExchanges } from "@lxfoundry/stint-claude-demo";
+import { DEMO_POLICY, createCallHandler, createDemo, recordExchanges } from "@lxfoundry/stint-claude-demo";
 import {
+  ALLOWANCE_DIR,
   ALLOWANCE_TOOL,
-  createAllowanceReader,
   createAllowanceServer,
+  defaultDeps,
   withAllowance,
+  type AllowanceConfig,
   type AllowanceState,
 } from "@lxfoundry/stint-claude-demo-allowance";
 import type { AllowanceGrant } from "@lxfoundry/stint-conformance";
 import { USDC_DEVNET, associatedTokenAddress } from "@lxfoundry/stint-x402";
 import type { Address } from "@solana/kit";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startLocalStack, type LocalStack } from "../src/targets/local.js";
 
 // The allowance example (`examples/claude-demo-allowance`) as the copy that holds its state runs it, with no Claude: the
-// first example's demo on the owner's account, the client funded from a grant made on the local network, and the
-// allowance example's wrapper and server. A launch of 20 s costs 20,000 base units at the local stack's rate; the cap is
-// 30,000, so the second launch is refused by the chain.
+// first example's demo on the owner's account, the client, the chain and the allowance reader that the example builds
+// for a grant made on the local network, and the example's wrapper and server. A launch of 20 s costs 20,000 base units
+// at the local stack's rate; the cap is 30,000, so the second launch is refused by the chain.
 
+const here = fileURLToPath(new URL(".", import.meta.url));
 const LAUNCH_SECONDS = 20;
 const LAUNCH_COST = 20_000n;
 
@@ -47,15 +51,26 @@ describe("the allowance example on the local stack", () => {
     const client = new Client({ name: "e2e", version: "1.0.0" });
     let demo: ReturnType<typeof withAllowance> | undefined;
     try {
-      const tools = createSessionTools(createStintClient({ signer: grant.agent, policy: DEMO_POLICY, allowance: { owner, nonce: grant.nonce } }));
-      const chain = await createRpcDemoChain(stack.network.rpcUrl, owner);
+      // The example's own wiring (`defaultDeps`): a client with the allowance and no node, which the chain's refusal needs.
       const gateUrl = stack.stream.url;
+      const unused = join(here, "..", ".cache", "claude-demo-allowance-unused");
+      const config: AllowanceConfig = {
+        home: unused,
+        dir: join(unused, ALLOWANCE_DIR),
+        gateUrl,
+        rpcUrl: stack.network.rpcUrl,
+        policy: DEMO_POLICY,
+        owner,
+        nonce: grant.nonce,
+      };
+      const tools = defaultDeps.makeTools(grant.agent, config);
+      const chain = await defaultDeps.makeChain(config);
       const inner = createDemo({ address: owner, gateUrl, tools, chain, launchSeconds: LAUNCH_SECONDS, log: () => {} });
       demo = withAllowance(inner, {
         owner,
         agent,
         nonce: grant.nonce,
-        read: createAllowanceReader(stack.network.rpc, { owner, agent, mint: USDC_DEVNET.mint, nonce: grant.nonce }),
+        read: defaultDeps.makeReader(agent, config),
         amounts: { launch: LAUNCH_COST, topUp: LAUNCH_COST },
       });
       globalThis.fetch = recordExchanges(gateUrl, demo.sink, realFetch);

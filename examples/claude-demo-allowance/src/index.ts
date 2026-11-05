@@ -5,3 +5,4 @@ export { budgetLine, grantCommand, launchHint, type AllowanceRead, type Allowanc
 export { ALLOWANCE_DIR, loadConfig, type AllowanceConfig } from "./config.js";
 export { ALLOWANCE_TOOL, PANEL_URI, TO_HANDLER } from "./names.js";
 export { createAllowanceServer, SERVER_INFO } from "./server.js";
+export { defaultDeps, type AllowanceDeps } from "./main.js";
