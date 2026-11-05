@@ -17,7 +17,7 @@ It takes about five minutes, and needs nothing but Claude Desktop: no Node.js, n
 Open the [latest release](https://github.com/lxfoundry/stint/releases/latest) of the repository and download
 **`stint-claude-demo.mcpb`** from its assets.
 
-<!-- screenshot: the release page with stint-claude-demo.mcpb in its assets (docs/live-demo/01-release.png) -->
+<img src="live-demo/01-release.png" alt="The release page, with stint-claude-demo.mcpb in its assets" width="640">
 
 ## 2. Install it in Claude Desktop
 
@@ -31,7 +31,8 @@ Extension** and pick it. Claude Desktop shows the extension, **Stint demo**, and
 
 Install it, and check that it is enabled.
 
-<!-- screenshot: the install dialog with the two settings (docs/live-demo/02-install.png) -->
+<img src="live-demo/02-extension.png" alt="Claude Desktop shows the Stint demo extension and its tools before installing it" width="420">
+<img src="live-demo/02-install.png" alt="The two settings: the wallet folder and the gate URL, both left at their defaults" width="420">
 
 ## 3. Open the panel
 
@@ -43,7 +44,7 @@ Claude calls the extension's `stint_demo` tool. Claude Desktop asks you to allow
 the chat. At its first start, the extension made the agent a new devnet key, and the panel shows its address and its
 USDC balance: 0 for now.
 
-<!-- screenshot: the panel with the new wallet, its address and the faucet link (docs/live-demo/03-panel-unfunded.png) -->
+<img src="live-demo/03-panel-unfunded.png" alt="The panel with the new wallet, its address, 0 USDC and the faucet link" width="560">
 
 ## 4. Fund the agent's wallet
 
@@ -51,6 +52,8 @@ USDC balance: 0 for now.
 2. Open Circle's faucet, [faucet.circle.com](https://faucet.circle.com/) (the panel links to it while the wallet holds
    less than 0.100 USDC). Choose **Solana Devnet**, paste the address, and send.
 3. Back in the panel, press **Refresh**: the balance shows the USDC.
+
+<img src="live-demo/03-faucet.png" alt="Circle's faucet, with USDC and Solana Devnet chosen and the agent's address pasted" width="420">
 
 The wallet needs USDC only. The seller's facilitator pays the network fees through Kora, so the agent never holds SOL.
 
@@ -66,9 +69,10 @@ the exchange as it happens:
 3. **`201 Created`**, with the settled transaction, linked to devnet's Explorer.
 
 The paid time drains in the panel while the stream is connected. The message count is the stream's updates about the
-agent's own USDC account, which arrive when its money moves.
+agent's own USDC account, which arrive when its money moves. The panel subscribes once the session is open, after the
+launch's payment has landed, so the count starts with the top-up.
 
-<!-- screenshot: a running session: the 402 exchange, the countdown, the buttons (docs/live-demo/04-running.png) -->
+<img src="live-demo/04-running.png" alt="A running session: the paid time left, the buttons, the wallet log and the 402 exchange" width="560">
 
 Then, before the paid time runs out:
 
@@ -87,14 +91,14 @@ asked to quote the wallet's line for what it did.
 
 The panel's **wallet log** has one line per movement of the agent's USDC, such as:
 
-    [launch] 19.630 - 0.100 = 19.530 USDC
-    [top-up] 19.530 - 0.100 = 19.430 USDC
-    [close] 19.430 + 0.034 = 19.464 USDC
+    [launch] 19.924 - 0.100 = 19.824 USDC
+    [top-up] 19.824 - 0.100 = 19.724 USDC
+    [close] 19.724 + 0.156 = 19.880 USDC
 
 Each line links to its transaction on devnet's Explorer: the payment into the session's vault, and at the close, the
 seller's payout and the refund, in the same transaction.
 
-<!-- screenshot: a closed session with the wallet log and its Explorer links (docs/live-demo/05-closed.png) -->
+<img src="live-demo/05-closed.png" alt="A closed session: paid 0.044 USDC, refunded 0.156 USDC, 2 stream messages, the wallet log and its Explorer links" width="560">
 
 ## The limits
 
