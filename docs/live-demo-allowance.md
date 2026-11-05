@@ -268,7 +268,7 @@ on with prompt 6. A top-up is refused with 13 s or less left.
 
 ## 7. Check the money
 
-The figures are from the Claude Code run. With the extension, the grant and the pulls are 0.200 USDC, not 0.300.
+The figures are from the Claude Code run. With the extension, the grant is 0.200 USDC an hour, not 0.300, and each pull is 0.100 USDC.
 
 - **The owner's USDC account:** `solana transaction-history "$OWNER_USDC" --url devnet` lists five transactions,
   newest first: the close (the refund in), the top-up and the open (each a pull out), the grant, and the faucet's

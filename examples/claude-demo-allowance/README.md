@@ -31,8 +31,11 @@ Build it in WSL or on Linux, from the repository root:
     pnpm --filter @lxfoundry/stint-claude-demo-allowance run mcpb
 
 They write `examples/claude-demo-allowance/dist/claude-demo-allowance.cjs` and
-`examples/claude-demo-allowance/dist/stint-claude-demo-allowance.mcpb`. Open the `.mcpb` with Claude Desktop (Settings →
-Extensions → Advanced settings → Install Extension). It asks for:
+`examples/claude-demo-allowance/dist/stint-claude-demo-allowance.mcpb`.
+
+Copy the `.mcpb` to the machine that runs Claude Desktop (from WSL, for instance to `/mnt/c/Users/<you>/Downloads/`) and
+open it with Claude Desktop: double-click it, or use Settings → Extensions → Advanced settings → Install Extension.
+Claude Desktop asks for:
 
 | Setting | Meaning |
 |---|---|

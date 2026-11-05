@@ -218,8 +218,9 @@ What an owner needs to know:
   delegation is revoked or expires. Choose the cap, the period and the expiry for what the owner is willing to lose if
   that key leaks.
 
-[An agent funded by an allowance](docs/live-demo-allowance.md) runs it step by step against the hosted seller, with
-Claude Code as the agent.
+[An agent funded by an allowance](docs/live-demo-allowance.md) runs it step by step against the hosted seller. The agent
+runs in Claude Desktop, with the allowance extension, or in Claude Code; the owner grants from a terminal with the
+repository in both cases.
 
 ## Examples: a seller deployment, and a session in Claude Desktop
 
