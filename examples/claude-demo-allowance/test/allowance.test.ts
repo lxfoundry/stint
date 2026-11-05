@@ -1,9 +1,9 @@
 import type { AllowanceReport } from "@lxfoundry/stint-client";
 import type { Address } from "@solana/kit";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Demo } from "../../claude-demo/src/demo.js";
 import type { DemoState } from "../../claude-demo/src/state.js";
-import { ALLOWANCE_READ_EVERY_MS, isChainRefusal, refusalWords, withAllowance } from "../src/allowance.js";
+import { ALLOWANCE_READ_EVERY_MS, ALLOWANCE_READ_WAIT_MS, isChainRefusal, refusalWords, withAllowance } from "../src/allowance.js";
 
 const OWNER = "CciCZMJsih7NY5pet9kc1siPSj7169WSFZoTTQ5dGezx" as Address;
 const AGENT = "Eqc9hpkQBqhtSTPyzo1V9skXio92jkKsZejFcEj58sBj" as Address;
@@ -254,5 +254,43 @@ describe("withAllowance", () => {
     const demo = withAllowance(failingDemo(message), { owner: OWNER, agent: AGENT, nonce: 0n, read: async () => report({}), amounts });
     await expect(demo.launch()).rejects.toThrow(message);
     expect((await demo.state()).error?.message).toBe(message);
+  });
+
+  it("rewords a refusal in the state that the wrapper has not seen through an action, with the general words", async () => {
+    const general = refusalWords(undefined, 0n);
+    const inner: Demo = { ...failingDemo(REFUSED), state: async () => baseState({ action: "launch", message: REFUSED, at: 1 }) };
+    const demo = withAllowance(inner, { owner: OWNER, agent: AGENT, nonce: 0n, read: async () => report({ pulled: 200_000n, available: 0n }), amounts });
+    expect((await demo.state()).error).toEqual({ action: "launch", message: `${general} The gate answered simulation_failed.`, at: 1 });
+  });
+
+  describe("after an action that worked", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("answers without waiting longer than a state read does for a read that never settles", async () => {
+      vi.useFakeTimers();
+      const inner: Demo = { ...failingDemo(REFUSED), launch: async () => baseState() };
+      let reads = 0;
+      const demo = withAllowance(inner, {
+        owner: OWNER,
+        agent: AGENT,
+        nonce: 0n,
+        read: () => {
+          reads++;
+          return new Promise<AllowanceReport>(() => {});
+        },
+        amounts,
+      });
+      let outcome = "pending";
+      void demo.launch().then(() => {
+        outcome = "resolved";
+      });
+      await vi.advanceTimersByTimeAsync(ALLOWANCE_READ_WAIT_MS - 1);
+      expect(outcome).toBe("pending");
+      await vi.advanceTimersByTimeAsync(1);
+      expect(outcome).toBe("resolved");
+      expect(reads).toBe(1);
+    });
   });
 });

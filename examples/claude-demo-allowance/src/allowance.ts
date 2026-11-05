@@ -139,10 +139,26 @@ export function withAllowance(demo: Demo, options: WithAllowanceOptions): Allowa
     return { owner: options.owner, agent: options.agent, nonce: options.nonce.toString(), ...(latest ? { read: latest.read, readAt: latest.at } : {}), stale };
   }
 
+  /** Waits for `pending` at most `ALLOWANCE_READ_WAIT_MS`: a read that is slower goes on, and what it finds shows in a later state. */
+  async function within(pending: Promise<unknown>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const wait = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ALLOWANCE_READ_WAIT_MS);
+      timer.unref?.();
+    });
+    try {
+      await Promise.race([pending, wait]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   function decorate(state: DemoState): AllowanceState {
+    // The inner demo stores a failure before it gives it up: a state read in between holds a refusal that `act` has not
+    // seen yet. It is reworded all the same, with the general words until `act` has the read that explains it.
     const reworded =
-      state.error && refusal && state.error.message === refusal.original
-        ? { error: { ...state.error, message: `${refusal.words} The gate answered simulation_failed.` } }
+      state.error && isChainRefusal(state.error.message)
+        ? { error: { ...state.error, message: `${refusal && refusal.original === state.error.message ? refusal.words : refusalWords(undefined, 0n)} The gate answered simulation_failed.` } }
         : {};
     return { ...state, ...reworded, allowance: view() };
   }
@@ -158,13 +174,14 @@ export function withAllowance(demo: Demo, options: WithAllowanceOptions): Allowa
         void refresh();
         throw error;
       }
-      // The general words at once, so that a state read while the allowance is read again does not show the raw message.
+      // The general words at once, for a state read while the allowance is read again (`decorate` rewords any refusal).
       refusal = { original, words: refusalWords(undefined, amount) };
       const words = refusalWords(await fresh(), amount);
       refusal = { original, words };
       throw new Error(`${words} ${original}`);
     }
-    await fresh();
+    // A slow node does not hold the panel's buttons: the read goes on, and a later state carries what it finds.
+    await within(fresh());
     return decorate(state);
   }
 
@@ -174,15 +191,7 @@ export function withAllowance(demo: Demo, options: WithAllowanceOptions): Allowa
       const state = await demo.state(stateOptions);
       const due = stateOptions?.refreshBalance === true || now() - lastStarted >= ALLOWANCE_READ_EVERY_MS;
       const pending = due ? refresh() : reading;
-      if (pending) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const wait = new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, ALLOWANCE_READ_WAIT_MS);
-          timer.unref?.();
-        });
-        await Promise.race([pending, wait]);
-        clearTimeout(timer);
-      }
+      if (pending) await within(pending);
       return decorate(state);
     },
     launch: () => act(() => demo.launch(), options.amounts.launch),
