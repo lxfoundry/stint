@@ -7,8 +7,9 @@ transaction as the open or the top-up. An early close refunds the owner, and a p
 refused. From start to end, the agent's key holds no USDC and no SOL.
 
 It runs against the same seller, [`stint-demo.lxfoundry.ai`](https://stint-demo.lxfoundry.ai), on Solana devnet: test
-USDC, no real money. Unlike the live demo, it needs a terminal, the repository and Claude Code: the Claude Desktop
-extension pays from its own wallet only. It takes about 20 minutes, most of them setting up.
+USDC, no real money. Unlike the live demo, the owner needs a terminal and the repository,
+to grant the allowance. The agent runs either in Claude Desktop, with the allowance extension (step 5), or in Claude
+Code, with the repository's MCP server (steps 5b to 8). It takes about 20 minutes, most of them setting up.
 
 | Step | Who | What happens on-chain |
 |---|---|---|
@@ -114,7 +115,25 @@ shows the owner's USDC account with its new delegate, the Subscription Authority
 The approval has no limit (the most a token account can hold): the cap is the delegation's, which the program checks
 at each pull.
 
-## 5. Give Claude Code the session tools, funded by the allowance
+## 5. The agent in Claude Desktop: the allowance extension
+
+1. Download **`stint-claude-demo-allowance.mcpb`** from the allowance extension's release (the release page of
+   `claude-demo-allowance-v0.1.0`), and open it with Claude Desktop (Settings → Extensions → Advanced settings →
+   Install Extension).
+2. Settings: keep the wallet folder and the gate URL; put the owner's address (`echo $OWNER`) in **Owner's address**;
+   leave the nonce empty. The extension makes the agent its own key: skip `allowance-agent.json` in step 2.
+3. In a new chat, ask: "Start the Stint allowance demo." The panel shows the owner's USDC, the agent's address, and,
+   with no allowance yet, the command that grants one, with the agent's address in it.
+4. Run that command in the terminal, from the repository, with `STINT_RPC_URL` exported (step 4). The strip then shows
+   0.200 USDC per hour, nothing pulled.
+5. **Launch**, then **Top up +100 s**: each 0.100 USDC is pulled from the owner, and the strip shows the cap used up.
+   **Close now** refunds the owner; the strip still shows 0.200 pulled. **Launch** again: refused on-chain, with the
+   reason in words.
+6. Clean up with step 9's revoke, giving `--agent` the agent's address from the panel.
+
+The rest of this guide runs the agent in Claude Code instead.
+
+## 5b. Give Claude Code the session tools, funded by the allowance
 
 Register the repository's MCP server with Claude Code, from the repository's folder:
 
@@ -164,7 +183,7 @@ balance.
 
     {"funding":"allowance","owner":"CciCZMJsih7NY5pet9kc1siPSj7169WSFZoTTQ5dGezx","status":"active","perPeriod":"300000","pulledThisPeriod":"0","leftThisPeriod":"300000","periodEndsAt":1793898951,"expiresAt":1793981732,"ownerBalance":"20000000"}
 
-**2. Open a session, and watch the owner's account on the stream.** Paste the prompt that step 5 printed:
+**2. Open a session, and watch the owner's account on the stream.** Paste the prompt that step 5b printed:
 
 > Open a 200-second Stint session at https://stint-demo.lxfoundry.ai, and in the same turn subscribe on it to the
 > account 2jPivp36NKaGtT2kYKmJHkaEzdEpMFJftv6UGhEd5a9U by sending
@@ -309,8 +328,8 @@ when), and the cap is free again.
 | The grant fails for lack of SOL | Fund the owner with devnet SOL (step 3) |
 | `no such allowance`, or the agent reports none | The grant names another agent: check that `--agent` is the address of `allowance-agent.json` |
 | The allowance is used up at the first open | A run earlier in the same period used it: wait for the period to end (`status` prints when) |
-| Claude looks for `OWNER_USDC` and finds it empty | Claude Code does not see your shell's variables: paste the prompt that step 5 printed, with the address in it |
-| The session ended before the stream's first message | The gate's 30 s idle close: open and subscribe in the same prompt, with the tools allowed up front (step 5) |
+| Claude looks for `OWNER_USDC` and finds it empty | Claude Code does not see your shell's variables: paste the prompt that step 5b printed, with the address in it |
+| The session ended before the stream's first message | The gate's 30 s idle close: open and subscribe in the same prompt, with the tools allowed up front (step 5b) |
 | `/mcp` shows `stint` failed | Start `claude` from the repository's folder, where the server was added; check that `pnpm install` ran |
 | In step 8, the refusal still starts `The allowance cannot fund this payment` | The server still has a node: `unset STINT_RPC_URL` in the terminal before starting `claude` |
 | `SessionStart:startup hook error … python: not found` when Claude Code starts | The repository's own development hook, which needs `python`. It does not affect the demo |

@@ -279,6 +279,7 @@ examples/solana-stream/    example resource
 examples/agent/            example agent
 examples/seller/           example seller deployment: Kora, facilitator and stream in one process
 examples/claude-demo/      example MCP server that shows a session in Claude Desktop
+examples/claude-demo-allowance/  the same, with the session funded by an owner's allowance
 conformance/               conformance suite: the scenario library and its CLI
 e2e/                       end-to-end harness: targets, fixtures, report
 docs/specs/                specifications

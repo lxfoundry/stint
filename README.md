@@ -229,6 +229,8 @@ its gate in one process, deployable on Fly.io as one always-on machine that sell
 Desktop: the agent's wallet, the x402 exchange, the paid time draining, a top-up, and an early close with its refund.
 The [live demo guide](docs/live-demo.md) installs it from the latest release, against the hosted seller at
 `https://stint-demo.lxfoundry.ai`, whose page at `/` describes the offer.
+[`examples/claude-demo-allowance`](examples/claude-demo-allowance/README.md) is the same session funded by an owner's
+allowance instead of the agent's own USDC.
 
 ## Deploying to devnet
 
