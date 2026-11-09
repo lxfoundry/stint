@@ -46,7 +46,9 @@ Claude Desktop asks for:
 
 Then ask Claude, in a new chat, to start the Stint allowance demo. The panel shows the agent's address and the command
 that grants it an allowance: run it from the repository, as [Allowance funding](../../README.md#allowance-funding)
-describes, with the owner's keypair. The command names devnet's public node in `STINT_RPC_URL`, which the grant reads.
+describes, with the owner's keypair. The command names devnet's public node in `STINT_RPC_URL`, which the grant reads,
+and the keypair at `$HOME/.config/stint/allowance-owner.json`, the allowance guide's file: with another file, such as
+that section's `owner.json`, change the path after `--keypair`.
 The panel's strip shows the allowance within a few seconds. [The allowance guide](../../docs/live-demo-allowance.md#5-the-agent-in-claude-desktop-the-allowance-extension)
 walks through a run, with screenshots.
 

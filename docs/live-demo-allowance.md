@@ -21,8 +21,8 @@ server (steps 5b to 8). It takes about 20 minutes, most of them setting up.
 
 The table and the sample outputs below are from the Claude Code route (steps 5b to 8): it was checked with Claude Code
 2.1.318 in WSL 2 (Ubuntu 24.04) on Windows 11. With the extension (step 5), the panel suggests a grant of 0.200 USDC per
-hour, and each open and top-up is 0.100 USDC; step 5's screenshots are from Claude Desktop on Windows 11, with the
-owner's commands in WSL 2.
+hour, and each open and top-up is 0.100 USDC; step 5's screenshots are from Claude Desktop 4.23118.0 (Windows x64) on
+Windows 11, with the owner's commands in WSL 2.
 
 ## What you need
 
@@ -138,9 +138,10 @@ at each pull.
 2. Settings: keep the wallet folder and the gate URL; put the owner's address (`echo $OWNER`) in **Owner's address**;
    leave the nonce empty. The extension makes the agent its own key.
 3. In a new chat, ask: "Start the Stint allowance demo." Claude calls the extension's `stint_allowance_demo` tool, and
-   the panel appears in the chat: the owner's address and USDC, the agent's address, which holds no USDC and no SOL,
-   and, with no allowance yet, the command that grants one, with the agent's address in it. Set `AGENT` to that address
-   in your terminal: step 3's agent check, and steps 7 and 9, use it.
+   Claude Desktop asks you to allow it. Once you do, the panel appears in the chat: the owner's address and USDC, the
+   agent's address, which holds no USDC and no SOL, and, with no allowance yet, the command that grants one, with the
+   agent's address in it. Set `AGENT` to that address in your terminal: step 3's agent check, and steps 7 and 9, use
+   it.
 
    <img src="live-demo-allowance/01-no-allowance.png" alt="The panel before the grant: the owner's address and 19.896 USDC, the agent's address, no allowance yet, and the command that grants one" width="560">
 
@@ -391,7 +392,7 @@ end (`status` prints when), and the cap is free again.
 | `/mcp` shows `stint` failed | Start `claude` from the repository's folder, where the server was added; check that `pnpm install` ran |
 | In step 8, the refusal still starts `The allowance cannot fund this payment` | The server still has a node: `unset STINT_RPC_URL` in the terminal before starting `claude` |
 | `SessionStart:startup hook error … python: not found` when Claude Code starts | The repository's own development hook, which needs `python`. It does not affect the demo |
-| HTTP 429 from the node | The public devnet node limits requests: use a devnet URL from an RPC provider for `STINT_RPC_URL` |
+| HTTP 429 from the node | The public devnet node limits requests: use a devnet URL from an RPC provider for `STINT_RPC_URL`. With the extension, put it in place of `https://api.devnet.solana.com` at the start of the panel's command: the command sets the variable itself, over any value exported in the terminal |
 | No panel, and the extension stopped: `STINT_DEMO_ALLOWANCE_OWNER is required…` or `…must be a Solana address…` after `stint-claude-demo-allowance:` in Claude Desktop's log (on the Windows Store build, `%LOCALAPPDATA%\Claude\Logs\main.log`, the lines after `[UtilityProcess stderr]`) | Set the owner's address in the extension's settings |
 | Claude declines to pay or to top up | Start a new session and ask again |
 

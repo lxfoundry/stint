@@ -19,8 +19,9 @@ It is an example, like `examples/claude-demo`: nothing in `packages/`, `apps/` o
    - **the budget strip:** pulled and the cap this period, what is left, and when the period ends, read from the
      chain;
    - with no allowance granted yet, the exact grant command, with the agent's address in it and a suggested
-     0.200 USDC an hour for one day, with a Copy button beside it. The command is not rewritten while it is shown, so
-     that a selection of it stays.
+     0.200 USDC an hour for one day, with a Copy button beside it. The command sets `STINT_RPC_URL`, which the grant
+     reads, to devnet's public node, never to the extension's own node, whose URL may carry an API key. The command is
+     not rewritten while it is shown, so that a selection of it stays.
 3. **Launch** (100 s, 0.100 USDC) and **Top up +100 s** are pulled from the owner. The wallet log has one line per
    movement of the **owner's** USDC (`[launch] 19.896 - 0.100 = 19.796 USDC`), and the stream counts the messages about
    the owner's account.
