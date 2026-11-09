@@ -26,6 +26,9 @@ to build: download the extension, fund the agent's wallet with test USDC, and re
   stream of Solana account changes over WebSocket, at 0.001 USDC a second. Run a session against it in Claude Desktop
   with the extension from the [latest release](https://github.com/lxfoundry/stint/releases/latest), following the
   [live demo guide](docs/live-demo.md).
+- **Allowance demo:** the same session, funded by an owner's allowance instead of the agent's own USDC, with the
+  extension from its [release](https://github.com/lxfoundry/stint/releases/tag/claude-demo-allowance-v0.1.0), following
+  [the allowance guide](docs/live-demo-allowance.md).
 - **On devnet:** the program
   [`5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr`](https://explorer.solana.com/address/5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr?cluster=devnet).
 
