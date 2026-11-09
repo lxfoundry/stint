@@ -131,10 +131,10 @@ at each pull.
 
 ## 5. The agent in Claude Desktop: the allowance extension
 
-1. Download **`stint-claude-demo-allowance.mcpb`** from the allowance extension's release (the release page of
-   `claude-demo-allowance-v0.1.0`), or build it from the repository, as the extension's
-   [README](../examples/claude-demo-allowance/README.md#install-it-in-claude-desktop) says, and open it with Claude
-   Desktop (Settings → Extensions → Advanced settings → Install Extension).
+1. Build **`stint-claude-demo-allowance.mcpb`** from the repository, as the extension's
+   [README](../examples/claude-demo-allowance/README.md#install-it-in-claude-desktop) says, or download it from the
+   extension's own release, `claude-demo-allowance-v0.1.0`, once it is published. Open it with Claude Desktop
+   (Settings → Extensions → Advanced settings → Install Extension).
 2. Settings: keep the wallet folder and the gate URL; put the owner's address (`echo $OWNER`) in **Owner's address**;
    leave the nonce empty. The extension makes the agent its own key.
 3. In a new chat, ask: "Start the Stint allowance demo." Claude calls the extension's `stint_allowance_demo` tool, and
