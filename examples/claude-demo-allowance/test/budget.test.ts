@@ -73,10 +73,10 @@ describe("the allowance's words", () => {
     );
   });
 
-  it("gives the grant command with the agent's address, a day's expiry, and the nonce when it is not 0", () => {
+  it("gives the grant command with devnet's node, the agent's address, a day's expiry, and the nonce when it is not 0", () => {
     const now = Date.UTC(2026, 10, 5, 16, 0, 0, 500);
     expect(grantCommand(view({ status: "none" }), now)).toBe(
-      `pnpm stint allowance grant --keypair "$HOME/.config/stint/allowance-owner.json" --agent ${AGENT} --per-period 200000 --period 3600 --expires 2026-11-06T16:00:00Z`,
+      `STINT_RPC_URL=https://api.devnet.solana.com pnpm stint allowance grant --keypair "$HOME/.config/stint/allowance-owner.json" --agent ${AGENT} --per-period 200000 --period 3600 --expires 2026-11-06T16:00:00Z`,
     );
     expect(grantCommand(view({ status: "none" }, { nonce: "2" }), now)).toMatch(/ --nonce 2$/);
   });

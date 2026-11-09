@@ -37,6 +37,11 @@ export type AllowanceState = DemoState & { readonly allowance: AllowanceView };
 export const SUGGESTED_PER_PERIOD = "200000";
 export const SUGGESTED_PERIOD_SECONDS = 3_600;
 const DAY_MS = 86_400_000;
+/**
+ * The node the grant command names: the command reads `STINT_RPC_URL` and works on devnet only. Devnet's public node,
+ * whatever node the extension reads from, so that the command works in a new terminal and shows no provider's URL.
+ */
+const GRANT_RPC_URL = "https://api.devnet.solana.com";
 
 /** `17:15 UTC`. */
 export function utcTime(unixSeconds: number): string {
@@ -78,7 +83,7 @@ export function actionErrorText(toolText: string, stateError: string | undefined
 export function grantCommand(view: AllowanceView, nowMs: number): string {
   const expires = new Date(nowMs + DAY_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
   const nonce = view.nonce === "0" ? "" : ` --nonce ${view.nonce}`;
-  return `pnpm stint allowance grant --keypair "$HOME/.config/stint/allowance-owner.json" --agent ${view.agent} --per-period ${SUGGESTED_PER_PERIOD} --period ${SUGGESTED_PERIOD_SECONDS} --expires ${expires}${nonce}`;
+  return `STINT_RPC_URL=${GRANT_RPC_URL} pnpm stint allowance grant --keypair "$HOME/.config/stint/allowance-owner.json" --agent ${view.agent} --per-period ${SUGGESTED_PER_PERIOD} --period ${SUGGESTED_PERIOD_SECONDS} --expires ${expires}${nonce}`;
 }
 
 /** Said before a launch the allowance, as last read, cannot fund: the launch is still offered, and the chain refuses it. */
