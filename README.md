@@ -16,18 +16,71 @@ get back what they don't use:
 **Try it:** the [live demo](docs/live-demo.md) runs a session in Claude Desktop against a seller on devnet, with nothing
 to build: download the extension, fund the agent's wallet with test USDC, and rent time on a live stream.
 
+<p align="center">
+  <a href="https://youtu.be/PBlbQeD2K1M"><img src="docs/media/readme-demo.gif" alt="An animated illustration of the Stint panel in Claude Desktop: the agent's wallet holds USDC only, with its limits in code; the x402 exchange (POST /sessions, 402 Payment Required, PAYMENT-SIGNATURE, 201 Created); the paid time; a wallet log with a launch, a top-up and a close; and 0.156 USDC refunded at the close, 44 s used of 200 s" width="720"></a>
+  <br>
+  <sub>An illustration of a real run on devnet, from the demo video.</sub>
+</p>
+
 ## Demo
 
 | The demo video | The slides |
 |---|---|
 | [![The Stint demo video](docs/media/video-thumbnail.png)](https://youtu.be/PBlbQeD2K1M) | [![The Stint slides](docs/media/deck-cover.png)](docs/media/stint-deck.pdf) |
 
+| In Claude Desktop, paid from the agent's wallet | Funded by an owner's allowance |
+|---|---|
+| <a href="docs/live-demo.md"><img src="docs/media/readme-panel-wallet.png" alt="The Stint demo panel in Claude Desktop after an early close: paid 0.044 USDC, refunded 0.156 USDC, the agent's wallet log, the x402 exchange of the last top-up, and the session's links on Solana Explorer" width="400"></a> | <a href="docs/live-demo-allowance.md"><img src="docs/media/readme-panel-allowance.png" alt="The Stint allowance demo panel in Claude Desktop: the owner's address and USDC, the agent holding no USDC and no SOL, the allowance at 0.200 of 0.200 USDC pulled this period, a running session, and a top-up refused on-chain because the allowance for this period is used up" width="400"></a> |
+| Closed early: the seller is paid 0.044 USDC for the time used, and 0.156 USDC goes back to the agent's wallet. | The cap for this period is used up: the program refuses the next pull, and the panel says why. |
+
 - **Live demo:** [stint-demo.lxfoundry.ai](https://stint-demo.lxfoundry.ai), a seller on devnet that sells a live
   stream of Solana account changes over WebSocket, at 0.001 USDC a second. Run a session against it in Claude Desktop
   with the extension from the [latest release](https://github.com/lxfoundry/stint/releases/latest), following the
   [live demo guide](docs/live-demo.md).
+- **Allowance demo:** the same session, funded by an owner's allowance instead of the agent's own USDC, with the
+  extension from its [release](https://github.com/lxfoundry/stint/releases/tag/claude-demo-allowance-v0.1.0), following
+  [the allowance guide](docs/live-demo-allowance.md).
 - **On devnet:** the program
   [`5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr`](https://explorer.solana.com/address/5iCYPqLjCWw5KzQTU6NBUhR2hxg5SWGmS1ctUn3qESvr?cluster=devnet).
+
+## How it works
+
+Stint changes three steps of the x402 flow: the offer is a price per second, the payment and the session's opening
+are one transaction, and a gate in front of the connection ends it when the paid time ends.
+
+<p align="center">
+  <img src="docs/media/readme-slide-flow.png" alt="Three changes to the x402 flow: request, 402, pay, access. On the 402, a scheme for time: the offer carries a price per second, the time bought, a minimum and a maximum (scheme elapsed). On payment, one transaction: the agent's USDC moves into the session's vault and the session opens, and Kora pays the fee, so the agent holds only USDC. At the connection, a gate: it checks the session on Solana, opens the WebSocket, and drops the connection with close code 4402 when the paid time ends" width="720">
+</p>
+
+The messages of one session, from the offer to the refund:
+
+```mermaid
+sequenceDiagram
+  participant A as Agent (session client)
+  participant G as Gate (seller)
+  participant F as Facilitator (+ Kora)
+  participant P as Stint program
+  participant R as Resource
+  A->>G: POST /sessions?seconds=100
+  G-->>A: 402 Payment Required (elapsed offer)
+  A->>G: POST /sessions?seconds=100 + PAYMENT-SIGNATURE (open)
+  G->>F: /verify, /settle (open)
+  F->>P: open (deposit into the session's vault)
+  G-->>A: 201 {session, paidUntil, wsUrl}
+  A->>G: WebSocket connect + connect token
+  G->>R: forward (signed assertion)
+  R-->>A: data, through the gate, until the paid time ends
+  A->>G: POST /sessions/:id/close + close token
+  G->>F: /settle (close)
+  F->>P: close (pay the time used, refund the rest)
+  G-->>A: 200 {paid, refunded}
+```
+
+When the agent closes early, the program pays the seller for the time used and refunds the rest, in one transaction:
+
+<p align="center">
+  <img src="docs/media/readme-slide-close.png" alt="Closing early: the program refunds what is not used, in one transaction enforced by the Solana program. A bar split into time used and time left: the seller is paid for the time used, at least the minimum it set; the agent is refunded the rest, back to the account the deposit came from" width="720">
+</p>
 
 ## What Stint provides
 
@@ -180,6 +233,10 @@ agent's key a recurring delegation on the Solana Foundation's Subscriptions & Al
 period, a period length and an expiry, which the program enforces on-chain. The agent then pays each open and top-up
 by pulling from the owner's USDC account, in the same transaction as the open or the top-up, and its key needs no USDC
 or SOL. When a session closes early, the unused part goes back to the owner's account.
+
+<p align="center">
+  <img src="docs/media/readme-slide-allowance.png" alt="A budget the agent cannot raise: the owner's allowance is a cap per period, split into pulled this period and left in the cap. 1, granted once: the owner sets a cap per period with the Solana Foundation's Subscriptions and Allowances program. 2, pulled from it: each open and top-up is pulled in the same transaction, and an early close refunds the owner. 3, refused past it: the program refuses the pull, so no session opens" width="720">
+</p>
 
 The owner grants, checks and revokes with `pnpm stint allowance`, from the repository root (inside WSL on Windows).
 The node is read from `STINT_RPC_URL`, not from the arguments, because an RPC URL may carry an API key; the command
