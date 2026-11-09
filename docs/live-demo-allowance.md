@@ -21,7 +21,8 @@ server (steps 5b to 8). It takes about 20 minutes, most of them setting up.
 
 The table and the sample outputs below are from the Claude Code route (steps 5b to 8): it was checked with Claude Code
 2.1.318 in WSL 2 (Ubuntu 24.04) on Windows 11. With the extension (step 5), the panel suggests a grant of 0.200 USDC per
-hour, and each open and top-up is 0.100 USDC.
+hour, and each open and top-up is 0.100 USDC; step 5's screenshots are from Claude Desktop on Windows 11, with the
+owner's commands in WSL 2.
 
 ## What you need
 
@@ -136,17 +137,49 @@ at each pull.
    Desktop (Settings → Extensions → Advanced settings → Install Extension).
 2. Settings: keep the wallet folder and the gate URL; put the owner's address (`echo $OWNER`) in **Owner's address**;
    leave the nonce empty. The extension makes the agent its own key.
-3. In a new chat, ask: "Start the Stint allowance demo." The panel shows the owner's USDC, the agent's address, and,
-   with no allowance yet, the command that grants one, with the agent's address in it. Set `AGENT` to that address in
-   your terminal: step 3's agent check, and steps 7 and 9, use it.
-4. Run that command in the terminal, from the repository, with `STINT_RPC_URL` exported (step 4). The strip then shows
-   that nothing is pulled of 0.200 USDC this period, and when the period ends.
-5. **Launch**, then **Top up +100 s**: each 0.100 USDC is pulled from the owner, and the strip shows the cap used up.
-   **Close now** refunds the owner; the strip still shows 0.200 pulled. **Launch** again: refused on-chain, with the
-   reason in words.
-6. Check the money with step 7, and clean up with step 9.
+3. In a new chat, ask: "Start the Stint allowance demo." Claude calls the extension's `stint_allowance_demo` tool, and
+   the panel appears in the chat: the owner's address and USDC, the agent's address, which holds no USDC and no SOL,
+   and, with no allowance yet, the command that grants one, with the agent's address in it. Set `AGENT` to that address
+   in your terminal: step 3's agent check, and steps 7 and 9, use it.
 
-Steps 5b, 6 and 8 run the agent in Claude Code instead; steps 7 and 9 serve both routes.
+   <img src="live-demo-allowance/01-no-allowance.png" alt="The panel before the grant: the owner's address and 19.896 USDC, the agent's address, no allowance yet, and the command that grants one" width="560">
+
+4. Copy the command, and run it in the terminal, from the repository. It starts with
+   `STINT_RPC_URL=https://api.devnet.solana.com`, the node the grant reads from and sends through. In Claude Desktop,
+   **Copy** may not reach the clipboard: the panel then selects the command and says so, and Ctrl+C or Cmd+C copies it.
+   Within a few seconds, the strip shows that nothing is pulled of 0.200 USDC this period, and when the period ends.
+
+   <img src="live-demo-allowance/02-granted.png" alt="The panel after the grant: 0.000 of 0.200 USDC pulled this period, 0.200 USDC left, the period ending at 11:10 UTC" width="560">
+
+The panel reads the chain and updates itself. Claude's reply under it stays as it was written when the panel opened,
+before the grant.
+
+- **Launch** opens a 100 s session and pays 0.100 USDC for it, pulled from the owner's USDC account in the same
+  transaction: the owner's USDC log has a line for it, and the strip shows 0.100 of 0.200 pulled. The x402 exchange is
+  the [live demo](live-demo.md#5-rent-time-on-the-stream)'s: `402 Payment Required` with the seller's terms, the
+  payment in the `PAYMENT-SIGNATURE` header, then `201 Created`.
+
+  <img src="live-demo-allowance/03-running.png" alt="A running session funded by the allowance: 0.100 of 0.200 USDC pulled, 93 s of paid time left, the owner's USDC log at 19.796, and the x402 exchange" width="560">
+
+- **Top up +100 s** pulls 0.100 USDC more from the owner, and the strip shows the cap used up: 0.200 of 0.200.
+
+  <img src="live-demo-allowance/04-topped-up.png" alt="After the top-up: 0.200 of 0.200 USDC pulled, 0.000 left, 164 s of paid time left, and two lines in the owner's USDC log" width="560">
+
+- **Top up +100 s** again is refused on-chain. The agent signs and sends the payment, the seller's facilitator simulates
+  it, the Subscriptions & Allowances program fails the pull, and the gate answers `402` with `simulation_failed`. The
+  panel gives the reason in words: the allowance for this period is used up. Nothing moves, and the session runs on.
+
+  <img src="live-demo-allowance/05-top-up-refused.png" alt="The second top-up refused on-chain: the allowance for this period is used up, the gate answered simulation_failed, and the session still running" width="560">
+
+- **Close now** pays the seller for the time used and sends the rest back to the owner, not to the agent, in one
+  transaction: here 0.075 USDC paid and 0.125 refunded, and the owner holds 19.821. The strip still shows 0.200 of 0.200
+  pulled: the refund does not restore the allowance, and a **Launch** before the period ends is refused on-chain in the
+  same way.
+
+  <img src="live-demo-allowance/06-closed.png" alt="A closed session: paid 0.075 USDC, refunded 0.125 USDC, the allowance still used up, and the owner's USDC log with its Explorer links" width="560">
+
+Check the money with step 7, and clean up with step 9. Steps 5b, 6 and 8 run the agent in Claude Code instead; steps 7
+and 9 serve both routes.
 
 ## 5b. Give Claude Code the session tools, funded by the allowance
 
@@ -268,7 +301,9 @@ on with prompt 6. A top-up is refused with 13 s or less left.
 
 ## 7. Check the money
 
-The figures are from the Claude Code run. With the extension, the grant is 0.200 USDC an hour, not 0.300, and each pull is 0.100 USDC.
+The figures are from the Claude Code run. With the extension, the grant is 0.200 USDC an hour, not 0.300, and each pull
+is 0.100 USDC; the panel's owner's USDC log has a line for each movement, linked to its transaction on devnet's
+Explorer.
 
 - **The owner's USDC account:** `solana transaction-history "$OWNER_USDC" --url devnet` lists five transactions,
   newest first: the close (the refund in), the top-up and the open (each a pull out), the grant, and the faucet's

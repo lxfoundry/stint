@@ -46,7 +46,9 @@ Claude Desktop asks for:
 
 Then ask Claude, in a new chat, to start the Stint allowance demo. The panel shows the agent's address and the command
 that grants it an allowance: run it from the repository, as [Allowance funding](../../README.md#allowance-funding)
-describes, with the owner's keypair. The panel's strip shows the allowance within a few seconds.
+describes, with the owner's keypair. The command names devnet's public node in `STINT_RPC_URL`, which the grant reads.
+The panel's strip shows the allowance within a few seconds. [The allowance guide](../../docs/live-demo-allowance.md#5-the-agent-in-claude-desktop-the-allowance-extension)
+walks through a run, with screenshots.
 
 Without the extension, run the bundle from `claude_desktop_config.json`, as the first example's
 [Run it without the extension](../claude-demo/README.md#run-it-without-the-extension) does, with `STINT_DEMO_HOME`,
