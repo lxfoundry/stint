@@ -130,7 +130,8 @@ It answers `402 Payment Required`, with the `elapsed` terms in its `PAYMENT-REQU
 ## Optional: fund the agent from an allowance
 
 Instead of USDC on the agent's key, an owner can grant the agent an allowance on the Solana Foundation's Subscriptions &
-Allowances program, a cap per period enforced on-chain. It needs a terminal and Claude Code: see
+Allowances program, a cap per period enforced on-chain. The agent runs in Claude Desktop, with the allowance extension, or in Claude Code;
+the owner grants from a terminal with the repository in both cases. See
 [An agent funded by an allowance](live-demo-allowance.md).
 
 ## How it works

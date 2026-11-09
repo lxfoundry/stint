@@ -218,8 +218,9 @@ What an owner needs to know:
   delegation is revoked or expires. Choose the cap, the period and the expiry for what the owner is willing to lose if
   that key leaks.
 
-[An agent funded by an allowance](docs/live-demo-allowance.md) runs it step by step against the hosted seller, with
-Claude Code as the agent.
+[An agent funded by an allowance](docs/live-demo-allowance.md) runs it step by step against the hosted seller. The agent
+runs in Claude Desktop, with the allowance extension, or in Claude Code; the owner grants from a terminal with the
+repository in both cases.
 
 ## Examples: a seller deployment, and a session in Claude Desktop
 
@@ -229,6 +230,8 @@ its gate in one process, deployable on Fly.io as one always-on machine that sell
 Desktop: the agent's wallet, the x402 exchange, the paid time draining, a top-up, and an early close with its refund.
 The [live demo guide](docs/live-demo.md) installs it from the latest release, against the hosted seller at
 `https://stint-demo.lxfoundry.ai`, whose page at `/` describes the offer.
+[`examples/claude-demo-allowance`](examples/claude-demo-allowance/README.md) is the same session funded by an owner's
+allowance instead of the agent's own USDC.
 
 ## Deploying to devnet
 

@@ -44,6 +44,9 @@ the earlier stages it needs.
 [claude-demo.md](claude-demo.md) is not a stage: it adds an example seller deployment and an example MCP server that
 shows a Stint session in Claude Desktop, and changes no component.
 
+[claude-demo-allowance.md](claude-demo-allowance.md) is not a stage either: it adds a second Claude Desktop example,
+whose sessions are funded by an owner's allowance (section 10 of the specification), on the first example's code.
+
 ## How the program grows
 
 The program is complete only at stage 9. Its LiteSVM tests (spec §12.1) grow with it, and every
