@@ -1,0 +1,72 @@
+name: Bug report
+description: Report something that is broken or would cause a problem
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please never paste keypairs, seed phrases or `.env` contents.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - On-chain program
+        - Gate (seller side)
+        - Facilitator (Kora)
+        - Session client
+        - MCP server
+        - Examples or live demo
+        - Documentation
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Include the exact error message if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run ...
+        2. See error
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0 or a commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: cluster
+    attributes:
+      label: Cluster
+      options:
+        - Devnet
+        - Local validator or harness
+        - Unit tests only
+  - type: input
+    id: onchain
+    attributes:
+      label: Transaction signature or session account
+      description: Optional, if the problem involves a transaction or a session on Solana.
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: Optional. OS, Node, Rust, Solana and Anchor versions.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues
+          required: true
